@@ -191,6 +191,27 @@ root 落在语料根内时（如默认的 `31-收件箱`）仍写全 `31-收件�
 
 ---
 
+## 7.5 doc_convert / purge_origin / question_freq —— 收尾三件
+`powershell
+# .doc → .docx（Word COM；拒收位里的 .doc 不转），转完原 .doc 记录标 superseded
+& $py tools\doc_convert.py                 # 先看多少件
+& $py tools\doc_convert.py --apply
+& $py tools\intake.py; & $py tools\classify.py    # 新 .docx 走正常登记+分类
+
+# 删导入源里的原件：hash 在库 + 状态已入库 + 保留副本存在且在语料根内 + 路径在 --roots 白名单
+& $py tools\purge_origin.py --roots "<RESOURCE_ROOT>\就业资料" "<DOC_ROOT>\待分类"
+& $py tools\purge_origin.py --roots … --apply --rmdirs     # 明细写 build\origin_deleted.csv
+
+# 同题频次：抽文本 → 按题号切题 → SimHash 候选 + Jaccard 复核 → 按"出现的文档数"排序
+& $py tools\question_freq.py --dirs "31-收件箱\面试题" "31-收件箱\笔试" `
+      --csv "…\build\question_freq.csv" --md "docs\07-题目频次报告.md"
+`
+
+**判据与坑**：
+- purge_origin 四条判据缺一不删；--rmdirs 只清空目录，不清非空目录。
+- question_freq 的 SimHash **只当候选**：短问句抖动大（同义改写实测差 24 位、无关题也能进 12 位内），
+  真正合并靠 2-gram Jaccard ≥ 0.7 —— 这是**精度优先**，真·同义改写（0.42）会被放过，不误并。
+- 切题必须用"答案/解析/说明"截断，否则整段答案会被算成一道题（实测 583 块里大半是答案）。
 ## 8. 未实现清单（明确记录，不假装有）
 
 | 组件 | 状态 | 缺口 |

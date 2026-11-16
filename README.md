@@ -24,9 +24,12 @@ tools/
   ocr_pages.py            PaddleOCR-json 页级 OCR（渲染 → OCR → 落库）
   ingest_queue.py         可入库清单：导出 CSV / 统计 / 按 hash 与文件名查重
   pipeline.py             批增一条命令：去重 → 分类 → 清单（`--check` 只预览）
+  question_freq.py        同题频次统计：抽文本 → 切题 → SimHash+Jaccard 聚簇 → 文档频率
+  doc_convert.py          `.doc` → `.docx`（Word COM），原 `.doc` 记录标 superseded
+  purge_origin.py         删除已收入语料的原件（逐件校验 hash + 保留副本存在）
 scripts/
   补录-doc转docx.ps1       Word COM 批量 .doc → .docx（落到 30-补录 镜像树，不动源目录）
-tests/                    25 个用例（textmetrics / intake / classify / gate / 清单）
+tests/                    36 个用例（textmetrics / intake / classify / gate / 清单 / 切题）
 ```
 
 ## 快速开始
@@ -84,13 +87,15 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
 
 | 项 | 结果 |
 |---|---|
-| 语料登记 | **1,404 行（1,246 可入库 + 142 隔离区 + 16 非内容）**，全量重扫 3.5 s |
+| 语料登记 | **1,451 行 = 1,246 可入库 + 142 隔离区 + 16 非内容 + 47 superseded（`.doc` 已转 docx）**，全量重扫 4.0 s |
 | hash 速度 | 2,523 MB / 2.93 s ≈ 860 MB/s，单件 6.6 ms |
 | 跨目录同内容 | 2 对（hash 抓到；`99-重复文件待删` 的 138 件里与库内字节相同的仅 1 件） |
 | 分类分布 | 题库 456 / 真题 432 / 面经 233 / 专题笔记 125 / 非内容 16 / 未分类 0 |
 | 可入库清单 | **1,246 行，hash 唯一 1,246**（1,404 − 142 隔离 − 16 非内容） |
 | topic 分布 | 综合 689、未分类 276（题库类未命中领域，属诚实标注；本批 193 条文件名只有岗位名） |
-| 本批导入（2026-11-17） | 收件箱 798 件 → `added` 771 / `duplicate` 27（27 件全是 `3-面经分享` 里与 `11.1-公司面经故事` 同内容的副本）；落库 面经 156 / 真题 392 / 题库 223 |
+| 本批导入（2026-11-17） | 收件箱 798 件 → `added` 771 / `duplicate` 27（27 件全是 `3-面经分享` 里与 `11.1-公司面经故事` 同内容的副本）；落库 面经 156 / 真题 392 / 题库 223；导入源原件已删（798 件 / 439 MB，逐件 hash 校验通过） |
+| `.doc` 转换 | 47/47 成功（Word 2007 的 `FileFormat=12` + **zip 魔数验收**；首轮用 `SaveAs2/16` 存出的是 OLE 顶着 `.docx` 后缀的假文件，已全部删除重转），原 `.doc` 记 `superseded`、新 `.docx` 由 intake 登记，清单总量不变（`.doc` 47 → `.docx` 47） |
+| 同题频次（本批面试+笔试） | 614 份文档（4 份无文本层、0 异常）、3,289 个题目块、聚成 2,483 簇，其中 394 簇出现在 ≥2 份文档；明细 `build/question_freq.csv`（300 行）+ `docs/07-题目频次报告-2026-11-17.md` |
 | 门禁（397 个 md） | pass 338 / non_content 41 / garbled 13 / low_cjk 5 |
 | 门禁命中 | 复现 JavaGuide v1.0·V1.1·v2.0、Leetcode-Go、Nginx 手册、剑指Offer、大厂算法合集等"假成功" |
 | OCR 引擎 | PaddleOCR-json v1.4.1，初始化 0.99 s（实测 0.72–0.80 s/页） |

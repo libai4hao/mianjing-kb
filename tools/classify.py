@@ -53,11 +53,16 @@ def glob_to_re(pat: str) -> re.Pattern:
 
 
 class Rules:
+    # 目录名性质词 → (类别, 可信度)：先判面经，再笔试，最后面试（"面试技术岗"目录别被笔试题抢走）
+    DIR_HINTS = (("面经", "面经", "low"), ("笔试", "真题", "high"), ("面试", "题库", "medium"))
+
     def __init__(self):
         topic_doc = yaml.safe_load(config.TOPIC_RULES_FILE.read_text(encoding="utf-8"))
         folder_doc = yaml.safe_load(config.FOLDER_RULES_FILE.read_text(encoding="utf-8"))
         self.title_rules = [(re.compile(r["re"], re.IGNORECASE), r["topic"], r.get("sub_topic", ""))
                             for r in topic_doc.get("rules", [])]
+        self.title_only_rules = [(re.compile(r["re"], re.IGNORECASE), r["topic"], r.get("sub_topic", ""))
+                                 for r in topic_doc.get("title_only_rules", [])]
         self.folder_topics = topic_doc.get("folder_topics", {})
         self.structure = [(glob_to_re(r["match"]), r) for r in folder_doc.get("structure", [])]
         self.reject = [glob_to_re(p) for p in folder_doc.get("reject_patterns", [])]
@@ -73,17 +78,36 @@ class Rules:
 
     def category_and_trust(self, rel: str) -> tuple[str, str]:
         for rx, rule in self.structure:
-            if rx.match(rel):
+            # 兜底规则（31-收件箱/** → 未分类）不算命中：留给目录名性质词兜底，
+            # 否则收件箱里凡是没细分到三类子目录的件就永远停在未分类。
+            if rx.match(rel) and rule.get("category", config.UNCLASSIFIED) != config.UNCLASSIFIED:
                 return rule.get("category", config.UNCLASSIFIED), rule.get("source_trust", "medium")
+        hint = self.dir_hint(rel)
+        if hint:
+            return hint
         top = rel.split("/", 1)[0]
         if top.startswith(self.bank_prefixes):
             return "题库", "medium"
         return self.defaults.get("category", config.UNCLASSIFIED), self.defaults.get("source_trust", "medium")
 
+    def dir_hint(self, rel: str) -> tuple[str, str] | None:
+        """目录名里的"性质词"兜底：笔试题目录 → 真题 / 面经目录 → 面经 / 面试题目录 → 题库。
+
+        只在这几条通用词上判，且从最深一级往上找；比文件名判类稳（文件名常只有岗位与轮次）。
+        """
+        for seg in reversed(rel.split("/")[:-1]):
+            for word, cat, trust in self.DIR_HINTS:
+                if word in seg:
+                    return cat, trust
+        return None
+
     def topic(self, rel: str) -> tuple[str, str, str]:
         """返回 (topic, sub_topic, topic_source)。"""
         name = rel.rsplit("/", 1)[-1]
         for rx, topic, sub in self.title_rules:
+            if rx.search(name):
+                return topic, sub, "l1_title"
+        for rx, topic, sub in self.title_only_rules:
             if rx.search(name):
                 return topic, sub, "l1_title"
         top = self.effective_rel(rel).split("/", 1)[0]

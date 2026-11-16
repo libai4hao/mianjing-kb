@@ -33,6 +33,18 @@ rules:
   - {re: "设计模式",                     topic: 设计模式}
   - {re: "docker|Docker",               topic: Docker}
 
+# 只作用在【文件名】上的岗位/技术栈词（不进 _is_topic_like：否则 "阿里笔试非技术岗" 这类
+# 来源目录会被当成主题词剔掉，collection 退化到上一级）。命中仍记 topic_source=l1_title。
+title_only_rules:
+  - {re: '前端|React|Vue|Angular|CSS|HTML|JavaScript|TypeScript|小程序', topic: 前端}
+  - {re: 'C\+\+|C语言|C#|CSharp',         topic: C++}
+  - {re: 'Python|Django|Flask',          topic: Python}
+  - {re: '运维|DevOps|Kubernetes|K8s',    topic: 运维}
+  - {re: '大数据|Hadoop|Spark|Flink|Hive|数据开发', topic: 大数据}
+  - {re: '测试|测开|QA|自动化测试',          topic: 软件测试}
+  - {re: '产品|运营|销售|人力|行政|财务|投资|金融|市场|管培|非技术', topic: 非技术}
+  - {re: 'Java|JAVA',                     topic: Java基础}
+
 # 只在"目录名"上匹配的知识词典（比文件名保守，避免"网络版"这种包装词误判）
 # 顶层目录名 → topic 的强映射（语料现网 12 个主题目录）
 folder_topics:
