@@ -1,4 +1,4 @@
-# vibe-work
+﻿# vibe-work
 
 面经题库知识库工程的**代码与文档仓库**。语料与数据留在 `<CORPUS_ROOT>`（按方案不搬迁），
 本仓库只放可版本化的部分：方案文档、元数据规则、管线脚本、测试。
@@ -10,7 +10,7 @@
 ## 目录
 
 ```
-docs/                     方案与决策（01 部署方案 v2-R1 / 02 审核报告 / 03 未分类入库方案 / 04 工具链 SOP）
+docs/                     方案与决策（01 部署方案 v2-R1 / 02 审核报告 / 03 未分类入库方案 / 04 工具链 SOP / 05 合并轮审核）
 meta/
   001_init.sql            原文档表 schema（source_documents / batches / gate_results / ocr_pages）
   002_parent_dir.sql      parent_dir（父目录名）+ 可入库清单视图 ingest_queue
