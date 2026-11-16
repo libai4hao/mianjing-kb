@@ -55,24 +55,30 @@ def main(argv=None) -> int:
                 except OSError as ex:
                     kept.append((str(p), f"读失败:{type(ex).__name__}"))
                     continue
-                row = conn.execute(
+                rows = conn.execute(
                     "SELECT doc_hash, status, src_path, file_name FROM source_documents WHERE doc_hash=?",
                     (h,),
-                ).fetchone()
-                if row is None:
+                ).fetchall()
+                if not rows:
                     kept.append((str(p), "未收入"))
                     continue
-                if row["status"] not in OK_STATUS:
-                    kept.append((str(p), f"状态={row['status']}"))
+                # 同一 hash 可能有多行（隔离副本 / 99 区待删副本）；只有出现"已入库"行才算收入
+                ok_rows = [r for r in rows if r["status"] in OK_STATUS]
+                if not ok_rows:
+                    kept.append((str(p), "只有隔离副本:" + "/".join(sorted({r["status"] for r in rows}))))
                     continue
-                keep = Path(row["src_path"])
-                try:
-                    keep.resolve().relative_to(config.CORPUS_ROOT.resolve())
-                except ValueError:
-                    kept.append((str(p), "保留副本不在语料根内"))
-                    continue
-                if not keep.exists():
-                    kept.append((str(p), "保留副本不存在"))
+                keep = None
+                for r in ok_rows:
+                    cand = Path(r["src_path"])
+                    try:
+                        cand.resolve().relative_to(config.CORPUS_ROOT.resolve())
+                    except ValueError:
+                        continue
+                    if cand.exists():
+                        keep = cand
+                        break
+                if keep is None:
+                    kept.append((str(p), "保留副本不在语料根内或不存在"))
                     continue
                 plan.append((p, h, keep, p.stat().st_size))
 
