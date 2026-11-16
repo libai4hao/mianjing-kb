@@ -1,0 +1,25 @@
+{
+ "desc": "页眉页脚/水印剔除：短行重复>=3 判水印，页码两种形态",
+ "block_count": 1,
+ "qids": [
+  1
+ ],
+ "styles": [
+  "题号"
+ ],
+ "leftover_whys": [
+  "文档头",
+  "引用块(来源)",
+  "水印",
+  "水印",
+  "水印",
+  "页码"
+ ],
+ "contains": {
+  "0.a_text": "简明扼要"
+ },
+ "not_contains": {
+  "0.a_text": "第 1 页"
+ },
+ "coverage": true
+}

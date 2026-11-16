@@ -1,0 +1,22 @@
+{
+ "desc": "单题 >1200 token 按段落续切，续块 qid 同原题、q_text 空",
+ "block_count": 3,
+ "qids": [
+  1,
+  1,
+  1
+ ],
+ "styles": [
+  "题号",
+  "题号/续",
+  "题号/续"
+ ],
+ "leftover_whys": [],
+ "contains": {
+  "0.a_text": "段",
+  "1.q_text": "",
+  "2.a_text": "甲"
+ },
+ "not_contains": {},
+ "coverage": true
+}

@@ -1,0 +1,28 @@
+{
+ "desc": "题号混排：粘连标题(1..2) + 3、+（4）+ 5）+ 汉字一、",
+ "block_count": 6,
+ "qids": [
+  1,
+  2,
+  3,
+  4,
+  5,
+  1
+ ],
+ "styles": [
+  "题号",
+  "题号",
+  "题号",
+  "题号",
+  "题号",
+  "题号"
+ ],
+ "leftover_whys": [],
+ "contains": {
+  "0.q_text": "junit",
+  "1.q_text": "分布式锁",
+  "5.q_text": "TCP 三次握手"
+ },
+ "not_contains": {},
+ "coverage": true
+}

@@ -1,0 +1,26 @@
+{
+ "desc": "正常题+文档头+引用块+页码，span 可回溯",
+ "block_count": 2,
+ "qids": [
+  1,
+  2
+ ],
+ "styles": [
+  "题号",
+  "题号"
+ ],
+ "leftover_whys": [
+  "文档头",
+  "引用块(来源)",
+  "页码"
+ ],
+ "contains": {
+  "0.q_text": "JVM",
+  "1.q_text": "HashMap",
+  "1.a_text": "红黑树"
+ },
+ "not_contains": {
+  "1.a_text": "第 3 页"
+ },
+ "coverage": true
+}

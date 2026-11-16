@@ -1,0 +1,22 @@
+{
+ "desc": "图片占位归属前一个题块",
+ "block_count": 2,
+ "qids": [
+  1,
+  2
+ ],
+ "styles": [
+  "题号",
+  "题号"
+ ],
+ "leftover_whys": [],
+ "icons": {
+  "0": 1,
+  "1": 0
+ },
+ "contains": {
+  "1.q_text": "ARP"
+ },
+ "not_contains": {},
+ "coverage": true
+}

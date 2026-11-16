@@ -1,0 +1,14 @@
+## 1. 写一个线程安全的单例模式
+
+```java
+1. public class Singleton {
+2.   private static Singleton instance;
+3. }
+```
+
+| 特性 | HashMap | Hashtable |
+| 1. 线程安全 | 否 | 是 |
+
+## 2. volatile 的作用是什么？
+
+禁止指令重排序。

@@ -1,0 +1,21 @@
+{
+ "desc": "目录页（点线+行尾页码）不产出题目",
+ "block_count": 1,
+ "qids": [
+  1
+ ],
+ "styles": [
+  "题号"
+ ],
+ "leftover_whys": [
+  "文档头",
+  "目录行"
+ ],
+ "contains": {
+  "0.q_text": "进程"
+ },
+ "not_contains": {
+  "0.a_text": "第一章"
+ },
+ "coverage": true
+}

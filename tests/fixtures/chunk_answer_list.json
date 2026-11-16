@@ -1,0 +1,19 @@
+{
+ "desc": "答案内编号列表（1-4 连续 + 空行重启 + 2. 紧跟正文）均不判新题",
+ "block_count": 2,
+ "qids": [
+  1,
+  2
+ ],
+ "styles": [
+  "题号",
+  "题号"
+ ],
+ "leftover_whys": [],
+ "contains": {
+  "0.a_text": "1. 乐观锁",
+  "1.a_text": "2. 补充列表"
+ },
+ "not_contains": {},
+ "coverage": true
+}
