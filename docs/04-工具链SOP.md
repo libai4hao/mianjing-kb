@@ -110,7 +110,7 @@ Nginx 开发手册 0.092、剑指Offer 0.062、大厂算法合集 0.135、数据
 & $py -m pytest tests -q
 ```
 
-19 个用例覆盖：文本指标与阈值、intake 的新增/重复/改名/复活/同批重复、classify 的 topic/结构位/collection/未分类、gate 的三种 verdict 与报告落盘。
+32 个用例覆盖：文本指标与阈值、intake 的新增/重复/改名/复活/同批重复/移入隔离区/派生树排除、classify 的 topic/结构位/collection/未分类、gate 的三种 verdict 与报告落盘、bookmarks 的段区间/章节不误判/落库。
 
 ---
 
@@ -126,15 +126,38 @@ Nginx 开发手册 0.092、剑指Offer 0.062、大厂算法合集 0.135、数据
 & $py tools\ingest_queue.py --db $db --lookup "设计模式"                # 按文件名片段
 ```
 
-当前基线：**481 行，hash 唯一 481**；父目录 top：`12-综合题库` 49、`高频面试题-笔记资料01-34` 39、
-`面向字节系列` 35、`这是Java面试题资料合集` 22、`06-Spring框架` 22。
+当前基线：**475 行，hash 唯一 475**；父目录 top：`12-综合题库` 49、`高频面试题-笔记资料01-34` 39、
+`面向字节系列` 33、`这是Java面试题资料合集` 21、`06-Spring框架` 22。
 
 用途：① 人眼核对这一批到底入哪些；② 快速去重——新文件先按 hash 比对这张表。
 
 ---
 
-## 7. pipeline.py —— 批增一条命令
+## 6.5 bookmarks.py —— 合并版"源边界"落库（删 99 区的硬 gate）
 
+合并轮把 110 个源并入 23 份 `【合并版】*.pdf`，md 侧已无源边界（0 个一级标题、源名无痕迹），
+唯一载体是 PDF TOC 的 L1 书签。删除 `99-重复文件待删` **之前必须先跑本脚本**（ADR D-16 / D-17）。
+
+```powershell
+& $py tools\bookmarks.py --dry-run    # 先看统计
+& $py tools\bookmarks.py              # 增量：只补 source_count 为空的
+& $py tools\bookmarks.py --force      # 全部重扫（合并版重做过才需要）
+```
+
+产出 `source_documents.source_count` 与 `sources_json`：
+`[{"name":"51道.pdf","page_start":1,"page_end":23}, ...]`（页号 1-based，闭区间）。
+
+**判据（踩过的坑）**：源边界只认"**L1 标题形如文件名**"（`.pdf/.docx/.doc/.md/.pptx/.txt` 结尾）。
+普通 PDF 的 L1 是章节标题，若把"L1 条数"一律当源数，291 份 PDF 会被算成 119 份合并版 / 3,338 个源。
+无源级书签的按单源处理并写 `from: fallback_no_source_toc`，不静默。
+
+实测（2026-11-17）：291 份 PDF / **合并版 23 份 / 源 110 个** / 单源 268 / 1.9 s；
+JVM 合集 11 段（p1–23, 24–56, 57–80, 81–95, 96–105, 106–134, 135–144, 145–154, 155–174, 175–194, 195–214），
+Mongo 4 段（p1–6, 7–10, 11–17, 18–23），与审核时的页数校验完全一致。
+
+---
+
+## 7. pipeline.py —— 批增一条命令
 ```powershell
 & $py tools\pipeline.py              # 处理 31-收件箱：去重登记 → 分类 → 清单
 & $py tools\pipeline.py --check      # 只预览，不写库（先用这个确认重不重）

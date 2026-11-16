@@ -30,6 +30,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     sql = SCHEMA_FILE.read_text(encoding="utf-8")
     conn.executescript(sql)
     _ensure_parent_dir(conn)
+    _ensure_source_spans(conn)
     conn.commit()
 
 
@@ -55,6 +56,13 @@ def _ensure_parent_dir(conn: sqlite3.Connection) -> None:
           AND dir_path NOT LIKE '99-重复文件待删%'
         """
     )
+
+
+def _ensure_source_spans(conn: sqlite3.Connection) -> None:
+    """补合并版"源边界"字段（003）：source_count / sources_json（见 meta/schema/003）。"""
+    for col, decl in (("source_count", "INTEGER"), ("sources_json", "TEXT")):
+        if not _column_exists(conn, "source_documents", col):
+            conn.execute(f"ALTER TABLE source_documents ADD COLUMN {col} {decl}")
 
 
 @contextmanager

@@ -1,0 +1,8 @@
+-- 003：合并版"源边界"落库（R2 §5.2 / ADR D-16）
+-- 合并轮把 110 个源并入 23 份合并版；md 侧已丢失源边界（0 个一级标题、源名无痕迹），
+-- 唯一载体是 PDF TOC 的 L1 书签（= 源文件名 + 起始页）。删 99 区之前必须先把这层映射落库。
+--
+-- source_count  该文档由几个源合并而成（非合并版为 1；无书签时记 1 且 from=fallback_no_toc）
+-- sources_json  [{"name":"51道.pdf","page_start":1,"page_end":23}, ...]
+--
+-- 列用 ALTER 添加（幂等探列），见 tools/kb/db.py::_ensure_source_spans。

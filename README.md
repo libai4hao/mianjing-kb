@@ -113,7 +113,7 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
 
 - `classify --neighbor`（近邻判类）：需要文档向量索引，第②档归因；
 - `cluster`（增量吸附）：canonical 表已建，算法未写；
-- `reconcile`（四数对账）：用于清 `ok=423 vs 产物 397` 那 26 条旧账；
+- `reconcile`（四数对账）：用于清 `ok=423 vs 产物 391` 那 32 条旧账；
 - `dispatch` / `extract`：v2 §6 里的拆题与分发环节。
 
 详见 `docs/04-工具链SOP.md` 的"未实现清单"。
