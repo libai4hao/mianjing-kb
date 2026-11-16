@@ -11,7 +11,7 @@ Shell：pwsh 7（`C:\Program Files\PowerShell\7\pwsh.exe`）。所有中文路�
 
 ```powershell
 $py = "python"
-$repo = "<WORKSPACE_ROOT>"
+$repo = "<REPO_ROOT>"
 $db = "<CORPUS_ROOT>\21-面经数据库\build\kb.sqlite"
 Set-Location -LiteralPath $repo
 ```

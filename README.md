@@ -3,8 +3,9 @@
 面经题库知识库工程的**代码与文档仓库**。语料与数据留在 `<CORPUS_ROOT>`（按方案不搬迁），
 本仓库只放可版本化的部分：方案文档、元数据规则、管线脚本、测试。
 
-> 仓库位置按用户指定放在 `<WORKSPACE_ROOT>`；此前约定是"新项目统一放 `<REPO_BASE>`"，
-> 这里属于**有意识偏离**，原因见 `docs/00-决策记录.md` D-09。
+> 仓库根为 `<REPO_ROOT>`（父目录 `vibe-work` 是共用工作区，另有 `公开课视频转文档`
+> 等无关项目，不在本仓库内）。此前约定是"新项目统一放 `<REPO_BASE>`"，这里属于**有意识偏离**，
+> 原因见 `docs/00-决策记录.md` D-09。
 
 ## 目录
 
@@ -29,7 +30,9 @@ tests/                    19 个用例（textmetrics / intake / classify / gate�
 
 ```powershell
 $py = "python"
+$repo = "<REPO_ROOT>"
 $db = "<CORPUS_ROOT>\21-面经数据库\build\kb.sqlite"
+Set-Location -LiteralPath $repo
 
 # 1. 登记（建表 + hash 判重；写库）
 & $py tools\intake.py --db $db
