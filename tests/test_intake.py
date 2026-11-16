@@ -197,3 +197,25 @@ def test_derived_tree_never_becomes_source(tmp_path, capsys):
     total = conn.execute("SELECT COUNT(*) FROM source_documents").fetchone()[0]
     conn.close()
     assert total == 0
+
+
+def test_subdir_scan_keeps_corpus_prefix(tmp_path, capsys, monkeypatch):
+    """只扫收件箱时也要登记 31-收件箱/ 前缀。
+
+    否则 dir_path 丢掉前缀，folder_rules 的 31-收件箱/面经/** 结构位规则永远失配
+    → 整批 771 件被判未分类（本轮实际踩过的坑）。
+    """
+    root = tmp_path / "corpus"
+    inbox = root / "31-收件箱" / "面经"
+    inbox.mkdir(parents=True)
+    (inbox / "阿里面经.pdf").write_bytes(b"%PDF-1.4 alibaba mianjing")
+
+    from kb import config
+    monkeypatch.setattr(config, "CORPUS_ROOT", root)
+
+    db_path = tmp_path / "kb.sqlite"
+    assert main(["--root", str(root / "31-收件箱"), "--db", str(db_path)]) == 0
+    capsys.readouterr()
+    row = rows(db_path)[0]
+    assert row["dir_path"] == "31-收件箱/面经"
+    assert row["parent_dir"] == "面经"

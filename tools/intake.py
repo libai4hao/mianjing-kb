@@ -65,10 +65,25 @@ def is_quarantine(rel_dir: str) -> bool:
     return rel_dir == q or rel_dir.startswith(q + "/")
 
 
+def scan_base(root: Path) -> Path:
+    """路径一律相对**语料根**登记，即使只扫子目录（如 31-收件箱）也不例外。
+
+    否则 dir_path 会变成 "面经/2026-11-17-.../阿里/..."，丢掉 31-收件箱 前缀，
+    folder_rules 里 31-收件箱/面经/** 这类结构位规则永远匹配不上 → 全判未分类。
+    根在语料之外（外部目录直接导入）时退回自身。
+    """
+    try:
+        root.relative_to(config.CORPUS_ROOT)
+        return Path(config.CORPUS_ROOT)
+    except ValueError:
+        return root
+
+
 def iter_files(root: Path, all_exts: bool):
     """遍历所有文件，产出 (path, rel, ext, size|None, quarantined)。"""
+    base = scan_base(root)
     for dirpath, dirnames, filenames in os.walk(root):
-        rel_dir = rel_posix(Path(dirpath), root)
+        rel_dir = rel_posix(Path(dirpath), base)
         if is_excluded(rel_dir):
             dirnames[:] = []
             continue
@@ -77,13 +92,13 @@ def iter_files(root: Path, all_exts: bool):
             p = Path(dirpath) / fn
             ext = p.suffix.lower()
             if not all_exts and ext not in config.DOC_EXTS:
-                yield p, rel_posix(p, root), ext, None, quarantined
+                yield p, rel_posix(p, base), ext, None, quarantined
                 continue
             try:
                 size = p.stat().st_size
             except OSError:
                 continue
-            yield p, rel_posix(p, root), ext, size, quarantined
+            yield p, rel_posix(p, base), ext, size, quarantined
 
 
 def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False) -> tuple[str, str]:
