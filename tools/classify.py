@@ -155,6 +155,130 @@ class Rules:
         }
 
 
+def _title_norm(name: str) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", name.rsplit(".", 1)[0].lower())
+
+
+def _grams(s: str) -> set:
+    return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else ({s} if s else set())
+
+
+def neighbor_vote(target_name: str, category: str,
+                  refs: list[tuple[str, str, str]], top_k: int = 5,
+                  min_jac: float = 0.45, min_conf: float = 0.6) -> dict:
+    """近邻判类（归因②档）：与同类目已入库文档做标题 2-gram Jaccard top-k 加权投票。
+
+    refs = [(file_name, topic, sub_topic)]；只投非"综合"领域。
+    返回 {"topic","sub_topic","confidence","best_jac","neighbors":[...]}；不达线 topic=未分类。
+    """
+    tg = _grams(_title_norm(target_name))
+    scored = []
+    for fname, topic, sub in refs:
+        if not topic or topic == "综合":
+            continue
+        j = jaccard_local(tg, _grams(_title_norm(fname)))
+        if j >= min_jac:
+            scored.append((j, topic, sub or "", fname))
+    if not scored:
+        return {"topic": config.UNCLASSIFIED, "sub_topic": "", "confidence": 0.0,
+                "best_jac": 0.0, "neighbors": []}
+    scored.sort(key=lambda x: -x[0])
+    top = scored[:top_k]
+    votes: dict[str, float] = {}
+    sub_of: dict[str, str] = {}
+    for j, topic, sub, _ in top:
+        votes[topic] = votes.get(topic, 0.0) + j
+        sub_of.setdefault(topic, sub)
+    total = sum(votes.values())
+    topic, w = max(votes.items(), key=lambda kv: kv[1])
+    conf = w / total if total else 0.0
+    if conf < min_conf:
+        return {"topic": config.UNCLASSIFIED, "sub_topic": "", "confidence": round(conf, 3),
+                "best_jac": top[0][0], "neighbors": [(f, t, round(j, 3)) for j, t, s, f in top]}
+    return {"topic": topic, "sub_topic": sub_of.get(topic, ""), "confidence": round(conf, 3),
+            "best_jac": top[0][0], "neighbors": [(f, t, round(j, 3)) for j, t, s, f in top]}
+
+
+def jaccard_local(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def run_neighbor(conn, rules, dry_run: bool = False, show: int = 0) -> int:
+    """归因②档：topic=未分类 的已入库件 ← 同类目已入库件标题近邻投票。
+
+    置信 ≥0.6 自动应用（topic_source='neighbor'）；不达线写 build/topic_neighbor_review.csv 待人工。
+    """
+    import csv as _csv
+    uncls = conn.execute(
+        "SELECT doc_hash, dir_path, file_name, category FROM source_documents "
+        "WHERE status='classified' AND topic=? ORDER BY dir_path", (config.UNCLASSIFIED,)).fetchall()
+    refs = conn.execute(
+        "SELECT file_name, topic, sub_topic, category FROM source_documents "
+        "WHERE status='classified' AND topic NOT IN (?, '')",
+        (config.UNCLASSIFIED,)).fetchall()
+    ref_by_cat: dict[str, list] = {}
+    for r in refs:
+        ref_by_cat.setdefault(r["category"], []).append((r["file_name"], r["topic"], r["sub_topic"]))
+    print(f"[neighbor] 未分类 {len(uncls)} 件，参照池 "
+          f"{ {k: len(v) for k, v in ref_by_cat.items()} }", flush=True)
+
+    applied, review = [], []
+    for r in uncls:
+        res = neighbor_vote(r["file_name"], r["category"],
+                            ref_by_cat.get(r["category"], []))
+        rec = {"dir_path": r["dir_path"], "file_name": r["file_name"], "category": r["category"],
+               "proposal_topic": res["topic"], "sub_topic": res["sub_topic"],
+               "confidence": res["confidence"], "best_jac": res["best_jac"],
+               "neighbors": "; ".join(f"{f}→{t}({j})" for f, t, j in res["neighbors"][:3])}
+        # 只自动应用"同题双格式"级命中（jac≥0.9 且置信≥0.6）；
+        # 0.45~0.9 的提案仅入待人工清单——实测"技术岗面试"会被投给"非技术岗面试"(0.8)，
+        # 字面子串陷阱，不许自动落库。
+        if res["topic"] != config.UNCLASSIFIED and res["best_jac"] >= 0.9 and res["confidence"] >= 0.6:
+            applied.append((r["doc_hash"], r, res, rec))
+        else:
+            rec["proposal_topic"] = f"<待人工:{res['topic']}>" if res["topic"] != config.UNCLASSIFIED else "<待人工>"
+            review.append(rec)
+
+    if not dry_run:
+        from datetime import datetime
+        for doc_hash, r, res, _rec in applied:
+            conn.execute(
+                "UPDATE source_documents SET topic=?, sub_topic=?, topic_source='neighbor', "
+                "classified_at=? WHERE doc_hash=?",
+                (res["topic"], res["sub_topic"], datetime.now().strftime(NOW_FMT), doc_hash))
+        conn.commit()
+
+    rp = config.BUILD_DIR / "topic_neighbor_review.csv"
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    with rp.open("w", encoding="utf-8-sig", newline="") as fh:
+        w = _csv.DictWriter(fh, fieldnames=["dir_path", "file_name", "category", "proposal_topic",
+                                            "sub_topic", "confidence", "best_jac", "neighbors"])
+        w.writeheader()
+        for _, _, _, rec in applied:
+            w.writerow(rec)
+        for rec in review:
+            w.writerow(rec)
+
+    from collections import Counter
+    top = Counter(res["topic"] for _, _, res, _ in applied)
+    print(json.dumps({
+        "unclassified": len(uncls),
+        "auto_applied": len(applied) if not dry_run else 0,
+        "would_apply": len(applied),
+        "topic_dist": dict(top.most_common()),
+        "review_left": len(review),
+        "dry_run": dry_run,
+    }, ensure_ascii=False, indent=1))
+    print(f"[review] {len(review)} 件待人工 → {rp}")
+    if show:
+        print("\n--- 自动应用抽样 ---")
+        for doc_hash, r, res, _rec in applied[:show]:
+            print(f"  {res['topic']:<8} conf={res['confidence']:<6} jac={res['best_jac']:<6} {r['file_name'][:70]}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="按规则给源文档打分类")
     ap.add_argument("--db", default=str(config.DB_PATH))
@@ -164,14 +288,17 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="不写库")
     ap.add_argument("--stats", action="store_true", help="只打印分布")
     ap.add_argument("--show", type=int, default=0, help="打印前 N 条判定结果")
-    ap.add_argument("--neighbor", action="store_true", help="近邻判类（需向量索引，未实现）")
+    ap.add_argument("--neighbor", action="store_true",
+                    help="近邻判类：给 topic=未分类 的已入库件做标题近邻投票（自动应用 ≥0.6 置信，其余出待人工清单）")
     args = ap.parse_args(argv)
-
-    if args.neighbor:
-        print("[skip] --neighbor 未实现：需要先建文档向量索引（见 docs/03 §8.4 第②档）")
 
     conn = db.connect(args.db, create=not args.dry_run)
     rules = Rules()
+
+    if args.neighbor:
+        rc = run_neighbor(conn, rules, dry_run=args.dry_run, show=args.show)
+        conn.close()
+        return rc
 
     if args.stats:
         for field in ("status", "category", "topic", "source_trust", "collection"):
