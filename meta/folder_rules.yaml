@@ -1,0 +1,50 @@
+# 目录规则：把"目录名"当作元数据源（docs/03 §9）
+# 匹配对象是 posix 风格相对路径（dir_path/file_name），'*' 匹配单段，'**' 匹配多段。
+# 一条规则只覆盖它写了字段，其余交给下一条或默认值。
+
+version: 1
+
+# 包装词：出现在目录名里但不代表内容来源，命名 collection 时剔除
+ignore_segments:
+  - Markdown版
+  - 原创PDF面试手册
+  - 图解课件
+  - 简历模板
+  - 面试题精华集
+
+# 结构位 → 类别 / 来源可信度（11.1 个人叙事最弱，11.2 真题最强）
+structure:
+  - match: "11-面经与真题/11.1-*/**"
+    category: 面经
+    source_trust: low
+  - match: "11-面经与真题/11.2-*/**"
+    category: 真题
+    source_trust: high
+  - match: "11-面经与真题/11.3-*/**"
+    category: 专题笔记
+    source_trust: low
+  - match: "12-综合题库/**"
+    category: 题库
+    source_trust: medium
+  - match: "31-收件箱/**"
+    category: 未分类
+    source_trust: low
+
+# 顶层主题目录 → 题库（01~10）
+top_level_bank_prefixes:
+  - "01-"
+  - "02-"
+  - "03-"
+  - "04-"
+  - "05-"
+  - "06-"
+  - "07-"
+  - "08-"
+  - "09-"
+  - "10-"
+  - "12-"
+
+defaults:
+  category: 未分类
+  source_trust: medium
+  topic: 未分类

@@ -1,0 +1,49 @@
+# 文件名 → topic 规则（顺序敏感，先专后泛）
+# 来源：语料内 21-面经数据库/tools/inventory.py 的 TOPIC_BY_TITLE（30 条），
+# 这里外置为配置，便于新增领域时不用改代码。
+# 命中即定，且 topic_source 记为 l1_title。
+
+version: 1
+rules:
+  - {re: "MongoDB|MongDB",              topic: MongoDB}
+  - {re: "MyBatis|Mybatis",             topic: MyBatis}
+  - {re: "SpringBoot|springboot",       topic: SpringBoot}
+  - {re: "SpringCloud|springcloud|微服务", topic: SpringCloud}
+  - {re: "SpringMVC|Spring MVC",        topic: SpringMVC}
+  - {re: "Spring(?!Boot|Cloud)",        topic: Spring}
+  - {re: "Tomcat",                      topic: Tomcat}
+  - {re: "Dubbo|dubbo",                 topic: Dubbo}
+  - {re: "Zookeeper|ZooKeeper",         topic: Zookeeper}
+  - {re: "Nginx",                       topic: Nginx}
+  - {re: "RabbitMQ",                    topic: RabbitMQ}
+  - {re: "Kafka|kafka",                 topic: Kafka}
+  - {re: "RocketMq|RocketMQ",            topic: RocketMQ}
+  - {re: "Netty",                       topic: Netty}
+  - {re: "ElasticSearch",               topic: ElasticSearch}
+  - {re: "Memcache|memcached",          topic: Memcached}
+  - {re: "ActiveMQ",                    topic: ActiveMQ}
+  - {re: "Redis|redis",                 topic: Redis}
+  - {re: "MySQL|Mysql|mysql|数据库|索引|SQL", topic: MySQL}
+  - {re: "JVM|Java虚拟机",               topic: JVM}
+  - {re: "并发|多线程|线程|JUC|AQS|锁",    topic: 并发编程}
+  - {re: "Linux",                       topic: Linux}
+  - {re: "TCP|UDP|Http|Socket|计算机网络|网络", topic: 计算机网络}
+  - {re: "操作系统",                     topic: 操作系统}
+  - {re: "算法|LeetCode|剑指|数据结构|刷题", topic: 算法}
+  - {re: "设计模式",                     topic: 设计模式}
+  - {re: "docker|Docker",               topic: Docker}
+
+# 只在"目录名"上匹配的知识词典（比文件名保守，避免"网络版"这种包装词误判）
+# 顶层目录名 → topic 的强映射（语料现网 12 个主题目录）
+folder_topics:
+  01-Java基础: Java基础
+  02-JVM: JVM
+  03-并发编程: 并发编程
+  04-MySQL与数据库: MySQL
+  05-Redis: Redis
+  06-Spring框架: Spring
+  07-消息队列与分布式: 消息队列
+  08-计算机网络与操作系统: 计算机网络
+  09-算法与数据结构: 算法
+  10-设计模式与架构: 设计模式
+  12-综合题库: 未分类

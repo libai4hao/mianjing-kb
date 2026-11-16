@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# 数据与产物：语料在 D 盘，不进版本库
+build/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.log
+*.json.tmp
+
+# 本目录既有的、与本工程无关的历史内容（未纳管，保持原样）
+/公开课视频转文档/
+/ilprobe.exe
