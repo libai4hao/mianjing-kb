@@ -126,6 +126,11 @@ def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False) 
             return "duplicate", prev          # 原件还在正式区 → 99 里的只是散副本，不能夺主
         # 原件已被移进隔离区（过时件清理走这条路）：改路径并把状态转 quarantined
         return "to_quarantine", "quarantined"
+    if prev == "quarantined" and not quarantined:
+        # 隔离区（99-重复文件待删）里的副本只是"待删副本"，不是可靠来源。
+        # 正式区又见到同内容 → 内容要回正式区重新走分类，否则"库里只有隔离副本"的件
+        # 永远不会进库（曾踩：Spring系列面试题129道 只判 duplicate，既不导入也不判重）。
+        return "revived", "pending_classify"
     if full_rel == rel:
         return "duplicate", prev
     if src and Path(src).exists():
@@ -214,12 +219,14 @@ def main(argv=None) -> int:
                 added += 1
             elif write_conn is not None:
                 now = datetime.now().strftime(NOW_FMT)
-                if action in ("moved", "renamed", "resurrected", "to_quarantine"):
+                if action in ("moved", "renamed", "resurrected", "to_quarantine", "revived"):
+                    old_src = db.get_by_hash(conn, doc_hash)["src_path"] if action == "revived" else None
+                    note = (f"revived_from:{old_src}" if action == "revived"
+                            else f"{action}_from:{rel}")
                     write_conn.execute(
                         "UPDATE source_documents SET dir_path=?, parent_dir=?, file_name=?, src_path=?, "
                         "last_seen_at=?, note=? WHERE doc_hash=?",
-                        (dir_of(rel), parent_of(rel), p.name, str(p), now,
-                         f"{action}_from:{rel}", doc_hash),
+                        (dir_of(rel), parent_of(rel), p.name, str(p), now, note, doc_hash),
                     )
                 else:
                     # duplicate：只更新"最后见到"，绝不改路径。
@@ -227,7 +234,7 @@ def main(argv=None) -> int:
                     write_conn.execute(
                         "UPDATE source_documents SET last_seen_at=? WHERE doc_hash=?", (now, doc_hash)
                     )
-                if action in ("resurrected", "to_quarantine"):
+                if action in ("resurrected", "to_quarantine", "revived"):
                     write_conn.execute("UPDATE source_documents SET status=? WHERE doc_hash=?", (status_after, doc_hash))
 
         if write_conn is not None:

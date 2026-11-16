@@ -219,3 +219,27 @@ def test_subdir_scan_keeps_corpus_prefix(tmp_path, capsys, monkeypatch):
     row = rows(db_path)[0]
     assert row["dir_path"] == "31-收件箱/面经"
     assert row["parent_dir"] == "面经"
+
+
+def test_content_only_in_quarantine_is_revived_not_duplicate(corpus, tmp_path, capsys):
+    """99 区里的副本只是待删副本；正式区再见到同内容时，内容必须回正式区重新分类，
+    不能一律判 duplicate（否则"库里只有隔离副本"的件既不入库也不留痕）。"""
+    db_path = tmp_path / "kb.sqlite"
+    main(["--root", str(corpus), "--db", str(db_path)])
+    capsys.readouterr()
+    # 正式区放进一份与 99 区旧件同内容、同 hash 的文件
+    (corpus / "12-综合题库" / "旧件副本.pdf").write_bytes(b"%PDF-1.4 old dup")
+    main(["--root", str(corpus), "--db", str(db_path)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert summary["actions"]["revived"] == 1
+    row = [r for r in rows(db_path) if r["file_name"] == "旧件副本.pdf"][0]
+    assert row["status"] == "pending_classify"
+    assert row["src_path"].endswith("旧件副本.pdf")
+    assert row["note"].startswith("revived_from:")
+    # 回到 99 区那一侧的文件仍算重复，不会把路径与状态又改回去
+    main(["--root", str(corpus), "--db", str(db_path)])
+    again = json.loads(capsys.readouterr().out)
+    assert again["actions"].get("revived", 0) == 0
+    assert [r["status"] for r in rows(db_path)
+            if r["file_name"] == "旧件副本.pdf"] == ["pending_classify"]
