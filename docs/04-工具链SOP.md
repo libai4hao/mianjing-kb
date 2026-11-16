@@ -113,7 +113,51 @@ Nginx 开发手册 0.092、剑指Offer 0.062、大厂算法合集 0.135、数据
 
 ---
 
-## 6. 未实现清单（明确记录，不假装有）
+## 6. ingest_queue.py —— 可入库清单（文件表）
+
+视图 `ingest_queue` = `status='classified'`（已排除 `rejected` 非内容与 `quarantined` 隔离区件）。
+清单字段：`doc_hash, file_name, parent_dir(父目录名), dir_path, ext, size_bytes, category, topic, collection, source_trust`。
+
+```powershell
+& $py tools\ingest_queue.py --db $db --export "<CORPUS_ROOT>\21-面经数据库\build\ingest_list.csv"
+& $py tools\ingest_queue.py --db $db --stats
+& $py tools\ingest_queue.py --db $db --lookup "3afb55d83ce320e0"      # 按 hash
+& $py tools\ingest_queue.py --db $db --lookup "设计模式"                # 按文件名片段
+```
+
+当前基线：**481 行，hash 唯一 481**；父目录 top：`12-综合题库` 49、`高频面试题-笔记资料01-34` 39、
+`面向字节系列` 35、`这是Java面试题资料合集` 22、`06-Spring框架` 22。
+
+用途：① 人眼核对这一批到底入哪些；② 快速去重——新文件先按 hash 比对这张表。
+
+---
+
+## 7. pipeline.py —— 批增一条命令
+
+```powershell
+& $py tools\pipeline.py              # 处理 31-收件箱：去重登记 → 分类 → 清单
+& $py tools\pipeline.py --check      # 只预览，不写库（先用这个确认重不重）
+& $py tools\pipeline.py --root "<DOWNLOAD_DIR>\新面经"    # 任意目录
+& $py tools\pipeline.py --export "…\build\ingest_list.csv"
+```
+
+内部就是串 `intake.py --root <dir>` → `classify.py --status pending_classify` → `ingest_queue.py`。
+任一步失败会打印失败脚本与 stderr 尾部，不静默继续。
+
+**判重口径**（本轮修掉的两个真实缺陷，见 ADR D-12）：
+
+| 情况 | 判定 | 为什么 |
+|---|---|---|
+| 新哈希 | `added` | 插 `pending_classify` |
+| 同哈希、同路径 | `duplicate` | 只刷 `last_seen_at` |
+| 同哈希、原件**仍在**磁盘 | `duplicate` | 这是副本；**不许**把库里那条记录的位置改走 |
+| 同哈希、原件已不在原处 | `moved`/`renamed` | 真移动/改名，改路径但**状态不降级** |
+| `99-重复文件待删` 下 | `quarantined`，若哈希已存在则 `duplicate` | 隔离区永不入库、永不夺主 |
+| 曾 `absent` 又回来 | `resurrected` | 复用原分类结果 |
+
+---
+
+## 8. 未实现清单（明确记录，不假装有）
 
 | 组件 | 状态 | 缺口 |
 |---|---|---|
@@ -122,11 +166,11 @@ Nginx 开发手册 0.092、剑指Offer 0.062、大厂算法合集 0.135、数据
 | `reconcile`（四数对账） | 未实现 | 磁盘 / 表 / convert_log / DB 四数闭合，用来清 `ok=423 vs 397` 的 26 条旧账 |
 | `dispatch.py` | 未实现 | 按 category 选拆题策略（题库→parse_banks，面经→extract，专题→只索引） |
 | `extract.py` | 未实现 | 面经抽题 + 公司/年份归一 |
-| `30-补录` / `31-收件箱` | 未建目录 | 补录脚本只跑过 `-DryRun`（41 个 doc 命中） |
+| `30-补录` / `31-收件箱` | `31-收件箱` 已建（空）；`30-补录` 未建 | 补录脚本只跑过 `-DryRun`（41 个 doc 命中） |
 
 ---
 
-## 7. 已知陷阱
+## 9. 已知陷阱
 
 | 现象 | 原因 | 对策 |
 |---|---|---|

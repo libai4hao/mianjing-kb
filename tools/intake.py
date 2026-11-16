@@ -43,6 +43,14 @@ def dir_of(rel: str) -> str:
     return rel.rsplit("/", 1)[0] if "/" in rel else ""
 
 
+def parent_of(rel: str) -> str:
+    """父目录名（最后一级目录）；根目录直属的记为 <顶层直属>。"""
+    d = dir_of(rel)
+    if not d:
+        return "<顶层直属>"
+    return d.rsplit("/", 1)[-1]
+
+
 def is_excluded(rel_dir: str) -> bool:
     return any(rel_dir == p or rel_dir.startswith(p + "/") for p in config.EXCLUDE_PREFIXES)
 
@@ -73,22 +81,29 @@ def iter_files(root: Path, all_exts: bool):
             yield p, rel_posix(p, root), ext, size, quarantined
 
 
-def decide(conn, doc_hash: str, rel: str, name: str) -> tuple[str, str]:
+def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False) -> tuple[str, str]:
     """返回 (action, status_after)。
 
     关键约束：移动 / 改名**不能**改变已有状态（否则 processed 会被降级成 moved，
     已入库的成果就"回滚"了）。只有"曾删除又回来"才允许重置状态。
+    隔离区里的文件即使内容与库内相同，也只算重复，不能把库内记录的路径改到隔离区。
+    原件仍在磁盘上时同样只算重复——否则往收件箱丢一份副本，会把库里那条记录的位置改走。
     """
     row = db.get_by_hash(conn, doc_hash)
     if row is None:
         return "added", "pending_classify"
     prev = row["status"]
+    if quarantined:
+        return "duplicate", prev
     if prev == "absent":
         # 先判"曾删除又回来"：这类文件必须复用原结果，不能被当成普通重复件
         return "resurrected", ("classified" if row["category"] else "pending_classify")
     full_rel = f"{row['dir_path']}/{row['file_name']}" if row["dir_path"] else row["file_name"]
     if full_rel == rel:
         return "duplicate", prev
+    src = row["src_path"]
+    if src and Path(src).exists():
+        return "duplicate", prev              # 原件还在 → 这次见到的是副本
     new_dir = dir_of(rel)
     old_dir = row["dir_path"] or ""
     if row["file_name"] != name:
@@ -144,10 +159,12 @@ def main(argv=None) -> int:
             if conn is None:
                 actions["candidate"] += 1
                 continue
-            action, status_after = decide(conn, doc_hash, rel, p.name)
+            action, status_after = decide(conn, doc_hash, rel, p.name, quarantined)
             if quarantined and action == "added":
                 action, status_after = "quarantined", "quarantined"
             actions[action] += 1
+            if args.dry_run:
+                continue
 
             if action in ("added", "quarantined"):
                 row = {
@@ -158,6 +175,7 @@ def main(argv=None) -> int:
                     "size_bytes": size,
                     "src_path": str(p),
                     "dir_path": dir_of(rel),
+                    "parent_dir": parent_of(rel),
                     "status": status_after,
                     "batch_id": batch,
                     "first_seen_at": datetime.now().strftime(NOW_FMT),
@@ -169,12 +187,20 @@ def main(argv=None) -> int:
                 db.upsert_document(conn, row)
                 added += 1
             elif write_conn is not None:
-                write_conn.execute(
-                    "UPDATE source_documents SET dir_path=?, file_name=?, src_path=?, last_seen_at=?, "
-                    "note=CASE WHEN ? IN ('moved','renamed') THEN ? ELSE note END WHERE doc_hash=?",
-                    (dir_of(rel), p.name, str(p), datetime.now().strftime(NOW_FMT),
-                     action, f"{action}_from:{rel}" if action in ("moved", "renamed") else None, doc_hash),
-                )
+                now = datetime.now().strftime(NOW_FMT)
+                if action in ("moved", "renamed", "resurrected"):
+                    write_conn.execute(
+                        "UPDATE source_documents SET dir_path=?, parent_dir=?, file_name=?, src_path=?, "
+                        "last_seen_at=?, note=? WHERE doc_hash=?",
+                        (dir_of(rel), parent_of(rel), p.name, str(p), now,
+                         f"{action}_from:{rel}", doc_hash),
+                    )
+                else:
+                    # duplicate：只更新"最后见到"，绝不改路径。
+                    # 否则隔离区/别处的重名件会把库内记录的位置改走（曾踩过）。
+                    write_conn.execute(
+                        "UPDATE source_documents SET last_seen_at=? WHERE doc_hash=?", (now, doc_hash)
+                    )
                 if action == "resurrected":
                     write_conn.execute("UPDATE source_documents SET status=? WHERE doc_hash=?", (status_after, doc_hash))
 

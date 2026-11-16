@@ -90,8 +90,66 @@ def test_deleted_then_returned_is_resurrected(corpus, tmp_path, capsys):
     assert summary["actions"]["resurrected"] == 1
 
 
+def test_dry_run_with_existing_db_does_not_write(corpus, tmp_path, capsys):
+    """库已存在时 --dry-run 用只读连接，但仍要能口径一致地报重复数，且不写库（曾 crash）。"""
+    db_path = tmp_path / "kb.sqlite"
+    main(["--root", str(corpus), "--db", str(db_path)])
+    capsys.readouterr()
+
+    (corpus / "02-JVM" / "新增件.pdf").write_bytes(b"%PDF-1.4 brand new")
+    assert main(["--root", str(corpus), "--db", str(db_path), "--dry-run"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["actions"].get("candidate", 0) == 0   # 库已存在，不是候选统计模式
+    assert summary["actions"]["added"] == 1
+    assert summary["actions"]["duplicate"] == 3
+    assert len(rows(db_path)) == 3                     # 只读，没新增行
+
+
+def test_copy_in_staging_is_duplicate_not_moved(corpus, tmp_path, capsys):
+    """往收件箱丢一份库内已有文件的副本：应判 duplicate，绝不能把库内记录"搬"到收件箱。"""
+    db_path = tmp_path / "kb.sqlite"
+    main(["--root", str(corpus), "--db", str(db_path)])
+    capsys.readouterr()
+
+    (corpus / "31-收件箱").mkdir()
+    (corpus / "31-收件箱" / "JVM面试题.pdf").write_bytes((corpus / "02-JVM" / "JVM面试题.pdf").read_bytes())
+    main(["--root", str(corpus), "--db", str(db_path)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert summary["actions"]["duplicate"] >= 1
+    assert summary["actions"].get("moved", 0) == 0
+    row = [r for r in rows(db_path) if r["file_name"] == "JVM面试题.pdf"][0]
+    assert row["dir_path"] == "02-JVM"          # 原件位置没被副本夺走
+
+
 def test_dry_run_writes_nothing(corpus, tmp_path, capsys):
     db_path = tmp_path / "kb.sqlite"
     assert main(["--root", str(corpus), "--db", str(db_path), "--dry-run"]) == 0
     capsys.readouterr()
     assert not db_path.exists()
+
+
+def test_quarantine_copy_cannot_steal_path(tmp_path, capsys):
+    """隔离区里的同内容件只算 duplicate，不允许把库内记录的路径改到 99/ 下。
+
+    ADR D-12：曾出现 12-综合题库 的正式件被 99-重复文件待删 的同内容副本"夺主"，
+    记录路径被改写、且混进了可入库清单。
+    """
+    root = tmp_path / "corpus"
+    real = root / "12-综合题库" / "设计模式面试专题.md"
+    real.parent.mkdir(parents=True)
+    real.write_bytes(b"same content")
+    dup = root / "99-重复文件待删" / "12-综合题库" / "设计模式面试专题.md"
+    dup.parent.mkdir(parents=True)
+    dup.write_bytes(b"same content")
+
+    db_path = tmp_path / "kb.sqlite"
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    capsys.readouterr()
+
+    from kb import hashing
+    row = [r for r in rows(db_path) if r["doc_hash"] == hashing.sha256_file(real)[:16]]
+    assert len(row) == 1
+    assert row[0]["dir_path"] == "12-综合题库"
+    assert row[0]["status"] == "pending_classify"
+    assert row[0]["parent_dir"] == "12-综合题库"

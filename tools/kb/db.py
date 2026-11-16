@@ -26,10 +26,32 @@ def connect(db_path: Path | str | None = None, *, create: bool = True) -> sqlite
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    """幂等建表（schema 全是 IF NOT EXISTS）。"""
+    """幂等迁移：schema 用 IF NOT EXISTS；需要 ADD COLUMN 的用 pragma 先探。"""
     sql = SCHEMA_FILE.read_text(encoding="utf-8")
     conn.executescript(sql)
+    _ensure_parent_dir(conn)
     conn.commit()
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r["name"] == column for r in rows)
+
+
+def _ensure_parent_dir(conn: sqlite3.Connection) -> None:
+    """补 parent_dir（父目录名）字段 + 可入库清单视图（002）。"""
+    if not _column_exists(conn, "source_documents", "parent_dir"):
+        conn.execute("ALTER TABLE source_documents ADD COLUMN parent_dir TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sd_parent ON source_documents(parent_dir)")
+    conn.execute(
+        """
+        CREATE VIEW IF NOT EXISTS ingest_queue AS
+        SELECT doc_hash, file_name, parent_dir, dir_path, ext, size_bytes,
+               category, topic, sub_topic, collection, source_trust
+        FROM source_documents
+        WHERE status = 'classified'
+        """
+    )
 
 
 @contextmanager

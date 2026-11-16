@@ -48,3 +48,11 @@ defaults:
   category: 未分类
   source_trust: medium
   topic: 未分类
+
+# 非内容：这些目录下的文件即使能解析，也不该进题库（简历模板、学习路线图、课件图）
+# 命中后 category=非内容、status=rejected，只留台账
+reject_patterns:
+  - "**/简历模板/**"
+  - "**/各种技术学习路线/**"
+  - "**/Java学习路线/**"
+  - "**/图解课件/**"

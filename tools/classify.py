@@ -60,6 +60,7 @@ class Rules:
                             for r in topic_doc.get("rules", [])]
         self.folder_topics = topic_doc.get("folder_topics", {})
         self.structure = [(glob_to_re(r["match"]), r) for r in folder_doc.get("structure", [])]
+        self.reject = [glob_to_re(p) for p in folder_doc.get("reject_patterns", [])]
         self.bank_prefixes = tuple(folder_doc.get("top_level_bank_prefixes", []))
         self.ignore_segments = set(folder_doc.get("ignore_segments", []))
         self.defaults = folder_doc.get("defaults", {})
@@ -111,6 +112,9 @@ class Rules:
 
     def classify(self, rel: str) -> dict:
         eff = self.effective_rel(rel)
+        if any(rx.match(eff) for rx in self.reject):
+            return {"category": "非内容", "topic": "", "sub_topic": "",
+                    "topic_source": "rule_reject", "collection": "", "source_trust": "low"}
         category, trust = self.category_and_trust(eff)
         topic, sub, src = self.topic(eff)
         if topic == config.UNCLASSIFIED and category in ("面经", "真题", "专题笔记"):
@@ -165,14 +169,17 @@ def main(argv=None) -> int:
     for r in rows:
         rel = f"{r['dir_path']}/{r['file_name']}" if r["dir_path"] else r["file_name"]
         res = rules.classify(rel)
+        status = "rejected" if res["category"] == "非内容" else "classified"
         changes.append((r["doc_hash"], rel, res))
         if not args.dry_run:
+            parent = r["dir_path"].rsplit("/", 1)[-1] if r["dir_path"] else "<顶层直属>"
             conn.execute(
                 "UPDATE source_documents SET category=?, topic=?, sub_topic=?, topic_source=?, "
-                "collection=?, source_trust=?, classifier='rule', classified_at=?, status='classified' "
+                "collection=?, source_trust=?, parent_dir=?, classifier='rule', classified_at=?, status=? "
                 "WHERE doc_hash=?",
                 (res["category"], res["topic"], res["sub_topic"], res["topic_source"],
-                 res["collection"], res["source_trust"], datetime.now().strftime(NOW_FMT), r["doc_hash"]),
+                 res["collection"], res["source_trust"], parent,
+                 datetime.now().strftime(NOW_FMT), status, r["doc_hash"]),
             )
     if not args.dry_run:
         conn.commit()

@@ -13,17 +13,20 @@
 docs/                     方案与决策（01 部署方案 v2-R1 / 02 审核报告 / 03 未分类入库方案 / 04 工具链 SOP）
 meta/
   001_init.sql            原文档表 schema（source_documents / batches / gate_results / ocr_pages）
+  002_parent_dir.sql      parent_dir（父目录名）+ 可入库清单视图 ingest_queue
   topic_rules.yaml        文件名 → topic（30 条，源自语料内 inventory.py）
-  folder_rules.yaml       目录结构位 → category / source_trust；包装词；顶层主题目录
+  folder_rules.yaml       目录结构位 → category / source_trust；包装词；顶层主题目录；reject_patterns
 tools/
   kb/                     公共库：config / db / hashing / textmetrics
-  intake.py               登记 + sha256 判重（新增/重复/移动/改名/复活）
-  classify.py             先分类：规则判类、collection、source_trust、未分类兜底
+  intake.py               登记 + sha256 判重（新增/重复/移动/改名/复活/隔离）
+  classify.py             先分类：规则判类、collection、source_trust、未分类兜底、非内容拒收
   gate.py                 文本质量门禁（CJK / 乱码 / 有效字符）
   ocr_pages.py            PaddleOCR-json 页级 OCR（渲染 → OCR → 落库）
+  ingest_queue.py         可入库清单：导出 CSV / 统计 / 按 hash 与文件名查重
+  pipeline.py             批增一条命令：去重 → 分类 → 清单（`--check` 只预览）
 scripts/
   补录-doc转docx.ps1       Word COM 批量 .doc → .docx（落到 30-补录 镜像树，不动源目录）
-tests/                    19 个用例（textmetrics / intake / classify / gate）
+tests/                    25 个用例（textmetrics / intake / classify / gate / 清单）
 ```
 
 ## 快速开始
@@ -53,14 +56,39 @@ Set-Location -LiteralPath $repo
 & $py -m pytest tests -q
 ```
 
+## 可入库清单与批增
+
+`ingest_queue` 视图 = `status='classified'` 的记录（已排除 `rejected` 的非内容、`quarantined` 的隔离区件）。
+导出的 CSV 就是"确认无重复、等着入库"的文件表，字段：
+
+```
+doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, collection, source_trust
+```
+
+```powershell
+# 导出 / 统计 / 查重（新文件来了先按 hash 或文件名查一下）
+& $py tools\ingest_queue.py --db $db --export "$build\ingest_list.csv"
+& $py tools\ingest_queue.py --db $db --stats
+& $py tools\ingest_queue.py --db $db --lookup 3afb55d83ce320e0
+
+# 批增：把新文件丢进 31-收件箱，然后一条命令走完去重 → 分类 → 清单
+& $py tools\pipeline.py --check                 # 先预览：只报会新增/重复多少，不写库
+& $py tools\pipeline.py                        # 真跑
+& $py tools\pipeline.py --root "<DOWNLOAD_DIR>\新面经"   # 也能直接处理别处的目录
+```
+
+判重口径（`intake` 的 `actions`）：`added` 新件 / `duplicate` 副本（原件仍在磁盘上，只刷"最后见到"，
+**不改路径**）/ `moved`·`renamed` 原件已不在原处才改路径 / `quarantined` 隔离区只登记。
+
 ## 实测基线（2026-11-17 本机 i5-13400F / 31.9 GB）
 
 | 项 | 结果 |
 |---|---|
-| 语料登记 | 633 行（497 待处理 + 136 隔离区），耗时 3.5 s |
+| 语料登记 | 633 行（497 待处理 + 136 隔离区），耗时 3.2–3.9 s |
 | hash 速度 | 2,523 MB / 2.93 s ≈ 860 MB/s，单件 6.6 ms |
 | 跨目录同内容 | 2 对（hash 抓到；`99-重复文件待删` 的 138 件里与库内字节相同的仅 1 件） |
-| 分类分布 | 题库 239 / 专题笔记 140 / 面经 77 / 真题 40 / 未分类 1 |
+| 分类分布 | 题库 236 / 专题笔记 128 / 面经 77 / 真题 40 / 非内容 16 / 未分类 1 |
+| 可入库清单 | **481 行，hash 唯一 481**（633 − 136 隔离 − 16 非内容） |
 | topic 分布 | 综合 171、未分类 85（题库类未命中领域，属诚实标注） |
 | 门禁（397 个 md） | pass 338 / non_content 41 / garbled 13 / low_cjk 5 |
 | 门禁命中 | 复现 JavaGuide v1.0·V1.1·v2.0、Leetcode-Go、Nginx 手册、剑指Offer、大厂算法合集等"假成功" |
