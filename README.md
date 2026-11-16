@@ -10,7 +10,7 @@
 ## 目录
 
 ```
-docs/                     方案与决策（01 部署方案 v2-R1 / 02 审核报告 / 03 未分类入库方案 / 04 工具链 SOP / 05 合并轮审核）
+docs/                     方案与决策（**06 部署方案 v2-R2 为当前口径** / 01 部署方案 v2-R1 历史稿 / 02 审核报告 / 03 未分类入库方案 / 04 工具链 SOP / 05 合并轮审核）
 meta/
   001_init.sql            原文档表 schema（source_documents / batches / gate_results / ocr_pages）
   002_parent_dir.sql      parent_dir（父目录名）+ 可入库清单视图 ingest_queue
