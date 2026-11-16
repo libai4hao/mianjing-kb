@@ -43,13 +43,16 @@ def _ensure_parent_dir(conn: sqlite3.Connection) -> None:
     if not _column_exists(conn, "source_documents", "parent_dir"):
         conn.execute("ALTER TABLE source_documents ADD COLUMN parent_dir TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sd_parent ON source_documents(parent_dir)")
+    # 视图必须可重建：清单口径会演进（如"隔离区永不出现在清单里"），IF NOT EXISTS 改不动旧定义
+    conn.execute("DROP VIEW IF EXISTS ingest_queue")
     conn.execute(
         """
-        CREATE VIEW IF NOT EXISTS ingest_queue AS
+        CREATE VIEW ingest_queue AS
         SELECT doc_hash, file_name, parent_dir, dir_path, ext, size_bytes,
                category, topic, sub_topic, collection, source_trust
         FROM source_documents
         WHERE status = 'classified'
+          AND dir_path NOT LIKE '99-重复文件待删%'
         """
     )
 

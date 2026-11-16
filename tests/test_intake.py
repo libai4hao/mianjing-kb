@@ -153,3 +153,47 @@ def test_quarantine_copy_cannot_steal_path(tmp_path, capsys):
     assert row[0]["dir_path"] == "12-综合题库"
     assert row[0]["status"] == "pending_classify"
     assert row[0]["parent_dir"] == "12-综合题库"
+
+
+def test_move_into_quarantine_flips_status(tmp_path, capsys):
+    """过时件清理：正式区记录被移进 99- 区后，路径要改、状态要转 quarantined、不再进清单。"""
+    root = tmp_path / "corpus"
+    src = root / "05-Redis与缓存" / "memcached面试专题.pdf"
+    src.parent.mkdir(parents=True)
+    src.write_bytes(b"%PDF old topic")
+    db_path = tmp_path / "kb.sqlite"
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    capsys.readouterr()
+
+    dest_dir = root / "99-重复文件待删" / "05-Redis与缓存"
+    dest_dir.mkdir(parents=True)
+    src.rename(dest_dir / "memcached面试专题.pdf")
+
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["actions"]["to_quarantine"] == 1
+    assert summary["actions"].get("moved", 0) == 0
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = dict(conn.execute("SELECT dir_path, status FROM source_documents WHERE file_name='memcached面试专题.pdf'").fetchone())
+    in_queue = conn.execute("SELECT COUNT(*) FROM ingest_queue WHERE file_name='memcached面试专题.pdf'").fetchone()[0]
+    conn.close()
+    assert row["status"] == "quarantined"
+    assert row["dir_path"] == "99-重复文件待删/05-Redis与缓存"
+    assert in_queue == 0
+
+
+def test_derived_tree_never_becomes_source(tmp_path, capsys):
+    """99 区里镜像的 20-题库MD 派生件不能当新源登记（否则过时件清理会把派生 md 变成行）。"""
+    root = tmp_path / "corpus"
+    derived = root / "99-重复文件待删" / "20-题库MD" / "题库" / "Redis" / "memcached面试专题.md"
+    derived.parent.mkdir(parents=True)
+    derived.write_text("# 派生件", encoding="utf-8")
+    db_path = tmp_path / "kb.sqlite"
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    capsys.readouterr()
+    conn = sqlite3.connect(str(db_path))
+    total = conn.execute("SELECT COUNT(*) FROM source_documents").fetchone()[0]
+    conn.close()
+    assert total == 0

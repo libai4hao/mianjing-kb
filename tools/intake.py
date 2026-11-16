@@ -52,6 +52,11 @@ def parent_of(rel: str) -> str:
 
 
 def is_excluded(rel_dir: str) -> bool:
+    """按任意层级排除：00-索引 / 20-题库MD / 21-面经数据库 出现在哪一层都不算源文档
+    （否则 99 区镜像的派生 md 会被当成新源重新登记）。"""
+    parts = rel_dir.split("/") if rel_dir else []
+    if any(p in config.EXCLUDE_DIR_NAMES for p in parts):
+        return True
     return any(rel_dir == p or rel_dir.startswith(p + "/") for p in config.EXCLUDE_PREFIXES)
 
 
@@ -87,21 +92,27 @@ def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False) 
     关键约束：移动 / 改名**不能**改变已有状态（否则 processed 会被降级成 moved，
     已入库的成果就"回滚"了）。只有"曾删除又回来"才允许重置状态。
     隔离区里的文件即使内容与库内相同，也只算重复，不能把库内记录的路径改到隔离区。
-    原件仍在磁盘上时同样只算重复——否则往收件箱丢一份副本，会把库里那条记录的位置改走。
+    但反过来：正式区的记录被**移进**隔离区（过时件清理）时，必须改路径并转 quarantined。
+    原件仍在磁盘上时只算重复——否则往收件箱丢一份副本，会把库里那条记录的位置改走。
     """
     row = db.get_by_hash(conn, doc_hash)
     if row is None:
         return "added", "pending_classify"
     prev = row["status"]
-    if quarantined:
-        return "duplicate", prev
     if prev == "absent":
         # 先判"曾删除又回来"：这类文件必须复用原结果，不能被当成普通重复件
         return "resurrected", ("classified" if row["category"] else "pending_classify")
     full_rel = f"{row['dir_path']}/{row['file_name']}" if row["dir_path"] else row["file_name"]
+    src = row["src_path"]
+    if quarantined:
+        if full_rel == rel:
+            return "duplicate", prev
+        if src and Path(src).exists():
+            return "duplicate", prev          # 原件还在正式区 → 99 里的只是散副本，不能夺主
+        # 原件已被移进隔离区（过时件清理走这条路）：改路径并把状态转 quarantined
+        return "to_quarantine", "quarantined"
     if full_rel == rel:
         return "duplicate", prev
-    src = row["src_path"]
     if src and Path(src).exists():
         return "duplicate", prev              # 原件还在 → 这次见到的是副本
     new_dir = dir_of(rel)
@@ -188,7 +199,7 @@ def main(argv=None) -> int:
                 added += 1
             elif write_conn is not None:
                 now = datetime.now().strftime(NOW_FMT)
-                if action in ("moved", "renamed", "resurrected"):
+                if action in ("moved", "renamed", "resurrected", "to_quarantine"):
                     write_conn.execute(
                         "UPDATE source_documents SET dir_path=?, parent_dir=?, file_name=?, src_path=?, "
                         "last_seen_at=?, note=? WHERE doc_hash=?",
@@ -201,7 +212,7 @@ def main(argv=None) -> int:
                     write_conn.execute(
                         "UPDATE source_documents SET last_seen_at=? WHERE doc_hash=?", (now, doc_hash)
                     )
-                if action == "resurrected":
+                if action in ("resurrected", "to_quarantine"):
                     write_conn.execute("UPDATE source_documents SET status=? WHERE doc_hash=?", (status_after, doc_hash))
 
         if write_conn is not None:

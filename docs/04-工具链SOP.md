@@ -35,6 +35,7 @@ Set-Location -LiteralPath $repo
 | `duplicate` | 同哈希、同路径 | 只刷 `last_seen_at` |
 | `renamed` / `moved` | 同哈希、不同路径 | 更新路径，**状态不变**（不降级已入库成果） |
 | `resurrected` | 该哈希曾 `absent` 又回来 | 复用原分类结果，回到 `classified` |
+| `to_quarantine` | 正式区记录被移进 99 区（过时件清理） | 改路径 + 状态转 `quarantined`，立刻退出清单 |
 | `quarantined` | `99-重复文件待删` 下 | 只登记，永不处理 |
 | `ignored` | 非文档型扩展名 | 只计数 |
 
@@ -152,7 +153,9 @@ Nginx 开发手册 0.092、剑指Offer 0.062、大厂算法合集 0.135、数据
 | 同哈希、同路径 | `duplicate` | 只刷 `last_seen_at` |
 | 同哈希、原件**仍在**磁盘 | `duplicate` | 这是副本；**不许**把库里那条记录的位置改走 |
 | 同哈希、原件已不在原处 | `moved`/`renamed` | 真移动/改名，改路径但**状态不降级** |
+| 正式区原件已被移进 `99-重复文件待删` | `to_quarantine` | 改路径 + 状态 `quarantined`；原件仍在磁盘时仍只算 `duplicate`（杜绝散副本夺主，D-12） |
 | `99-重复文件待删` 下 | `quarantined`，若哈希已存在则 `duplicate` | 隔离区永不入库、永不夺主 |
+| `00-索引` / `20-题库MD` / `21-面经数据库`（**任意层级**） | 不登记 | 索引与派生树永不作为源文档；否则 99 区镜像的派生 md 会被当成新源 |
 | 曾 `absent` 又回来 | `resurrected` | 复用原分类结果 |
 
 ---
