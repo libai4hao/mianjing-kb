@@ -47,7 +47,14 @@ if __package__ in (None, ""):
 from kb import config, hashing  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
-SKIP_REASONS = ("no_text_layer", "garbled", "converted_only", "duplicate_of", "no_question")
+SKIP_REASONS = ("no_text_layer", "garbled", "converted_only", "duplicate_of",
+                "no_question", "chunker_no_split")
+
+
+def norm_stem(stem: str) -> str:
+    """stem 归一：去首尾空白 + 小写——台账文件名可能带尾随空格（如「面向字节_Java集合 .pdf」），
+    md 落盘侧 safe_name 已 strip；大小写差异（Redis/redis）同样存在。"""
+    return stem.strip().lower()
 
 
 def base_stem(stem: str) -> str:
@@ -100,11 +107,12 @@ def g1_coverage(kb_conn, out_conn, skip: dict[str, str]) -> dict:
     q_docs = {r[0] for r in out_conn.execute("SELECT DISTINCT doc_hash FROM questions")}
     md_by_stem: dict[str, str] = {}
     for (rel,) in out_conn.execute("SELECT DISTINCT md_rel FROM doc_contents"):
-        md_by_stem.setdefault(base_stem(Path(rel).stem), rel)
+        # base_stem 剥 __hash8/_hash8 后缀 + norm_stem 归一空白/大小写，缺一不可
+        md_by_stem.setdefault(norm_stem(base_stem(Path(rel).stem)), rel)
 
     fails, n_skip = [], 0
     for r in rows:
-        stem = base_stem(Path(r["file_name"]).stem)
+        stem = norm_stem(base_stem(Path(r["file_name"]).stem))
         md_rel = md_by_stem.get(stem)
         mirror = mirror_hash_of(md_rel) if md_rel else None
         has_doc = (r["doc_hash"] in dc_doc) or (md_rel is not None)
@@ -156,13 +164,15 @@ def g2_chain(out_conn, md_root: Path, ocr_root: Path, skip: dict[str, str]) -> d
             fails.append({"rel": src_rel, "kind": "ocr_text_no_md",
                           "suggest": "backfill_convert --merge-ocr / ocr_merge"})
 
-    # ③ doc_contents 有行却 0 题且未标 no_question
+    # ③ doc_contents 有行却 0 题且未登记原因（no_question=真无题；chunker_no_split=讲解型 md
+    #    切不出，chunker 增强前如实记账，docs/15「skip_log 是一等公民」）
+    ok_skip = {"no_question", "chunker_no_split"}
     for md_rel, doc_hash, mirror in out_conn.execute(
             "SELECT md_rel, doc_hash, mirror_hash FROM doc_contents"):
         n = out_conn.execute(
             "SELECT COUNT(*) FROM questions WHERE doc_hash IN (?, ?)",
             (doc_hash, mirror)).fetchone()[0]
-        if n == 0 and skip.get(md_rel) != "no_question":
+        if n == 0 and skip.get(md_rel) not in ok_skip:
             fails.append({"rel": md_rel, "kind": "md_zero_questions", "suggest": "extract 重跑"})
     state = "PASS" if not fails else "FAIL"
     return _gate("G2", "转换链闭环", "硬", state, fails,

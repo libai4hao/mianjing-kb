@@ -83,14 +83,15 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
     #   源文档 topic →（无源行时）md_rel 倒数第二段目录（转换约定 parent=topic，docs/14 K11 目录推断）
     by_stem = {}
     for r in docs:
-        by_stem.setdefault(Path(r["file_name"]).stem, r["doc_hash"])
+        # 归一：台账文件名可能带尾随空格 / 大小写差异（md 侧 safe_name 已 strip）
+        by_stem.setdefault(Path(r["file_name"]).stem.strip().lower(), r["doc_hash"])
     mirror_topic: dict[str, str] = {}
     mirror_cat: dict[str, str] = {}
     n_docs_content = 0
     for p in sorted(MD_ROOT.rglob("*.md")):
         rel = p.relative_to(MD_ROOT).as_posix()
         stem = Path(rel).stem
-        base = _base_stem(stem)
+        base = _base_stem(stem).strip().lower()
         text = p.read_text(encoding="utf-8", errors="replace")
         # P3-③：镜像 hash 回链——md 镜像题的 doc_hash = sha256("md-mirror:"+rel)[:16]
         mirror_hash = hashlib.sha256(("md-mirror:" + rel).encode("utf-8")).hexdigest()[:16]

@@ -52,7 +52,11 @@ NOW = lambda: datetime.now().strftime("%Y-%m-%dT%H:%M:%S")  # noqa: E731
 
 
 def _stem(name: str) -> str:
-    s = Path(name).stem.lower()
+    """stem 归一：剥同名冲突 hash 后缀（__hash8 / _hash8）+ 去首尾空白 + 小写 +
+    去前导序号——台账文件名可能带尾随空格，md 侧 safe_name 已 strip。
+    不剥 hash 后缀会让 backfill 自产的 __hash8 md 全部匹配脱靶（2026-11-17 审核修复）。"""
+    s = Path(name).stem.strip().lower()
+    s = re.sub(r"_{1,2}[0-9a-f]{8}$", "", s)
     return re.sub(r"^\d+[-_.\s]*", "", s)
 
 
