@@ -55,7 +55,7 @@ tools/
   purge_origin.py         删除已收入语料的原件（四重校验缺一不删）
 scripts/
   补录-doc转docx.ps1       [DEPRECATED] 已由 doc_convert.py 取代，仅历史参考
-tests/                    123 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁…）
+tests/                    126 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁…）
 ```
 
 ## 快速开始
@@ -151,8 +151,11 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
   增量吸附待题量到 1e5 再做（docstring 简化声明）；
 - ~~向量近邻②档（classify --vec）~~ **已落地**：当前文档级未分类 0 件，能力待新批次导入；
 - ~~`refresh.py`（K1 影子编排）~~ **已落地**：已执行首次生产原子切换；
-- **chunker v2 判题信号增强**（`**问句？**` 粗体行）：432 件讲解型 md（面试突击转写体）切不出题，
-  已按 `chunker_no_split` 如实登记 skip_log（docs/17 §5）；增强后需全量重切 + 门禁复核；
+- ~~chunker v2 判题信号增强~~ **已落地（2026-11-17）**：独立问句行升级为块起点（与 R2' 同口径）
+  + `问题N` 题号形态（面向字节/连环炮系列主流）+ 整行粗体剥壳 + 配图标题落 leftovers
+  + RE_LIST_ITEM 负向前瞻（`**` 不再误判列表项）。全量重切 **18,642 → 32,087 题（+13,445）**，
+  skip_log 诚实清理（773→430 条），G1 同名族判定修复 23 件错位误报；
+  终检 G1-G5 全 PASS，生产库二次原子切换（13,716 canonical 簇）；
 - **G6 打标质量门禁**：线上打标（docs/15 §3 batch_label）未启用，LLM key 待配置后转硬；
 - **向量增量（K2）**：当前全量重建约 6 分钟，暂无增量需求。
 

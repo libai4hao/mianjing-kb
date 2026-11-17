@@ -90,6 +90,33 @@ def _gate(gid: str, name: str, level: str, state: str, fails: list, detail: dict
             "fails": fails, "detail": detail, "sql": sql}
 
 
+def _rel_to_md_map() -> dict[str, str]:
+    """源 rel → md_rel 精确映射（backfill log ok 行 + gate_report 落盘行）。
+
+    G1 原只用 stem 首中链接，同 stem 多源（华为校招面经.pdf 在多目录）会链错源
+    → mirror hash 判错 → 误报 FAIL（2026-11-17 chunker 增强复核时抓到 28 件）。
+    """
+    build = Path(config.BUILD_DIR)
+    m: dict[str, str] = {}
+    log_p = build / "backfill_convert_log.json"
+    if log_p.exists():
+        for l in json.loads(log_p.read_text(encoding="utf-8")):
+            if l.get("ok") and l.get("md"):
+                m[l["rel"]] = l["md"]
+    gate_p = build / "gate_report.json"
+    if gate_p.exists():
+        for r in json.loads(gate_p.read_text(encoding="utf-8")).get("rows", []):
+            md = r.get("md")
+            if not md:
+                continue
+            try:
+                md_rel = Path(md).relative_to(config.QUESTION_MD_DIR).as_posix()
+            except ValueError:
+                continue
+            m[r["rel"].replace("\\", "/")] = md_rel
+    return m
+
+
 # ---------------- G1 源-库全覆盖 ----------------
 def g1_coverage(kb_conn, out_conn, skip: dict[str, str]) -> dict:
     """classified 每篇：doc_contents 有行 且 有题；否则须在 skip_log 登记原因。
@@ -105,21 +132,23 @@ def g1_coverage(kb_conn, out_conn, skip: dict[str, str]) -> dict:
     dc_doc = {r[0] for r in out_conn.execute(
         "SELECT DISTINCT doc_hash FROM doc_contents WHERE doc_hash IS NOT NULL")}
     q_docs = {r[0] for r in out_conn.execute("SELECT DISTINCT doc_hash FROM questions")}
-    md_by_stem: dict[str, str] = {}
+    md_rels_by_stem: dict[str, list[str]] = {}
     for (rel,) in out_conn.execute("SELECT DISTINCT md_rel FROM doc_contents"):
         # base_stem 剥 __hash8/_hash8 后缀 + norm_stem 归一空白/大小写，缺一不可
-        md_by_stem.setdefault(norm_stem(base_stem(Path(rel).stem)), rel)
+        md_rels_by_stem.setdefault(norm_stem(base_stem(Path(rel).stem)), []).append(rel)
 
     fails, n_skip = [], 0
     for r in rows:
+        rel = f"{r['dir_path']}/{r['file_name']}" if r["dir_path"] else r["file_name"]
         stem = norm_stem(base_stem(Path(r["file_name"]).stem))
-        md_rel = md_by_stem.get(stem)
-        mirror = mirror_hash_of(md_rel) if md_rel else None
-        has_doc = (r["doc_hash"] in dc_doc) or (md_rel is not None)
-        has_q = (r["doc_hash"] in q_docs) or (mirror in q_docs if mirror else False)
+        # 族判定（2026-11-17）：同名多源是转换口径的固有形态（华为校招面经.pdf 在多目录、
+        # 各自落同名 md），题落在族内任一 md 即视为该源已覆盖——stem 首中链接会错位误报。
+        md_rels = md_rels_by_stem.get(stem, [])
+        mirrors = [mirror_hash_of(x) for x in md_rels]
+        has_doc = (r["doc_hash"] in dc_doc) or bool(md_rels)
+        has_q = (r["doc_hash"] in q_docs) or any(m in q_docs for m in mirrors)
         if has_doc and has_q:
             continue
-        rel = f"{r['dir_path']}/{r['file_name']}" if r["dir_path"] else r["file_name"]
         if rel in skip:
             n_skip += 1
             continue
@@ -131,7 +160,7 @@ def g1_coverage(kb_conn, out_conn, skip: dict[str, str]) -> dict:
     state = "PASS" if not fails else "FAIL"
     return _gate("G1", "源-库全覆盖", "硬", state, fails,
                  {"classified": len(rows), "skipped_by_log": n_skip,
-                  "note": "md 镜像按 stem 关联，同名多源取首个（build_db by_stem 同款局限）"}, sql)
+                  "note": "md 镜像按同名族判定（任一同 stem md 有题即覆盖），防多源错位"}, sql)
 
 
 # ---------------- G2 转换链闭环 ----------------

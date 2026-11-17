@@ -140,3 +140,99 @@ def test_render_two_steps():
     # 清单行 ≤ 12 字概述（去掉序号前缀后）
     first = out.splitlines()[1]
     assert len(first.split(". ", 1)[1]) <= 12
+
+
+def test_v2_bold_and_problem_n_signals():
+    """讲解型 md 三形态（2026-11-17 增强，解锁 432 件 chunker_no_split 债务）：
+    ① **粗体问句** 整行 → 块起点（含无问号但问词在前的变体）
+    ② 问题N：正文 → 题号块（面向字节/连环炮系列主流形态，不依赖空行前置）
+    ③ 问题N 纯标记行 → 武装紧随的独立问句行成为块起点
+    ④ 非问句粗体 / 配图标题 不产题
+    样本取自真实语料（面向字节_Dubbo / RabbitMQ / SpringBoot 系列）。"""
+    md = """**Dubbo 支持哪些协议，每种协议的应用场景，优缺点？**
+
+- **dubbo：** 单一长连接和 NIO 异步通讯，适合大并发小数据量的服务调用。
+
+问题一：RabbitMQ 中的 broker 是指什么？cluster 又是指什么？
+
+答：broker 是指一个或多个 erlang node 的逻辑分组。
+
+问题二：什么是元数据？元数据分为哪些类型？
+
+答：元数据主要分为 Queue 元数据。
+
+问题三
+
+什么是 Spring Boot？
+
+多年来 spring 变得越来越复杂，需要很多努力配置。
+
+**说说 Spring AOP**
+
+AOP 是面向切面编程，解耦业务与横切关注点。
+
+**注意：**
+
+这里是非问句粗体强调，不应切题。
+
+## 配图（2张）
+
+![配图](./images/a.png)
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [it["q"] for it in v2["items"]]
+    # ① 粗体问句（行尾问号）
+    assert any("Dubbo 支持哪些协议" in q for q in qs), qs
+    # ② 问题N 带正文 → 题号块（问题二 无空行前置也切：作者显式标记不依赖排版）
+    assert any("broker 是指什么" in q for q in qs), qs
+    assert any("元数据分为哪些类型" in q for q in qs), qs
+    # ③ 问题N 纯标记 → 下一行独立问句成为块起点
+    assert any("Spring Boot" in q and "什么是" in q for q in qs), qs
+    # ①' 粗体无问号但问词在前 8 字
+    assert any("Spring AOP" in q for q in qs), qs
+    # ④ 非问句粗体不切；配图标题不产题
+    assert not any(q.strip() == "注意：" or "注意" == q.strip() for q in qs), qs
+    assert not any("配图" in q for q in qs), qs
+    # conf：问句/题号均 high；qtype 正常分类
+    for it in v2["items"]:
+        assert it["conf"] == "high", it
+    # 答案归属：Dubbo 题的答案含 dubbo 协议讲解
+    dubbo = next(it for it in v2["items"] if "Dubbo" in it["q"])
+    assert "NIO 异步通讯" in dubbo["a"]
+    # span 回指
+    for it in v2["items"]:
+        s, e = it["span"]
+        assert 0 <= s < e <= len(md)
+        assert it["q"][:6].lstrip("*# ") in md[s:s + 200]
+
+
+def test_v2_bold_in_answer_split():
+    """答案内部的粗体问句（空行前置）由 _split_answers 后置通道接住。"""
+    md = """1. 谈谈你对索引的理解？
+
+索引是加速查询的数据结构。
+
+**什么是最左前缀原则？**
+
+联合索引按最左列匹配查询。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [it["q"] for it in v2["items"]]
+    assert any("最左前缀" in q for q in qs), qs
+    assert any("索引的理解" in q for q in qs), qs
+
+
+def test_v2_problem_n_qid_progression():
+    """问题N 题号递进：问题一/问题二 连续切题，qid 语义正确。"""
+    md = """问题一：什么是 JVM？
+
+虚拟机，运行字节码。
+
+问题二：什么是 JMM？
+
+Java 内存模型。
+"""
+    v2 = chunker.chunk_v2(md)
+    assert len(v2["items"]) == 2
+    assert "JVM" in v2["items"][0]["q"] and "JMM" in v2["items"][1]["q"]
+    assert "字节码" in v2["items"][0]["a"]

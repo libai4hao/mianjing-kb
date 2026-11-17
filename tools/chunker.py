@@ -75,11 +75,23 @@ RE_INTERROGATIVE = re.compile(r'什么是|如何|为什么|区别|谈谈|介绍|
 RE_QEND = re.compile(r'[?？]\s*$')
 RE_KPOINT = re.compile(r'^\s*(?:#{1,6}\s*)?(?:知识点|考点|面试点)[:：]\s*(.+?)\s*$')
 RE_PROMO = re.compile(r'(公众号|扫码|二维码|简历投递|招聘|内推|关注我|感谢阅读|欢迎关注|联系方式|免费领取|资料领取|付费|星球|广告|推广|更多资源)')
-RE_LIST_ITEM = re.compile(r'^\s*(?:[-*+•]|[>|\]]|#{1,6}\s|\d{1,3}\s*[.、．)）]|[（(]\d{1,3}[)）])')
+# v2 增强（2026-11-17，解锁 432 件讲解型 md）：整行粗体剥壳 + 问题N 题号形态
+RE_BOLD_LINE = re.compile(r'^\*\*(.+?)\*\*\s*:?\s*$')
+RE_PROBLEM_N = re.compile(r'^\s*(?:#{1,6}\s+)?问题\s*([一二三四五六七八九十]{1,3}|\d{1,3})\s*[：:．.]?\s*(.*)$')
+# `*` 分支负向前瞻：`**粗体行**` 不再被误判为列表项（曾挡住粗体问句信号）
+RE_LIST_ITEM = re.compile(r'^\s*(?:[-+•]|(?!\*)\*|[>|\]]|#{1,6}\s|\d{1,3}\s*[.、．)）]|[（(]\d{1,3}[)）])')
+
+
+def strip_bold(s: str) -> str:
+    """整行粗体剥壳：`**xxx**` → xxx（含尾冒号容差）；非整行粗体返回原文。"""
+    m = RE_BOLD_LINE.match(s)
+    return m.group(1).strip() if m else s
 
 
 def _is_qline(s: str) -> bool:
-    """v2 问句行判定：以？结尾，或问词出现在行首 8 字内（防"做详细介绍"类行中误命中）。"""
+    """v2 问句行判定：以？结尾，或问词出现在行首 8 字内（防"做详细介绍"类行中误命中）。
+    整行粗体先剥壳（`**说说 Spring AOP**` → `说说 Spring AOP`）。"""
+    s = strip_bold(s.strip())
     if RE_QEND.search(s):
         return True
     return RE_INTERROGATIVE.search(s[:8]) is not None
@@ -107,6 +119,13 @@ def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
     m = RE_DI.match(line)
     if m:
         return int(m.group(1)), m.group(2), "题号"
+    m = RE_PROBLEM_N.match(line.strip())      # 问题N 形态（面向字节/连环炮系列主流题号）
+    if m:
+        body = m.group(2).strip()
+        if body:                              # 问题一：正文 → 题号块
+            qid = int(m.group(1)) if m.group(1).isdigit() else _HAN.get(m.group(1), 0)
+            return qid, body, "题号"
+        return None                           # 纯标记行：由调用方 last_problem_mark 武装下一行
     m = RE_HAN.match(line)
     if m and m.group(1) in _HAN:
         return _HAN[m.group(1)], m.group(2), "题号"
@@ -154,6 +173,9 @@ def chunk(md_text: str) -> Dict:
             continue
         if re.match(r'^#\s+\S', ln):
             kinds[i] = "doc_header"
+        # 配图段标题（convert 派生的结构段）：非文档头也非题，整段落 leftovers
+        if re.match(r'^#{1,6}\s+配图', ln):
+            kinds[i] = "doc_header"
 
     # 水印：≥3 次重复出现的短正文行
     cnt = Counter(ln.strip() for i, ln in enumerate(lines)
@@ -164,27 +186,48 @@ def chunk(md_text: str) -> Dict:
     bounds: List[dict] = []
     last_qid: Optional[int] = None
     prev_blank = True
+    last_problem_mark = False   # v2 增强：问题N 纯标记行武装紧随的独立问句行
     for i, ln in enumerate(lines):
         if kinds[i] != "text" or ln.strip() in watermark:
             prev_blank = ln.strip() == ""
             if not ln.strip():
                 prev_blank = True
+            last_problem_mark = False
             continue
         s = ln.strip()
         if not s:
             prev_blank = True
+            last_problem_mark = False
             continue
         q = _match_question(ln)
         if q is None:
+            # v2 增强（2026-11-17）：问题N 纯标记行（`问题一` / `问题一：`）→ 武装下一行
+            pm = RE_PROBLEM_N.match(s)
+            if pm and not pm.group(2).strip():
+                last_problem_mark = True
+                prev_blank = False
+                continue
+            # v2 增强：独立问句行（含整行粗体剥壳）成为块起点——与 _split_answers 的
+            # R2' 同口径（空行前置或问题N 武装；非列表项、非小数、长度受限）。
+            # 解锁讲解型 md（面向字节/连环炮系列：无数字题号，题干即独立问句行）。
+            inner = strip_bold(s)
+            if ((prev_blank or last_problem_mark) and 0 < len(inner) <= 160
+                    and not RE_LIST_ITEM.match(inner) and not RE_DECIMAL.match(inner)
+                    and _is_qline(inner)):
+                bounds.append({"line": i, "parts": [(None, inner)], "style": "问句"})
+            last_problem_mark = False
             prev_blank = False
             continue
         qid, qtext, style = q
         if style == "标题":
             bounds.append({"line": i, "parts": [(None, qtext)], "style": "标题"})
             prev_blank = False
+            last_problem_mark = False
             continue
         new_q = False
-        if last_qid is None:
+        if RE_PROBLEM_N.match(s):
+            new_q = True          # 问题N：作者显式标记的题号，不依赖空行/递进口径
+        elif last_qid is None:
             new_q = True
         elif prev_blank:
             # 新题（独立行）一律要求空行前置；行内递进由 R9 粘连拆分处理。
@@ -206,6 +249,7 @@ def chunk(md_text: str) -> Dict:
             bounds.append({"line": i, "parts": parts, "style": "题号"})
             last_qid = parts[-1][0]
         prev_blank = False
+        last_problem_mark = False
 
     # ---- 组块 + leftovers ----
     blocks: List[dict] = []
@@ -375,9 +419,10 @@ def _split_answers(a_text: str, a_base: int):
             cur.append(i); continue
         if in_code:
             cur.append(i); continue
-        if (prev_blank and 0 < len(s) <= 120 and not RE_LIST_ITEM.match(s)
-                and not RE_DECIMAL.match(s)
-                and (RE_KPOINT.match(s) or _is_qline(s))):
+        inner = strip_bold(s)      # v2 增强：粗体问句行与普通问句行同口径判定
+        if (prev_blank and 0 < len(inner) <= 120 and not RE_LIST_ITEM.match(inner)
+                and not RE_DECIMAL.match(inner)
+                and (RE_KPOINT.match(inner) or _is_qline(inner))):
             flush(starts[i])
             cur = [i]
         else:
@@ -389,7 +434,7 @@ def _split_answers(a_text: str, a_base: int):
     head = out[0]
     new_items = []
     for seg in out[1:]:
-        first_line = seg.split("\n", 1)[0].strip()
+        first_line = strip_bold(seg.split("\n", 1)[0].strip())   # 题干剥粗体壳
         m = RE_KPOINT.match(first_line)
         new_items.append({"q": (m.group(1) if m else first_line)[:200], "a": seg,
                           "style": "考点" if m else "问句"})
