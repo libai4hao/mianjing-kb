@@ -45,7 +45,7 @@ DOC_EXTS = {".pdf", ".docx", ".md", ".txt", ".doc", ".rtf", ".pptx", ".ppt"}
 NEEDS_CONVERT_EXTS = {".doc", ".rtf", ".ppt", ".pptx"}
 # 明确不进库的（intake 只计数，不建行；加 --all-exts 时才建行并由 classify 判 rejected）
 IGNORED_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".zip", ".rar", ".7z",
-                ".xmind", ".xlsx", ".xls", ".mp4", ".mkv", ".exe", ".jpg"}
+                ".xmind", ".xlsx", ".xls", ".mp4", ".mkv", ".exe"}   # P3-8：去掉重复的 .jpg
 
 # ---------- 门禁阈值（v2 §3.3 / R1 修正版）----------
 GATE_CJK_MIN = 0.15        # CJK 字符占比下限

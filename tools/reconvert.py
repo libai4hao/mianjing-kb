@@ -28,8 +28,8 @@ sys.path.insert(0, str(Path(r"<CORPUS_ROOT>\21-面经数据库\tools")))
 import convert_one  # noqa: E402  存量转换器（pdf_to_md / docx_to_md / safe_name / cjk_ratio）
 from kb import config, db  # noqa: E402
 
-BUILD = Path(r"<CORPUS_ROOT>\21-面经数据库\build")
-MD_ROOT = Path(r"<CORPUS_ROOT>\20-题库MD")
+BUILD = Path(config.BUILD_DIR)             # P1-3 修复（2026-11-17 审核）：路径统一走 config
+MD_ROOT = Path(config.QUESTION_MD_DIR)     # KB_* 环境变量可覆盖，换机器不再失效
 CAT_MAP = {"题库": "题库", "真题": "真题", "面经": "面经", "个人面经": "个人面经", "专题笔记": "专题笔记"}
 
 

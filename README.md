@@ -10,26 +10,49 @@
 ## 目录
 
 ```
-docs/                     方案与决策（**06 部署方案 v2-R2 为当前口径** / 01 部署方案 v2-R1 历史稿 / 02 审核报告 / 03 未分类入库方案 / 04 工具链 SOP / 05 合并轮审核）
+docs/                     方案与决策（00 决策记录 ~ 16 懒加载复核；**06 部署方案 v2-R2 为当前口径**）
 meta/
-  001_init.sql            原文档表 schema（source_documents / batches / gate_results / ocr_pages）
-  002_parent_dir.sql      parent_dir（父目录名）+ 可入库清单视图 ingest_queue
+  schema/001~004_*.sql    schema：原文档表 / parent_dir+清单视图 / 源边界 / questions 表
   topic_rules.yaml        文件名 → topic（30 条，源自语料内 inventory.py）
   folder_rules.yaml       目录结构位 → category / source_trust；包装词；顶层主题目录；reject_patterns
+  overrides.json          人工分类覆盖表（P1-5，最高优先级）
+  exclusions.json         出题池排除表（P2-⑤：保留检索、不抽题）
 tools/
   kb/                     公共库：config / db / hashing / textmetrics
+  ── 入库管线 ──
   intake.py               登记 + sha256 判重（新增/重复/移动/改名/复活/隔离）
-  classify.py             先分类：规则判类、collection、source_trust、未分类兜底、非内容拒收
-  gate.py                 文本质量门禁（CJK / 乱码 / 有效字符）
-  ocr_pages.py            PaddleOCR-json 页级 OCR（渲染 → OCR → 落库）
-  ingest_queue.py         可入库清单：导出 CSV / 统计 / 按 hash 与文件名查重
-  pipeline.py             批增一条命令：去重 → 分类 → 清单（`--check` 只预览）
-  question_freq.py        同题频次统计：抽文本 → 切题 → SimHash+Jaccard 聚簇 → 文档频率
-  doc_convert.py          `.doc` → `.docx`（Word COM），原 `.doc` 记录标 superseded
-  purge_origin.py         删除已收入语料的原件（逐件校验 hash + 保留副本存在）
+  classify.py             分类：规则判类 + 近邻投票（--neighbor）+ 人工覆盖
+  gate.py                 文本质量门禁（三态 pass/review/fail，NFKC；--audit 产 dispatch 消费的 gate_report）
+  ingest_queue.py         可入库清单：导出 CSV / 统计 / 查重
+  pipeline.py             批增一条命令：去重 → 分类 → 清单（--check 只预览）
+  ── 转换与 OCR ──
+  doc_convert.py          .doc → .docx（Word COM + zip 魔数验收），原 .doc 标 superseded
+  reconvert.py            同名覆盖重转（输出名带 doc_hash 后缀）
+  backfill_convert.py     G1/G2 缺口补录驱动（圈缺口 → 复用语料侧 convert_one → OCR 清单）
+  ocr_pages.py            PaddleOCR-json 页级 OCR（渲染 → OCR → 落盘，断点续跑）
+  ocr_merge.py            OCR 定稿合并回正式 md（配图段保留，旧 md 备份）
+  lazy_images.py          md 图片引用懒加载改写（<img loading="lazy">）
+  ── 抽题与统计 ──
+  chunker.py              切题器（v1 blocks / v2 items+probe+coverage，纯函数）
+  extract.py              题块落 questions 表（幂等，孤儿清理）
+  question_freq.py        同题频次：抽取 → 切题 → SimHash+Jaccard 聚簇 → 文档频率
+  report.py               questions 表 → 近重复簇 → 频次报告（md+csv）
+  cluster.py              题级吸附 + 99 区可删 gate（strong/manual/none 三态）
+  bookmarks.py            PDF 书签 → 合并版源边界落库（删 99 区前必跑）
+  reconcile.py            convert_log ok 件 vs 实存 md 逐一对账
+  dispatch.py             门禁 fail/review 件分流（六路由）
+  review_cli.py           灰区人工复核入口（--resolve 改状态留痕）
+  ── 检索与 LLM ──
+  build_db.py             kb.sqlite → 面经库.db（FTS5 trigram 检索库）
+  embed_questions.py      bge-small-zh-v1.5 向量化 → vec_questions
+  search.py               混合检索（kw FTS + 向量 KNN + RRF；--format rag）
+  llm_smoke.py            本地 LLM 冒烟对比（T1 RAG / T2 结构化抽取）
+  probe_provider.py       OpenAI 兼容 provider 探针（P1-P4 四项）
+  ── 维护 ──
+  purge_origin.py         删除已收入语料的原件（四重校验缺一不删）
 scripts/
-  补录-doc转docx.ps1       Word COM 批量 .doc → .docx（落到 30-补录 镜像树，不动源目录）
-tests/                    36 个用例（textmetrics / intake / classify / gate / 清单 / 切题）
+  补录-doc转docx.ps1       [DEPRECATED] 已由 doc_convert.py 取代，仅历史参考
+tests/                    99 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流…）
 ```
 
 ## 快速开始
@@ -104,24 +127,26 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
 
 ## 与语料内既有管线的关系
 
-不复制、不改写语料里已有的四个脚本，按职责分工：
+不复制、不改写语料里已有的脚本，按职责分工：
 
 | 环节 | 脚本 | 位置 |
 |---|---|---|
 | 登记 / 判重 | `intake.py` | 本仓库（新） |
 | 分类 | `classify.py` | 本仓库（新） |
 | 解析（pdf/docx/md → md 产物） | `convert.py` / `convert_one.py` | `…\21-面经数据库\tools\`（复用） |
-| 质量门禁 | `gate.py` | 本仓库（新） |
-| 拆题 | `parse_banks.py` | 语料内（复用，待接分类字段） |
-| 建库索引 | `build_db.py` | 语料内（复用，需加 collection/source_trust） |
+| 质量门禁 | `gate.py` | 本仓库（三态口径；语料侧同名脚本已降级为历史参考，见 docs/17） |
+| 拆题 | `chunker.py` / `extract.py` | 本仓库（新，v2 切题器） |
+| 建库索引 | `build_db.py` | 本仓库（新，FTS5 trigram 检索库） |
 
 `registry.json` 从此是"一次扫描的快照"，**事实源是 `kb.sqlite` 的 `source_documents`**。
 
 ## 尚未实现（明确记录，不假装有）
 
-- `classify --neighbor`（近邻判类）：需要文档向量索引，第②档归因；
-- `cluster`（增量吸附）：canonical 表已建，算法未写；
-- `reconcile`（四数对账）：用于清 `ok=423 vs 产物 391` 那 32 条旧账；
-- `dispatch` / `extract`：v2 §6 里的拆题与分发环节。
+- `verify_ledger.py`（G1-G7 统一核账门禁）：docs/15 方案已定（影子库对账 / skip_log / FAIL 阻断），
+  脚本与 `tests/test_verify_ledger.py` 均未落地；当前由 `gate.py --audit` 覆盖其中的文本质量维度；
+- `cluster` 的 canonical 落库：吸附算法与 99 区三态判定已实现（`cluster.py`），
+  簇结果尚未写入 `canonical_questions` / `question_variants` 表（增量吸附的存储层）；
+- `classify` 归因②档的向量近邻：标题 2-gram 近邻投票已实现（`--neighbor`），
+  基于文档向量索引的语义近邻未做。
 
-详见 `docs/04-工具链SOP.md` 的"未实现清单"。
+详见 `docs/04-工具链SOP.md` 与 `docs/15-检验门禁与线上打标方案-2026-11-17.md`。

@@ -49,7 +49,12 @@ def test_build_clusters_unrelated():
 @pytest.fixture()
 def tiny_corpus(tmp_path, monkeypatch):
     """临时语料：库内 2 份 md（各含同题）+ 99 区 1 份 md（同题）+ 1 份无匹配。"""
+    build = tmp_path / "build"
+    build.mkdir()
     monkeypatch.setattr(cl.config, "CORPUS_ROOT", tmp_path)
+    # P0-1 修复（2026-11-17 审核）：BUILD_DIR 是 import 期常量，monkeypatch CORPUS_ROOT
+    # 不会让它跟着变——漏 patch 时 cluster.main 的三件套产物会写进真实生产 build 目录。
+    monkeypatch.setattr(cl.config, "BUILD_DIR", build)
     monkeypatch.setattr(cl, "POOL_TOPS", ["pool"])
     monkeypatch.setattr(cl, "DIR99", "99d")
     monkeypatch.setattr(cl, "DIR20", "md20")
@@ -72,6 +77,7 @@ def tiny_corpus(tmp_path, monkeypatch):
 
 
 def test_end_to_end_verdict(tiny_corpus, tmp_path, monkeypatch):
+    build = tiny_corpus / "build"
     out = tmp_path / "res.json"
     rc = cl.main(["--no-cache", "--out", str(out), "--sample", "5"])
     assert rc == 0
@@ -81,5 +87,7 @@ def test_end_to_end_verdict(tiny_corpus, tmp_path, monkeypatch):
     assert vd.get("孤儿.md") == "none"       # 无匹配（含无题件）→ 默认保留
     assert res["verdict99"]["strong"] >= 1
     assert res["verdict99"]["none"] >= 1
-    # 产物三件套齐全
-    assert (tiny_corpus.parent is not None)
+    # 产物三件套齐全（P0-1 修复：原空壳断言 parent is not None 恒真，改为真断言；
+    # 且必须落在临时 build 里——写进生产 build 即回归）
+    assert (build / "cluster_pending.csv").exists()
+    assert (build / "cluster_sample50.md").exists()

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""gate 的端到端行为：健康 md 通过，坏字体 md 被拦，短文判 non_content。"""
+"""gate 的端到端行为：健康 md 通过，坏字体 md 判 fail(乱码)，短文判 fail(过短)。
+
+P0-2 适配（2026-11-17 审核）：gate.py 改三态（pass/review/fail）+ rows 结构后，
+原四态断言（garbled/non_content）相应改为 fail 的两种 reason。
+"""
 import json
 
 from gate import main
@@ -23,17 +27,20 @@ def test_gate_verdicts(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out.split("\n\n--- ")[0])
 
     assert out["files"] == 3
-    assert out["verdict"]["pass"] == 1
-    assert out["verdict"]["garbled"] == 1
-    assert out["verdict"]["non_content"] == 1
+    assert out["passed"] == 1
+    assert out["failed"] == 2          # garbled → fail(乱码)；short → fail(过短)
+    assert out["review"] == 0
 
 
-def test_gate_report_file(tmp_path, capsys):
+def test_gate_report_rows(tmp_path, capsys):
     md = tmp_path / "md"
     write(md / "a.md", "中文内容占绝大多数，这里只是测试报告落盘。" * 20)
     out_file = tmp_path / "report.json"
     main(["--md-dir", str(md), "--no-db", "--out", str(out_file)])
     capsys.readouterr()
     data = json.loads(out_file.read_text(encoding="utf-8"))
+    # P0-2：报告结构 = {summary, thresholds, rows, collisions}，与 dispatch/ocr_merge 消费口径一致
     assert data["summary"]["files"] == 1
-    assert data["results"][0]["md_path"].endswith("a.md")
+    assert data["rows"][0]["md"].endswith("a.md")
+    assert data["rows"][0]["state"] == "pass"
+    assert data["thresholds"]["nfkc"] is True

@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
 from kb import config, db  # noqa: E402
 
-BUILD = Path(r"<CORPUS_ROOT>\21-面经数据库\build")
+BUILD = Path(config.BUILD_DIR)   # P1-3 修复（2026-11-17 审核）：路径统一走 config，KB_* 环境变量可覆盖
 OCR_TEXT = BUILD / "ocr_text"
 SUPERSEDE_PATTERNS = (re.compile(r"^v[12]\.0-JavaGuide"),)  # V1.1 已由上游替代，同系列旧版一并建议退役
 

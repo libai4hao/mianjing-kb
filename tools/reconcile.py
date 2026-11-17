@@ -17,12 +17,14 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-BUILD = Path(r"<CORPUS_ROOT>\21-面经数据库\build")
-MD_ROOT = Path(r"<CORPUS_ROOT>\20-题库MD")
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kb import db, config  # noqa: E402
+
+# P1-3 修复（2026-11-17 审核）：原为硬编码绝对路径且定义在 kb import 之前，
+# KB_* 环境变量覆盖对本脚本完全失效；统一走 config，换机器不再坏。
+BUILD = Path(config.BUILD_DIR)
+MD_ROOT = Path(config.QUESTION_MD_DIR)
 
 
 def main() -> int:

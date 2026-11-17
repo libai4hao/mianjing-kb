@@ -24,7 +24,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
 from kb import config  # noqa: E402
 
-BUILD = Path(r"<CORPUS_ROOT>\21-面经数据库\build")
+BUILD = Path(config.BUILD_DIR)   # P1-3 修复（2026-11-17 审核）：路径统一走 config，KB_* 环境变量可覆盖
 OCR_TEXT = BUILD / "ocr_text"
 BACKUP = BUILD / "ocr_md_backup"
 IMG_MARK = "## 配图"

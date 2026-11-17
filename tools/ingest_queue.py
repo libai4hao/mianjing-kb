@@ -9,9 +9,9 @@
 数据源是视图 `ingest_queue`（status='classified'，已剔除 rejected / quarantined / duplicate）。
 
 用法：
-    python tools/queue.py --export build\\ingest_list.csv
-    python tools/queue.py --stats
-    python tools/queue.py --lookup "某个hash或文件名"
+    python tools/ingest_queue.py --export build\\ingest_list.csv
+    python tools/ingest_queue.py --stats
+    python tools/ingest_queue.py --lookup "某个hash或文件名"
 """
 from __future__ import annotations
 
