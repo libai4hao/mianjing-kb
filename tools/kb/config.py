@@ -34,6 +34,10 @@ QUARANTINE_PREFIX = "99-重复文件待删"
 INBOX_DIR_NAME = "31-收件箱"
 STAGING_DIR_NAME = "30-补录"
 
+# 20-题库MD：派生 md 镜像树（源 PDF/docx 转出来的产物，非源文档；
+# extract/cluster 把它并入题块池——内容与源件同源，但不重复计频次的"独立来源"）
+QUESTION_MD_DIR = CORPUS_ROOT / "20-题库MD"
+
 # ---------- 扩展名 ----------
 # 参与入库的"文档型"扩展名
 DOC_EXTS = {".pdf", ".docx", ".md", ".txt", ".doc", ".rtf", ".pptx", ".ppt"}

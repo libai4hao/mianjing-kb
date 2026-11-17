@@ -1,0 +1,167 @@
+# -*- coding: utf-8 -*-
+"""extract：把语料切成题块落 questions 表（P1-1，chunker v2 产出）。
+
+- 文档池 = source_documents 里 status='classified' 的件 + 20-题库MD 的 md 镜像（与 cluster 同池）
+- md/txt 直接读文件；pdf/docx/doc 走 question_freq.extract；<80 字符的空文档记 0 题
+- 每题算 q_norm / q_norm_hash / simhash，落 meta/schema/004_questions.sql 的 questions 表
+- 频次口径：精确同文直接可用视图 question_freq；近重复簇留给 P1-4 report（simhash）
+
+用法：
+    python tools/extract.py --limit 20          # 试跑 20 件
+    python tools/extract.py --stats             # 只看 questions 表分布
+    python tools/extract.py                     # 全量（幂等：同 doc 覆盖重写）
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from kb import config, db  # noqa: E402
+from question_freq import extract, normalize, simhash  # noqa: E402
+from chunker import chunk_v2  # noqa: E402
+
+NOW_FMT = "%Y-%m-%dT%H:%M:%S"
+MIN_CHARS = 80
+MIN_NORM = 6
+
+
+def text_of(path: Path) -> str:
+    """md/txt 读文件，其余走 question_freq.extract；<80 字符视为无文本。"""
+    if path.suffix.lower() in (".md", ".txt"):
+        text = path.read_text(encoding="utf-8", errors="replace")
+    else:
+        text = extract(path)
+    if len(text.strip()) < MIN_CHARS:
+        return ""
+    return re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", text)
+
+
+def doc_pool(conn) -> list[tuple[str, Path]]:
+    """(doc_hash, path)：classified 件 + 20-题库MD md 镜像（无行孤儿按路径自算 hash 前缀）。"""
+    pool: dict[str, Path] = {}
+    for r in conn.execute(
+            "SELECT doc_hash, src_path FROM source_documents WHERE status='classified'").fetchall():
+        p = Path(r["src_path"])
+        if p.exists():
+            pool[r["doc_hash"]] = p
+    if config.QUESTION_MD_DIR.exists():
+        for p in config.QUESTION_MD_DIR.rglob("*.md"):
+            # 镜像 md 无 DB 行：doc_hash 用内容 sha 前 16 位（与 intake 口径一致）
+            h = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+            pool.setdefault(h, p)
+    return sorted(pool.items())
+
+
+def _signed64(v: int) -> int:
+    """simhash 为无符号 64 位，SQLite INTEGER 是有符号——转二补码。"""
+    return v - (1 << 64) if v >= (1 << 63) else v
+
+
+def extract_doc(doc_hash: str, path: Path) -> list[dict]:
+    """单文档 → questions 行列表（不落库）。"""
+    text = text_of(path)
+    if not text:
+        return []
+    rows = []
+    v2 = chunk_v2(text)
+    for it in v2["items"]:
+        qn = normalize(it["q"])
+        if len(qn) < MIN_NORM:
+            continue
+        rows.append({
+            "doc_hash": doc_hash,
+            "seq": it["seq"],
+            "q_text": it["q"][:2000],
+            "a_text": it["a"][:20000],
+            "span_start": it["span"][0],
+            "span_end": it["span"][1],
+            "qtype": it["qtype"],
+            "conf": it["conf"],
+            "q_norm": qn[:500],
+            "q_norm_hash": hashlib.sha256(qn.encode("utf-8")).hexdigest()[:16],
+            "simhash": _signed64(simhash(qn)),
+            "extracted_at": datetime.now().strftime(NOW_FMT),
+        })
+    return rows
+
+
+def store(conn, doc_hash: str, rows: list[dict]) -> None:
+    """幂等写入：先删该 doc 旧题再插（文档内容变了整篇重切）。"""
+    conn.execute("DELETE FROM questions WHERE doc_hash=?", (doc_hash,))
+    if rows:
+        cols = ",".join(rows[0].keys())
+        ph = ",".join("?" for _ in rows[0])
+        conn.executemany(
+            f"INSERT INTO questions ({cols}) VALUES ({ph})",
+            [[r[c] for c in rows[0]] for r in rows],
+        )
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="P1-1：题块落 questions 表")
+    ap.add_argument("--db", default=str(config.DB_PATH))
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--stats", action="store_true", help="只看 questions 表分布")
+    args = ap.parse_args(argv)
+
+    conn = db.connect(args.db, create=not args.dry_run)
+    if args.stats:
+        n = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+        out = {"questions": n,
+               "by_doc": conn.execute("SELECT COUNT(DISTINCT doc_hash) FROM questions").fetchone()[0],
+               "qtype": dict(conn.execute("SELECT qtype, COUNT(*) FROM questions GROUP BY 1 ORDER BY 2 DESC").fetchall()),
+               "conf": dict(conn.execute("SELECT conf, COUNT(*) FROM questions GROUP BY 1 ORDER BY 2 DESC").fetchall()),
+               "freq_top10": [dict(r) for r in conn.execute(
+                   "SELECT sample_q, n_distinct_docs FROM question_freq LIMIT 10").fetchall()]}
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+        conn.close()
+        return 0
+
+    pool = doc_pool(conn)
+    if args.limit:
+        pool = pool[:args.limit]
+    started = time.perf_counter()
+    n_docs = n_q = n_empty = n_err = n_del = 0
+    qtype: dict[str, int] = {}
+    conf: dict[str, int] = {}
+    for i, (doc_hash, p) in enumerate(pool):
+        try:
+            rows = extract_doc(doc_hash, p)
+        except Exception as ex:  # noqa: BLE001
+            n_err += 1
+            print(f"[warn] {p.name}: {type(ex).__name__}: {ex}", file=sys.stderr)
+            continue
+        n_docs += 1
+        if not rows:
+            n_empty += 1
+        n_q += len(rows)
+        for r in rows:
+            qtype[r["qtype"]] = qtype.get(r["qtype"], 0) + 1
+            conf[r["conf"]] = conf.get(r["conf"], 0) + 1
+        if not args.dry_run:
+            store(conn, doc_hash, rows)
+        if (i + 1) % 200 == 0:
+            print(f"[prog] {i + 1}/{len(pool)} docs, {n_q} questions", file=sys.stderr)
+    if not args.dry_run:
+        conn.commit()
+    elapsed = time.perf_counter() - started
+    print(json.dumps({
+        "docs": n_docs, "questions": n_q, "empty_docs": n_empty, "errors": n_err,
+        "dry_run": args.dry_run, "elapsed_sec": round(elapsed, 1),
+        "qtype": qtype, "conf": conf,
+    }, ensure_ascii=False, indent=1))
+    conn.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

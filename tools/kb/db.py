@@ -31,6 +31,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(sql)
     _ensure_parent_dir(conn)
     _ensure_source_spans(conn)
+    _ensure_questions(conn)
     conn.commit()
 
 
@@ -63,6 +64,12 @@ def _ensure_source_spans(conn: sqlite3.Connection) -> None:
     for col, decl in (("source_count", "INTEGER"), ("sources_json", "TEXT")):
         if not _column_exists(conn, "source_documents", col):
             conn.execute(f"ALTER TABLE source_documents ADD COLUMN {col} {decl}")
+
+
+def _ensure_questions(conn: sqlite3.Connection) -> None:
+    """补 questions 表 + 频次视图（004，P1-1 extract 落表）。"""
+    sql = (SCHEMA_FILE.parent / "004_questions.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
 
 
 @contextmanager
