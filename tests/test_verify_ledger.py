@@ -60,6 +60,9 @@ def mini_env(tmp_path, monkeypatch):
     kb.row_factory = sqlite3.Row
     kb.executescript((REAL_META / "schema" / "001_init.sql").read_text(encoding="utf-8"))
     kb.executescript((REAL_META / "schema" / "004_questions.sql").read_text(encoding="utf-8"))
+    kb.executescript((REAL_META / "schema" / "005_labels_staging.sql").read_text(encoding="utf-8"))
+    if not any(r[1] == "topic" for r in kb.execute("PRAGMA table_info(questions)")):
+        kb.execute("ALTER TABLE questions ADD COLUMN topic TEXT")   # 006 题级 topic（db.py 同款）
     kb.execute("INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, "
                "src_path, dir_path, status, batch_id, first_seen_at, last_seen_at, note) VALUES "
                "(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -220,6 +223,33 @@ def test_g5_retire_log_exempts_mirror(mini_env):
                   encoding="utf-8-sig")
     g = vl.g5_disk(mini_env["kb"], mini_env["corpus"], mini_env["build"])
     assert not any(x["kind"] == "orphan_in_99" for x in g["fails"])
+
+
+# ---------------- G6 ----------------
+def test_g6_skip_and_pass_and_fail(mini_env):
+    kb = mini_env["kb"]
+    # staging 空 → SKIP
+    g = vl.g6_label(kb)
+    assert g["state"] == "SKIP"
+    # 合格打标 → PASS（先给 kb.questions 插基线 topic 行，防漂移软指标误触发）
+    kb.execute("INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
+               "q_norm_hash, simhash, span_start, span_end, topic, extracted_at) VALUES "
+               "(1,'h1',1,'什么是JVM？','','八股','high','x','y',0,0,1,'JVM','now')")
+    kb.execute("INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, provider, "
+               "model, redacted, latency_ms, tokens, labeled_at) VALUES "
+               "(1,'JVM','八股',3,'[\"类加载\"]','p','m',0,1,1,'now')")
+    kb.commit()
+    g2 = vl.g6_label(kb)
+    assert g2["state"] == "PASS" and g2["detail"]["ok_rate"] == 1.0
+    # schema 不合格（qtype 越枚举 + difficulty 越界 + tags 非 JSON）→ FAIL
+    kb.execute("INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, provider, "
+               "model, redacted, latency_ms, tokens, labeled_at) VALUES "
+               "(2,'','玄学',9,'oops','p','m',0,1,1,'now')")
+    kb.commit()
+    g3 = vl.g6_label(kb)
+    assert g3["state"] == "FAIL"
+    assert g3["detail"]["ok_rate"] == 0.5          # 1/2 合格 < 0.95
+    assert any(f.get("kind") == "schema_ok_rate" for f in g3["fails"])
 
 
 # ---------------- main / exit code ----------------

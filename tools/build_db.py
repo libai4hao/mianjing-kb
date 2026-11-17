@@ -110,9 +110,10 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
                     (out.execute("SELECT last_insert_rowid()").fetchone()[0], stem, text[:100000]))
         n_docs_content += 1
     # ---- questions ----
+    # 题级 topic 优先（006 列，batch_label merge 的事实源落点）→ 文档级 → 镜像继承兜底
     qs = src.execute(
         "SELECT q.qid, q.doc_hash, q.seq, q.q_text, q.a_text, q.qtype, q.conf, q.q_norm_hash, "
-        "       COALESCE(sd.topic,''), COALESCE(sd.category,'') "
+        "       COALESCE(q.topic, sd.topic, ''), COALESCE(sd.category, '') "
         "FROM questions q LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash").fetchall()
     out.executemany(
         "INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?)",

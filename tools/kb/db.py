@@ -32,6 +32,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     _ensure_parent_dir(conn)
     _ensure_source_spans(conn)
     _ensure_questions(conn)
+    _ensure_labels_staging(conn)
+    _ensure_question_topic(conn)
     conn.commit()
 
 
@@ -70,6 +72,22 @@ def _ensure_questions(conn: sqlite3.Connection) -> None:
     """补 questions 表 + 频次视图（004，P1-1 extract 落表）。"""
     sql = (SCHEMA_FILE.parent / "004_questions.sql").read_text(encoding="utf-8")
     conn.executescript(sql)
+
+
+def _ensure_labels_staging(conn: sqlite3.Connection) -> None:
+    """补 labels_staging 打标暂存表（005，docs/15 §3.6——G6 通过才 merge）。"""
+    sql = (SCHEMA_FILE.parent / "005_labels_staging.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+
+
+def _ensure_question_topic(conn: sqlite3.Connection) -> None:
+    """006：questions 加题级 topic 列（LLM 打标的事实源落点，2026-11-17）。
+
+    题级 topic 优先于文档级（build_db 重建口径：COALESCE(q.topic, sd.topic, 镜像继承)）；
+    extract 落表不填（NULL），batch_label merge 填。
+    """
+    if not _column_exists(conn, "questions", "topic"):
+        conn.execute("ALTER TABLE questions ADD COLUMN topic TEXT")
 
 
 @contextmanager

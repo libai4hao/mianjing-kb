@@ -48,6 +48,8 @@ tools/
   embed_questions.py      bge-small-zh-v1.5 向量化 → vec_questions
   search.py               混合检索（kw FTS + 向量 KNN + RRF；--format rag）
   llm_smoke.py            本地 LLM 冒烟对比（T1 RAG / T2 结构化抽取）
+  llm_client.py           OpenAI 兼容客户端（provider 路由 / 重试退避 / JSON 宽松解析 / 脱敏）
+  batch_label.py          LLM 批量打标（staging 暂存 / 预算封顶 / 断点续跑 / 抽查 / G6+merge）
   probe_provider.py       OpenAI 兼容 provider 探针（P1-P4 四项）
   ── 维护 ──
   refresh.py              检索库影子重建 + 向量回填 + G1-G5 门禁 + 原子切换（K1 编排）
@@ -55,7 +57,7 @@ tools/
   purge_origin.py         删除已收入语料的原件（四重校验缺一不删）
 scripts/
   补录-doc转docx.ps1       [DEPRECATED] 已由 doc_convert.py 取代，仅历史参考
-tests/                    126 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁…）
+tests/                    146 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁/LLM 客户端/打标…）
 ```
 
 ## 快速开始
@@ -156,8 +158,14 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
   + RE_LIST_ITEM 负向前瞻（`**` 不再误判列表项）。全量重切 **18,642 → 32,087 题（+13,445）**，
   skip_log 诚实清理（773→430 条），G1 同名族判定修复 23 件错位误报；
   终检 G1-G5 全 PASS，生产库二次原子切换（13,716 canonical 簇）；
-- **G6 打标质量门禁**：线上打标（docs/15 §3 batch_label）未启用，LLM key 待配置后转硬；
-- **向量增量（K2）**：当前全量重建约 6 分钟，暂无增量需求。
+- ~~G6 打标质量门禁~~ **已落地（2026-11-17）**：`verify_ledger` G6（schema 合格率 ≥0.95 硬门 +
+  topic 漂移 >15% WARN）+ `llm_client.py`（provider 路由/重试退避/JSON 宽松解析/脱敏）+
+  `batch_label.py`（staging 暂存/预算封顶/断点续跑/--sample 抽查/G6 复核 merge）+
+  006 迁移（questions 题级 topic 列，打标事实源落点）。**key 一配置就可以用**：
+  `[Environment]::SetEnvironmentVariable('LLM_KEY','sk-xxx','User')` 后
+  `python tools\batch_label.py --check` → 打标 → `--sample 50` 人工抽查 → `--merge`。
+  local 路径（ollama qwen3-4b）已端到端实测（3 题真打标→G6→merge 落库）；
+- **向量增量（K2）**：当前全量重嵌约 9 分钟，暂无增量需求。
 
 ## 仍待消化（数据债，非代码缺口）
 

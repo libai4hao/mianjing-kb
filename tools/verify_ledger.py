@@ -310,10 +310,70 @@ def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
                  {"retire_log_rows": len(retire_names)}, sql)
 
 
-# ---------------- G6 打标质量（未启用） ----------------
-def g6_label() -> dict:
-    return _gate("G6", "打标质量", "软→硬", "SKIP", [],
-                 {"note": "labels_staging 未建（线上打标未启用），打标后转硬"}, "")
+# ---------------- G6 打标质量 ----------------
+G6_QTYPES = ("八股", "算法", "HR", "场景", "项目")
+
+
+def g6_label(kb_conn) -> dict:
+    """打标质量（docs/15 §2 G6，2026-11-17 落地）。
+
+    staging 无行 → SKIP（打标未启用）；有行则：
+      硬指标（FAIL 阻断 merge）：schema 合格率 ≥ 0.95——
+        topic 非空且 ≤40 字、qtype ∈ 枚举、difficulty ∈ 1-5、tags 可解析为 JSON 数组；
+      软指标（WARN 记录）：staging.topic 分布相对 questions 现有分布漂移——
+        新 topic（现有库未出现过的主题）占比 > 15% → WARN（可能是打标跑偏，人工抽查）。
+    人工抽检环节（≥0.8 准确率）由 `batch_label --sample 50` 出清单人工核，无 ground truth 不自动判。
+    """
+    sql = ("SELECT COUNT(*) FROM labels_staging; "
+           "-- 合格: topic非空<=40字 AND qtype∈枚举 AND difficulty∈1..5 AND tags为JSON数组")
+    n = kb_conn.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0]
+    if n == 0:
+        return _gate("G6", "打标质量", "软→硬", "SKIP", [],
+                     {"staged": 0, "note": "labels_staging 为空（打标未跑或已 merge）"}, sql)
+    rows = kb_conn.execute(
+        "SELECT s.topic, s.qtype, s.difficulty, s.tags FROM labels_staging s").fetchall()
+    bad = []
+    for r in rows:
+        why = []
+        if not (r["topic"] or "").strip() or len(r["topic"]) > 40:
+            why.append("topic")
+        if r["qtype"] not in G6_QTYPES:
+            why.append("qtype")
+        if not isinstance(r["difficulty"], int) or not 1 <= r["difficulty"] <= 5:
+            why.append("difficulty")
+        try:
+            tags = json.loads(r["tags"] or "[]")
+            if not isinstance(tags, list):
+                why.append("tags")
+        except json.JSONDecodeError:
+            why.append("tags")
+        if why:
+            bad.append({"topic": r["topic"], "qtype": r["qtype"],
+                        "difficulty": r["difficulty"], "bad_fields": why})
+    ok_rate = 1 - len(bad) / n
+
+    # 软指标：新 topic 占比（现有 questions 未出现过的主题）
+    known = {r[0] for r in kb_conn.execute(
+        "SELECT DISTINCT topic FROM questions WHERE topic IS NOT NULL AND topic != ''")}
+    new_topics = {r["topic"] for r in rows if (r["topic"] or "").strip()} - known
+    n_new = sum(1 for r in rows if (r["topic"] or "").strip() in new_topics)
+    drift = n_new / n
+
+    fails = []
+    state = "PASS"
+    if ok_rate < 0.95:
+        state = "FAIL"
+        fails.extend(bad[:20])
+        fails.append({"kind": "schema_ok_rate", "ok_rate": round(ok_rate, 4),
+                      "threshold": 0.95, "bad_total": len(bad)})
+    elif drift > 0.15:
+        state = "WARN"
+        fails.append({"kind": "topic_drift", "new_topic_ratio": round(drift, 4),
+                      "new_topics": sorted(new_topics)[:10],
+                      "note": "新主题占比偏高——--sample 50 人工抽查后再 merge"})
+    return _gate("G6", "打标质量", "软→硬", state, fails,
+                 {"staged": n, "ok_rate": round(ok_rate, 4),
+                  "new_topic_ratio": round(drift, 4)}, sql)
 
 
 # ---------------- G7 文档一致性（软） ----------------
@@ -441,7 +501,7 @@ def main(argv=None) -> int:
         g3_topic(out_conn),
         g4_index(out_conn),
         g5_disk(kb_conn, Path(config.CORPUS_ROOT), build_dir),
-        g6_label(),
+        g6_label(kb_conn),
     ]
     if args.docs:
         repo_root = Path(__file__).resolve().parents[1]
