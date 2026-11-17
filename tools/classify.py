@@ -296,6 +296,127 @@ def run_neighbor(conn, rules, dry_run: bool = False, show: int = 0) -> int:
     return 0
 
 
+def _cos(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def vote_semantic(scored: list[tuple], top_k: int = 5, min_conf: float = 0.6) -> dict:
+    """语义近邻投票（纯函数，可离线单测）：scored = [(cos, topic, sub_topic, file_name)]，
+    调用方保证已按 cos 降序。返回与 neighbor_vote 同构。"""
+    top = scored[:top_k]
+    if not top:
+        return {"topic": config.UNCLASSIFIED, "sub_topic": "", "confidence": 0.0,
+                "best_cos": 0.0, "neighbors": []}
+    votes: dict[str, float] = {}
+    sub_of: dict[str, str] = {}
+    for cos_, topic, sub, _ in top:
+        votes[topic] = votes.get(topic, 0.0) + cos_
+        sub_of.setdefault(topic, sub)
+    total = sum(votes.values())
+    topic, w = max(votes.items(), key=lambda kv: kv[1])
+    conf = w / total if total else 0.0
+    if conf < min_conf:
+        return {"topic": config.UNCLASSIFIED, "sub_topic": "", "confidence": round(conf, 3),
+                "best_cos": round(top[0][0], 3),
+                "neighbors": [(f, t, round(c, 3)) for c, t, s, f in top]}
+    return {"topic": topic, "sub_topic": sub_of.get(topic, ""), "confidence": round(conf, 3),
+            "best_cos": round(top[0][0], 3),
+            "neighbors": [(f, t, round(c, 3)) for c, t, s, f in top]}
+
+
+def run_neighbor_vec(conn, dry_run: bool = False, show: int = 0) -> int:
+    """归因②档语义版（docs/03 §8.4「需要向量索引」一项，2026-11-17 落地）：
+    fastembed(bge-small-zh-v1.5) 嵌入标题 → 余弦 top-5 加权投票。
+
+    与 run_neighbor（标题 2-gram Jaccard）互补：命中"多线程↔并发"这类同义改写。
+    自动落库门槛：best_cos≥0.85 且 conf≥0.6（余弦分布整体偏高，0.85 ≈ Jaccard 0.9
+    的保守度，宁缺勿滥——错分类比缺分类难清）；其余出待人工清单。
+    """
+    import csv as _csv
+    from embed_questions import embed_texts  # 惰性加载模型（fastembed 首跑下载）
+
+    uncls = conn.execute(
+        "SELECT doc_hash, dir_path, file_name, category FROM source_documents "
+        "WHERE status='classified' AND topic=? ORDER BY dir_path", (config.UNCLASSIFIED,)).fetchall()
+    refs = conn.execute(
+        "SELECT doc_hash, file_name, topic, sub_topic, category FROM source_documents "
+        "WHERE status='classified' AND topic NOT IN (?, '', '综合')",
+        (config.UNCLASSIFIED,)).fetchall()
+    ref_by_cat: dict[str, list] = {}
+    for r in refs:
+        ref_by_cat.setdefault(r["category"], []).append(r)
+    print(f"[neighbor-vec] 未分类 {len(uncls)} 件，参照池 "
+          f"{ {k: len(v) for k, v in ref_by_cat.items()} }", flush=True)
+
+    # 批量嵌入（一次模型调用；标题去扩展名）
+    stems_ref = [Path(r["file_name"]).stem for r in refs]
+    stems_tgt = [Path(r["file_name"]).stem for r in uncls]
+    vecs = embed_texts(stems_ref + stems_tgt)
+    vec_of = dict(zip(stems_ref + stems_tgt, vecs))
+
+    applied, review = [], []
+    for r in uncls:
+        tv = vec_of.get(Path(r["file_name"]).stem)
+        scored = []
+        for ref in ref_by_cat.get(r["category"], []):
+            rv = vec_of.get(Path(ref["file_name"]).stem)
+            if not tv or not rv:
+                continue
+            c = _cos(tv, rv)
+            if c >= 0.5:
+                scored.append((c, ref["topic"], ref["sub_topic"] or "", ref["file_name"]))
+        scored.sort(key=lambda x: -x[0])
+        res = vote_semantic(scored)
+        rec = {"dir_path": r["dir_path"], "file_name": r["file_name"], "category": r["category"],
+               "proposal_topic": res["topic"], "sub_topic": res["sub_topic"],
+               "confidence": res["confidence"], "best_cos": res["best_cos"],
+               "neighbors": "; ".join(f"{f}→{t}({c})" for f, t, c in res["neighbors"][:3])}
+        if res["topic"] != config.UNCLASSIFIED and res["best_cos"] >= 0.85 and res["confidence"] >= 0.6:
+            applied.append((r["doc_hash"], r, res, rec))
+        else:
+            rec["proposal_topic"] = f"<待人工:{res['topic']}>" if res["topic"] != config.UNCLASSIFIED else "<待人工>"
+            review.append(rec)
+
+    if not dry_run:
+        for doc_hash, r, res, _rec in applied:
+            conn.execute(
+                "UPDATE source_documents SET topic=?, sub_topic=?, topic_source='neighbor', "
+                "classifier='neighbor', classified_at=? WHERE doc_hash=?",
+                (res["topic"], res["sub_topic"], datetime.now().strftime(NOW_FMT), doc_hash))
+        conn.commit()
+
+    rp = config.BUILD_DIR / "topic_neighbor_vec_review.csv"
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    with rp.open("w", encoding="utf-8-sig", newline="") as fh:
+        w = _csv.DictWriter(fh, fieldnames=["dir_path", "file_name", "category", "proposal_topic",
+                                            "sub_topic", "confidence", "best_cos", "neighbors"])
+        w.writeheader()
+        for _, _, _, rec in applied:
+            w.writerow(rec)
+        for rec in review:
+            w.writerow(rec)
+
+    from collections import Counter
+    top = Counter(res["topic"] for _, _, res, _ in applied)
+    print(json.dumps({
+        "unclassified": len(uncls),
+        "auto_applied": len(applied) if not dry_run else 0,
+        "would_apply": len(applied),
+        "topic_dist": dict(top.most_common()),
+        "review_left": len(review),
+        "dry_run": dry_run,
+    }, ensure_ascii=False, indent=1))
+    print(f"[review] {len(review)} 件待人工 → {rp}")
+    if show:
+        print("\n--- 自动应用抽样 ---")
+        for doc_hash, r, res, _rec in applied[:show]:
+            print(f"  {res['topic']:<8} conf={res['confidence']:<6} cos={res['best_cos']:<6} {r['file_name'][:70]}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="按规则给源文档打分类")
     ap.add_argument("--db", default=str(config.DB_PATH))
@@ -307,13 +428,18 @@ def main(argv=None) -> int:
     ap.add_argument("--show", type=int, default=0, help="打印前 N 条判定结果")
     ap.add_argument("--neighbor", action="store_true",
                     help="近邻判类：给 topic=未分类 的已入库件做标题近邻投票（自动应用 ≥0.6 置信，其余出待人工清单）")
+    ap.add_argument("--vec", action="store_true",
+                    help="配合 --neighbor：改用语义向量（fastembed 标题余弦，命中同义改写），门槛 cos≥0.85+conf≥0.6")
     args = ap.parse_args(argv)
 
     conn = db.connect(args.db, create=not args.dry_run)
     rules = Rules()
 
     if args.neighbor:
-        rc = run_neighbor(conn, rules, dry_run=args.dry_run, show=args.show)
+        if args.vec:
+            rc = run_neighbor_vec(conn, dry_run=args.dry_run, show=args.show)
+        else:
+            rc = run_neighbor(conn, rules, dry_run=args.dry_run, show=args.show)
         conn.close()
         return rc
 
