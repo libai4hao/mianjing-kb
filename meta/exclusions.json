@@ -1,0 +1,11 @@
+{
+ "items": [
+  {
+   "rel": "12-综合题库/原创PDF面试手册/计算机基础/算法刷题/Leetcode-Go.pdf",
+   "md_rel": "题库/综合/Leetcode-Go.md",
+   "reason": "P2-⑤ 拍板（2026-11-17）：1,382 页 CJK 仅 11.4%，代码占比过高，剔除出题池避免代码块噪音题；md 保留在 20-题库MD，检索库 docs_fts 全文仍可搜",
+   "decided_by": "user",
+   "decided_at": "2026-11-17"
+  }
+ ]
+}

@@ -98,6 +98,24 @@ def test_extract_empty_doc(tmp_env):
     assert extract.extract_doc(h, p) == []
 
 
+def test_exclusion_pool(tmp_env, tmp_path, monkeypatch):
+    """P2-⑤：exclusions.json 命中的源件与 md 镜像都不进题池。"""
+    corpus, conn = tmp_env
+    h, p = _seed_doc(conn, corpus, "被排除.md", MD_A)
+    (config.QUESTION_MD_DIR / "镜像.md").write_text(MD_A, encoding="utf-8")
+    ex = tmp_path / "ex.json"
+    ex.write_text(json.dumps({"items": [
+        {"rel": "被排除.md", "md_rel": "镜像.md", "reason": "test"}]}, ensure_ascii=False),
+        encoding="utf-8")
+    monkeypatch.setattr(config, "EXCLUSIONS_FILE", ex)
+    pool = extract.doc_pool(conn)
+    paths = {v.name for _, v in pool}
+    assert "被排除.md" not in paths and "镜像.md" not in paths
+    monkeypatch.setattr(config, "EXCLUSIONS_FILE", tmp_path / "不存在.json")
+    paths2 = {v.name for _, v in extract.doc_pool(conn)}
+    assert "被排除.md" in paths2 and "镜像.md" in paths2
+
+
 def test_pool_hash_stable_across_content_change(tmp_env, monkeypatch):
     """md 镜像 doc_hash 按路径稳定：md 内容被改写（OCR 合并/懒加载）hash 不变，不产生孤儿行。"""
     corpus, conn = tmp_env

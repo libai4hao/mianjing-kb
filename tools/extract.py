@@ -44,19 +44,40 @@ def text_of(path: Path) -> str:
     return re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", text)
 
 
+def _excluded_rels() -> tuple[set[str], set[str]]:
+    """P2-⑤ 排除表：返回 (源文件 rel 集, md 镜像 rel 集)，正反斜杠归一。"""
+    if not config.EXCLUSIONS_FILE.exists():
+        return set(), set()
+    data = json.loads(config.EXCLUSIONS_FILE.read_text(encoding="utf-8"))
+    src = {x.get("rel", "").replace("\\", "/") for x in data.get("items", []) if x.get("rel")}
+    mds = {x.get("md_rel", "").replace("\\", "/") for x in data.get("items", []) if x.get("md_rel")}
+    return src, mds
+
+
 def doc_pool(conn) -> list[tuple[str, Path]]:
-    """(doc_hash, path)：classified 件 + 20-题库MD md 镜像（无行孤儿按路径自算 hash 前缀）。"""
+    """(doc_hash, path)：classified 件 + 20-题库MD md 镜像（无行孤儿按路径自算 hash 前缀）。
+    exclusions.json 命中的件不进题池（P2-⑤：保留检索、不抽题）。"""
     pool: dict[str, Path] = {}
+    ex_src, ex_md = _excluded_rels()
     for r in conn.execute(
             "SELECT doc_hash, src_path FROM source_documents WHERE status='classified'").fetchall():
         p = Path(r["src_path"])
-        if p.exists():
-            pool[r["doc_hash"]] = p
+        if not p.exists():
+            continue
+        try:
+            rel = p.relative_to(config.CORPUS_ROOT).as_posix()
+        except ValueError:
+            rel = p.name
+        if rel in ex_src:
+            continue
+        pool[r["doc_hash"]] = p
     if config.QUESTION_MD_DIR.exists():
         for p in config.QUESTION_MD_DIR.rglob("*.md"):
             # 镜像 md 无 DB 行：doc_hash 按路径稳定（内容 hash 会在 md 被改写时产生孤儿行——
             # OCR 合并/懒加载每改一次 md，旧 hash 的题行就残留累积，2026-11-17 修复）
             rel = p.relative_to(config.QUESTION_MD_DIR).as_posix()
+            if rel in ex_md:
+                continue
             h = hashlib.sha256(("md-mirror:" + rel).encode("utf-8")).hexdigest()[:16]
             pool.setdefault(h, p)
     return sorted(pool.items())
