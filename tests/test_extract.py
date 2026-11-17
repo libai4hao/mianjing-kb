@@ -96,3 +96,27 @@ def test_extract_empty_doc(tmp_env):
     corpus, conn = tmp_env
     h, p = _seed_doc(conn, corpus, "empty.md", "太短")
     assert extract.extract_doc(h, p) == []
+
+
+def test_pool_hash_stable_across_content_change(tmp_env, monkeypatch):
+    """md 镜像 doc_hash 按路径稳定：md 内容被改写（OCR 合并/懒加载）hash 不变，不产生孤儿行。"""
+    corpus, conn = tmp_env
+    md_dir = config.QUESTION_MD_DIR
+    p = md_dir / "子目录"
+    p.mkdir()
+    f = p / "题库.md"
+    f.write_text("# 第一版\n\n" + "1. 什么是索引？" * 5, encoding="utf-8")
+    h1 = dict(extract.doc_pool(conn)).keys()
+    key1 = next(k for k, v in extract.doc_pool(conn) if v == f)
+    f.write_text("# 第二版（内容变了，懒加载改写）\n\n" + "1. 什么是索引？" * 5, encoding="utf-8")
+    key2 = next(k for k, v in extract.doc_pool(conn) if v == f)
+    assert key1 == key2
+    # 孤儿清理：写入一个不在池里的 doc_hash 的题行，purge 应删掉
+    conn.execute(
+        "INSERT INTO questions (doc_hash, seq, q_text, a_text, span_start, span_end, "
+        "q_norm, q_norm_hash, simhash, extracted_at) VALUES (?, 1, 'x', '', 0, 1, 'x', 'x', 0, 'now')",
+        ("deadbeefdeadbeef",))
+    conn.commit()
+    removed = extract.purge_orphans(conn, {key2})
+    assert removed == 1
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash='deadbeefdeadbeef'").fetchone()[0] == 0

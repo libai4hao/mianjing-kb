@@ -54,10 +54,24 @@ def doc_pool(conn) -> list[tuple[str, Path]]:
             pool[r["doc_hash"]] = p
     if config.QUESTION_MD_DIR.exists():
         for p in config.QUESTION_MD_DIR.rglob("*.md"):
-            # 镜像 md 无 DB 行：doc_hash 用内容 sha 前 16 位（与 intake 口径一致）
-            h = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+            # 镜像 md 无 DB 行：doc_hash 按路径稳定（内容 hash 会在 md 被改写时产生孤儿行——
+            # OCR 合并/懒加载每改一次 md，旧 hash 的题行就残留累积，2026-11-17 修复）
+            rel = p.relative_to(config.QUESTION_MD_DIR).as_posix()
+            h = hashlib.sha256(("md-mirror:" + rel).encode("utf-8")).hexdigest()[:16]
             pool.setdefault(h, p)
     return sorted(pool.items())
+
+
+def purge_orphans(conn, pool_keys: set[str]) -> int:
+    """清理 questions 里 doc_hash 不在当前池的孤儿行（内容 hash 时代遗留/后续源退役）。"""
+    stale = [r[0] for r in conn.execute("SELECT DISTINCT doc_hash FROM questions").fetchall()
+             if r[0] not in pool_keys]
+    removed = 0
+    for i in range(0, len(stale), 500):
+        chunk = stale[i:i + 500]
+        conn.execute(f"DELETE FROM questions WHERE doc_hash IN ({','.join('?' * len(chunk))})", chunk)
+        removed += len(chunk)
+    return removed
 
 
 def _signed64(v: int) -> int:
@@ -152,10 +166,12 @@ def main(argv=None) -> int:
         if (i + 1) % 200 == 0:
             print(f"[prog] {i + 1}/{len(pool)} docs, {n_q} questions", file=sys.stderr)
     if not args.dry_run:
+        n_purged = purge_orphans(conn, {k for k, _ in pool})
         conn.commit()
     elapsed = time.perf_counter() - started
     print(json.dumps({
         "docs": n_docs, "questions": n_q, "empty_docs": n_empty, "errors": n_err,
+        "purged_orphan_docs": n_purged if not args.dry_run else 0,
         "dry_run": args.dry_run, "elapsed_sec": round(elapsed, 1),
         "qtype": qtype, "conf": conf,
     }, ensure_ascii=False, indent=1))
