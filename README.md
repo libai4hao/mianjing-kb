@@ -21,7 +21,7 @@ tools/
   kb/                     公共库：config / db / hashing / textmetrics
   ── 入库管线 ──
   intake.py               登记 + sha256 判重（新增/重复/移动/改名/复活/隔离）
-  classify.py             分类：规则判类 + 近邻投票（--neighbor）+ 人工覆盖
+  classify.py             分类：规则判类 + 近邻投票（--neighbor 标题 Jaccard / --vec 语义向量）+ 人工覆盖
   gate.py                 文本质量门禁（三态 pass/review/fail，NFKC；--audit 产 dispatch 消费的报告；--sentinel 哨兵回归）
   ingest_queue.py         可入库清单：导出 CSV / 统计 / 查重
   pipeline.py             批增一条命令：去重 → 分类 → 清单（--check 只预览）
@@ -37,6 +37,7 @@ tools/
   extract.py              题块落 questions 表（幂等，孤儿清理）
   question_freq.py        同题频次：抽取 → 切题 → SimHash+Jaccard 聚簇 → 文档频率
   report.py               questions 表 → 近重复簇 → 频次报告（md+csv）
+  canonical.py            题簇落库 canonical_questions / question_variants（全量唯一题登记簿）
   cluster.py              题级吸附 + 99 区可删 gate（strong/manual/none 三态）
   bookmarks.py            PDF 书签 → 合并版源边界落库（删 99 区前必跑）
   reconcile.py            convert_log ok 件 vs 实存 md 逐一对账
@@ -49,11 +50,12 @@ tools/
   llm_smoke.py            本地 LLM 冒烟对比（T1 RAG / T2 结构化抽取）
   probe_provider.py       OpenAI 兼容 provider 探针（P1-P4 四项）
   ── 维护 ──
+  refresh.py              检索库影子重建 + 向量回填 + G1-G5 门禁 + 原子切换（K1 编排）
   verify_ledger.py        G1-G7 核账门禁（任一硬门禁 FAIL 非 0 退出；FAIL 项产 backfill_plan.csv）
   purge_origin.py         删除已收入语料的原件（四重校验缺一不删）
 scripts/
   补录-doc转docx.ps1       [DEPRECATED] 已由 doc_convert.py 取代，仅历史参考
-tests/                    113 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁…）
+tests/                    122 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁…）
 ```
 
 ## 快速开始
@@ -147,10 +149,17 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
   + `tests/test_verify_ledger.py`（13 条）+ `meta/skip_log.json`。生产首跑：G4/G5 PASS，
   G1/G2/G3 FAIL（487 篇无题 / 131 篇有 md 未入库 / 5,192 topic 空串——docs/15 记录的既有债务，
   清单已产 `build/backfill_plan.csv`）；与 docs/15 原方案的两处偏差见 docs/17 §5；
-- `cluster` 的 canonical 落库：吸附算法与 99 区三态判定已实现，
-  簇结果尚未写入 `canonical_questions` / `question_variants` 表（增量吸附的存储层）；
-- `classify` 归因②档的向量近邻：标题 2-gram 近邻投票已实现（`--neighbor`），
-  基于文档向量索引的语义近邻未做；
-- `refresh.py`（K1 编排）：影子库 + 原子切换，verify_ledger 的 G1-G5 接入点。
+- `cluster` 的 canonical 落库 ~~待做~~ **已落地（2026-11-17）**：`tools/canonical.py` 全量重建
+  （13,296 题 → 6,455 簇，多文档 3,079；增量吸附待题量到 1e5 再做，见 docstring 简化声明）；
+- `classify` 归因②档的向量近邻 **已落地（2026-11-17）**：`--neighbor --vec`（fastembed
+  标题余弦，门槛 cos≥0.85 + conf≥0.6）；当前文档级未分类 0 件，能力就绪待新批次导入；
+- `refresh.py`（K1 编排）**已落地（2026-11-17）**：影子重建 + 向量回填 + G1-G5 + 原子切换；
+  生产冒烟 FAIL 正确阻断（影子删除、线上哈希不变）。保护对象是重建风险最高的 面经库.db
+  （kb.sqlite 批量写入走单事务，无需影子），偏差见 docs/17。
+
+## 仍待消化（数据债，非代码缺口）
+
+- G1-G3 数据债务（487 篇无题 / 131 篇有 md 未入库 / 5,192 topic 空串）：
+  由 docs/15 §4 补录与打标流程消化（K11/K13 + backfill_plan.csv），门禁只负责暴露。
 
 详见 `docs/04-工具链SOP.md` 与 `docs/15-检验门禁与线上打标方案-2026-11-17.md`。
