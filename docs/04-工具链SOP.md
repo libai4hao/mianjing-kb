@@ -55,8 +55,9 @@ Set-Location -LiteralPath $repo
 & $py tools\classify.py --db $db --dry-run        # 不写库，只看会怎么判
 ```
 
-判定链（`meta/folder_rules.yaml` + `meta/topic_rules.yaml`）：
+判定链（`meta/folder_rules.yaml` + `meta/topic_rules.yaml` + `meta/overrides.json`）：
 
+0. `meta/overrides.json` 人工覆盖表最高优先级（P1-5）：key=语料树内 posix 相对路径（兼容反斜杠），value={category/topic/sub_topic/source_trust/note}，命中即 topic_source=override，不再走规则；
 1. `30-补录/` 前缀先剥掉（镜像暂存树，目录语义继续生效）；
 2. `category` / `source_trust`：结构位规则（`11.1` 面经 low、`11.2` 真题 high、`11.3` 专题笔记 low）→ 顶层主题目录（`01-`~`10-`、`12-` → 题库 medium）→ 默认未分类；
 3. `topic`：文件名 regex（30 条，大小写不敏感）→ 顶层目录映射 → 未分类；
@@ -218,7 +219,7 @@ root 落在语料根内时（如默认的 `31-收件箱`）仍写全 `31-收件�
 |---|---|---|
 | `classify --neighbor` | 未实现 | 需文档向量索引（第②档归因，覆盖规则之后的残渣） |
 | `cluster`（增量吸附） | 未实现 | `canonical_questions` / `question_variants` 表已建，0.92/0.85 阈值算法未写 |
-| `reconcile`（四数对账） | 未实现 | 磁盘 / 表 / convert_log / DB 四数闭合，用来清 `ok=423 vs 397` 的 26 条旧账 |
+| `reconcile`（缺口对账） | ✅ 已实现（P1-2，路径级 convert_log vs 20-题库MD） | 磁盘 / 表 / convert_log / DB 四数闭合，用来清 `ok=423 vs 397` 的 26 条旧账 |
 | `dispatch.py` | 未实现 | 按 category 选拆题策略（题库→parse_banks，面经→extract，专题→只索引） |
 | `extract.py` | 未实现 | 面经抽题 + 公司/年份归一 |
 | `30-补录` / `31-收件箱` | `31-收件箱` 已建（空）；`30-补录` 未建 | 补录脚本只跑过 `-DryRun`（41 个 doc 命中） |

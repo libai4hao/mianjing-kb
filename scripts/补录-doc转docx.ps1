@@ -1,6 +1,12 @@
 ﻿<#
+! DEPRECATED（2026-11-17, P1-5）：本脚本已废弃，勿再使用。
+! 功能与 tools\doc_convert.py 重叠且后者已成为生产链路（.doc→.docx 就地转换 + convert_log
+! + DB 台账 + 门禁，47 件已全部转换完结）；本脚本与 docs/03 的"30-补录 镜像树"方案
+! 一同退役。保留文件仅作历史参考。替代入口：
+!   python tools\doc_convert.py          # .doc/.rtf/.ppt → docx（就地转换）
+!   python tools\intake.py / classify.py # 入库与分类
 .SYNOPSIS
-  补录未入库的 .doc：用 Word COM 批量转成 .docx，落到 30-补录 镜像树；可选生成 overrides 初稿。
+  [废弃] 补录未入库的 .doc：用 Word COM 批量转成 .docx，落到 30-补录 镜像树；可选生成 overrides 初稿。
 
 .DESCRIPTION
   - 只读打开源文件，不改源目录；产物全部写 <SourceRoot>\30-补录，可整目录删除回滚。

@@ -58,6 +58,9 @@ UNCLASSIFIED = "未分类"
 META_DIR = Path(os.environ.get("KB_META_DIR", str(Path(__file__).resolve().parents[2] / "meta")))
 TOPIC_RULES_FILE = META_DIR / "topic_rules.yaml"
 FOLDER_RULES_FILE = META_DIR / "folder_rules.yaml"
+# 人工覆盖表（P1-5）：key=语料树内 posix 相对路径，value={category/topic/sub_topic/...}
+# 与 docs/03 原方案的 build\overrides.json 不同：这是人工配置不是产物，进 git（meta/）
+OVERRIDES_FILE = META_DIR / "overrides.json"
 
 # ---------- OCR ----------
 OCR_ENGINE_DIR = Path(os.environ.get(

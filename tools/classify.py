@@ -69,6 +69,11 @@ class Rules:
         self.bank_prefixes = tuple(folder_doc.get("top_level_bank_prefixes", []))
         self.ignore_segments = set(folder_doc.get("ignore_segments", []))
         self.defaults = folder_doc.get("defaults", {})
+        # 人工覆盖表（P1-5）：优先级最高，key 支持正反斜杠（统一成 posix 比对）
+        self.overrides: dict[str, dict] = {}
+        if config.OVERRIDES_FILE.exists():
+            raw = json.loads(config.OVERRIDES_FILE.read_text(encoding="utf-8"))
+            self.overrides = {k.replace("\\", "/"): v for k, v in raw.items()}
 
     # ---------- 单文件判定 ----------
     def effective_rel(self, rel: str) -> str:
@@ -136,6 +141,18 @@ class Rules:
 
     def classify(self, rel: str) -> dict:
         eff = self.effective_rel(rel)
+        # P1-5：overrides 最高优先级——人工拍板的 category/topic 直接生效
+        for key in (rel.replace("\\", "/"), eff):
+            if key in self.overrides:
+                ov = dict(self.overrides[key])
+                base = {"category": ov.get("category", config.UNCLASSIFIED),
+                        "topic": ov.get("topic", ""),
+                        "sub_topic": ov.get("sub_topic", ""),
+                        "topic_source": "override",
+                        "collection": self.collection(rel),
+                        "source_trust": ov.get("source_trust", "high"),
+                        "note": ov.get("note", "overrides.json 人工覆盖")}
+                return base
         if any(rx.match(eff) for rx in self.reject):
             return {"category": "非内容", "topic": "", "sub_topic": "",
                     "topic_source": "rule_reject", "collection": "", "source_trust": "low"}
