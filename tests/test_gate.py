@@ -44,3 +44,12 @@ def test_gate_report_rows(tmp_path, capsys):
     assert data["rows"][0]["md"].endswith("a.md")
     assert data["rows"][0]["state"] == "pass"
     assert data["thresholds"]["nfkc"] is True
+
+
+def test_sentinel_data_shape():
+    """哨兵回归集数据形状（离线校验；判定行为本身由 --sentinel 对生产语料跑）。"""
+    from gate import CASES, PAIRS
+    assert len(CASES) == 13 and len(PAIRS) == 2
+    assert len({rel for rel, _ in CASES}) == 13                      # 无重复
+    assert all(w in ("pass", "review", "fail") for _, w in CASES)
+    assert all(w in ("同件", "不同件") for w, _a, _b in PAIRS)

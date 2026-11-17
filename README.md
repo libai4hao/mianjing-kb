@@ -22,7 +22,7 @@ tools/
   ── 入库管线 ──
   intake.py               登记 + sha256 判重（新增/重复/移动/改名/复活/隔离）
   classify.py             分类：规则判类 + 近邻投票（--neighbor）+ 人工覆盖
-  gate.py                 文本质量门禁（三态 pass/review/fail，NFKC；--audit 产 dispatch 消费的 gate_report）
+  gate.py                 文本质量门禁（三态 pass/review/fail，NFKC；--audit 产 dispatch 消费的报告；--sentinel 哨兵回归）
   ingest_queue.py         可入库清单：导出 CSV / 统计 / 查重
   pipeline.py             批增一条命令：去重 → 分类 → 清单（--check 只预览）
   ── 转换与 OCR ──
@@ -53,7 +53,7 @@ tools/
   purge_origin.py         删除已收入语料的原件（四重校验缺一不删）
 scripts/
   补录-doc转docx.ps1       [DEPRECATED] 已由 doc_convert.py 取代，仅历史参考
-tests/                    112 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁…）
+tests/                    113 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁…）
 ```
 
 ## 快速开始

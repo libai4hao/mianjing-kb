@@ -28,6 +28,7 @@ gate_results 台账（--md-dir 模式，--no-db 跳过）仍用 textmetrics 四�
     python tools/gate.py --audit                          # 生产：产 BUILD/gate_report.json
     python tools/gate.py --md-dir "<CORPUS_ROOT>\\20-题库MD" --top 20
     python tools/gate.py --md-dir ... --no-db --out report.json
+    python tools/gate.py --sentinel                       # 哨兵回归集：判定不退化校验（语料侧移植）
 """
 from __future__ import annotations
 
@@ -122,6 +123,16 @@ def md_path_for(e: dict) -> Path:
     return Path(config.QUESTION_MD_DIR) / cat / topic / (stem + ".md")
 
 
+def md_index() -> dict[str, list[str]]:
+    """20-题库MD 全量 basename 索引（--audit 漂移解析与 --sentinel 共用）。"""
+    idx: dict[str, list[str]] = {}
+    for root, _dn, files in os.walk(config.QUESTION_MD_DIR):
+        for fn in files:
+            if fn.lower().endswith(".md"):
+                idx.setdefault(fn, []).append(os.path.join(root, fn))
+    return idx
+
+
 def collisions_of(rows: list[dict]) -> list[dict]:
     """同一 md 被多个源写入：md5 内容比对区分 同内容重复 / 真覆盖(丢内容)。"""
     paths: dict[str, list[str]] = {}
@@ -156,11 +167,7 @@ def run_audit() -> dict:
     by_rel = {e["rel"]: e for e in reg}
     ok = [l for l in log if l.get("ok")]
 
-    idx: dict[str, list[str]] = {}
-    for root, _dn, files in os.walk(config.QUESTION_MD_DIR):
-        for fn in files:
-            if fn.lower().endswith(".md"):
-                idx.setdefault(fn, []).append(os.path.join(root, fn))
+    idx = md_index()
 
     rows = []
     for l in ok:
@@ -203,6 +210,107 @@ def run_audit() -> dict:
         "rows": rows,
         "collisions": colls,
     }
+
+
+# ---------------- 哨兵回归集（语料侧 gate.py --sentinel 移植，2026-11-17） ----------------
+# 用途：judge / 转换链 / OCR 任何改动后跑一遍，确认已知样本判定不退化。
+# 期望值校准说明（docs/17 §5）：
+#   1) v1.0/V1.1/v2.0 的 md 镜像已按 retire_log 退役 → 产物缺失按 fail 判（与 --audit rows 同口径）；
+#   2) 数据结构/剑指Offer/合并版大厂/操作系统 4 件经 P2-⑦ OCR 定稿合并（docs/09）后乱码清零，
+#      探针实测均带 ===== page n ===== 页标记 → 原 fail/review 期望更新为 pass。
+CASES = [
+    (r"12-综合题库\v1.0-JavaGuide面试突击版.pdf", "fail"),
+    (r"12-综合题库\V1.1-JavaGuide面试突击版.pdf", "fail"),
+    (r"12-综合题库\v2.0-JavaGuide面试突击版.pdf", "fail"),
+    (r"09-算法与数据结构\数据结构面试题.pdf", "pass"),              # 原 fail：OCR 合并后转 pass
+    (r"09-算法与数据结构\剑指Offer精选题（含答案）.pdf", "pass"),    # 原 review：OCR 合并后转 pass
+    (r"09-算法与数据结构\【合并版】大厂算法面试合集.pdf", "pass"),   # 原 review：OCR 合并后转 pass
+    (r"08-计算机网络与操作系统\操作系统面试题（带答案）.pdf", "pass"),  # 原 fail：OCR 合并后转 pass
+    (r"11-面经与真题\11.3-专题总结包\Java学习路线\Java 后端学习路线概览.pdf", "fail"),
+    (r"12-综合题库\原创PDF面试手册\JavaGuide面试突击版（必看）\JavaGuide面试突击版5.0.pdf", "pass"),
+    (r"12-综合题库\原创PDF面试手册\JavaGuide面试突击版（必看）\JavaGuide面试突击版5.0(暗黑版).pdf", "pass"),
+    (r"12-综合题库\原创PDF面试手册\计算机基础\操作系统\图解操作系统-亮白风格.pdf", "pass"),
+    (r"12-综合题库\原创PDF面试手册\计算机基础\操作系统\图解操作系统-暗黑风格.pdf", "pass"),
+    (r"12-综合题库\Markdown笔记\JavaGuide面试突击版\v3.0-JavaGuide面试突击版.md", "pass"),
+]
+
+PAIRS = [
+    ("同件", r"12-综合题库\Java面试知识点整理手册.pdf",
+             r"12-综合题库\整理的多家公司常见面试题库350道.pdf"),
+    ("不同件", r"12-综合题库\整理的多家公司常见面试题库350道.pdf",
+               r"12-综合题库\JAVA常见面试题库\整理的多家公司常见面试题库350道.pdf"),
+]
+
+
+def pix_fp(pdf_path: Path, dpi: int = 72) -> str:
+    """PDF 像素指纹：采样 10%/35%/60%/85% 四页渲染 md5 拼接（语料侧同款）。"""
+    import pymupdf
+    with pymupdf.open(str(pdf_path)) as doc:
+        n = doc.page_count
+        picks = sorted({min(int(n * r), n - 1) for r in (0.1, 0.35, 0.6, 0.85)})
+        return "".join(hashlib.md5(doc[i].get_pixmap(dpi=dpi).samples).hexdigest()[:8]
+                       for i in picks)
+
+
+def resolve_md(e: dict, idx: dict[str, list[str]]) -> Path | None:
+    """registry 行 → 产物 md：canonical → 同名漂移（唯一命中）→ <stem>__<hash8> 变体 → None。"""
+    p = md_path_for(e)
+    if p.exists():
+        return p
+    cands = idx.get(p.name) or []
+    if len(cands) == 1:
+        return Path(cands[0])
+    variants = sorted(p.parent.glob(p.stem + "__*.md")) if p.parent.exists() else []
+    if variants:
+        return variants[0]
+    return None
+
+
+def run_sentinel() -> bool:
+    """跑哨兵：判定与期望不符（退化）→ False；registry 缺行 / 源件缺失记 MISS 不计退化。"""
+    build = Path(config.BUILD_DIR)
+    reg = json.loads((build / "registry.json").read_text(encoding="utf-8"))
+    by_rel = {e["rel"]: e for e in reg}
+    idx = md_index()
+    passed = miss = 0
+    print(f"-- 单件判定哨兵（{len(CASES)} 件）--")
+    for rel, want in CASES:
+        e = by_rel.get(rel)
+        if not e:
+            print(f"  MISS registry 无此行  {rel}")
+            miss += 1
+            continue
+        p = resolve_md(e, idx)
+        if p is None:
+            got, why = "fail", "产物缺失"     # 与 --audit rows 同口径（md 已退役也落这里）
+        else:
+            m = metrics(read_text(p))
+            got, why = judge(m)
+        flag = got == want
+        passed += flag
+        print(f"  {'OK  ' if flag else 'FAIL'} want={want:<6} got={got:<6} {why[:14]:<14} {rel[-44:]}")
+    print(f"\n-- 重复件哨兵（像素指纹，{len(PAIRS)} 对）--")
+    pair_fail = pair_miss = 0
+    for want, a, b in PAIRS:
+        pa, pb = Path(config.CORPUS_ROOT) / a, Path(config.CORPUS_ROOT) / b
+        if not (pa.exists() and pb.exists()):
+            print(f"  MISS  源件缺失  {b}")
+            pair_miss += 1
+            continue
+        try:
+            same = pix_fp(pa) == pix_fp(pb)
+        except Exception as ex:  # noqa: BLE001 —— 渲染失败记 MISS，不算退化
+            print(f"  MISS  渲染失败 {type(ex).__name__}  {Path(b).name}")
+            pair_miss += 1
+            continue
+        flag = same == (want == "同件")
+        pair_fail += 0 if flag else 1
+        print(f"  {'OK  ' if flag else 'FAIL'} 期望{want} 实际{'同件' if same else '不同件'}  {Path(a).name}")
+    regress = (len(CASES) - miss - passed) + pair_fail
+    print(f"\n[SENTINEL] 单件 {passed}/{len(CASES) - miss}（MISS {miss} 不计退化）"
+          f" + 重复对 {len(PAIRS) - pair_miss}/{len(PAIRS)} → "
+          + ("全绿" if regress == 0 else f"退化 {regress} 处，先查再跑"))
+    return regress == 0
 
 
 def scan_dir(md_dir: Path) -> dict:
@@ -257,8 +365,13 @@ def main(argv=None) -> int:
     ap.add_argument("--no-db", action="store_true", help="--md-dir 模式下不写 gate_results 台账")
     ap.add_argument("--out", default=None,
                     help="报告 JSON 落盘路径（--audit 缺省写 BUILD/gate_report.json）")
+    ap.add_argument("--sentinel", action="store_true",
+                    help="哨兵回归集：13 单件 + 2 重复对判定不退化校验（读生产语料，不写报告）")
     ap.add_argument("--top", type=int, default=15, help="打印最差的 N 个")
     args = ap.parse_args(argv)
+
+    if args.sentinel:
+        return 0 if run_sentinel() else 1
 
     if not args.audit and not args.md_dir:
         ap.error("需要 --audit 或 --md-dir 之一")
