@@ -10,7 +10,7 @@
 ## 目录
 
 ```
-docs/                     方案与决策（00 决策记录 ~ 16 懒加载复核；**06 部署方案 v2-R2 为当前口径**）
+docs/                     方案与决策（00 决策记录 ~ 17 审核修复；**06 部署方案 v2-R2 为当前口径**）
 meta/
   schema/001~004_*.sql    schema：原文档表 / parent_dir+清单视图 / 源边界 / questions 表
   topic_rules.yaml        文件名 → topic（30 条，源自语料内 inventory.py）
@@ -49,10 +49,11 @@ tools/
   llm_smoke.py            本地 LLM 冒烟对比（T1 RAG / T2 结构化抽取）
   probe_provider.py       OpenAI 兼容 provider 探针（P1-P4 四项）
   ── 维护 ──
+  verify_ledger.py        G1-G7 核账门禁（任一硬门禁 FAIL 非 0 退出；FAIL 项产 backfill_plan.csv）
   purge_origin.py         删除已收入语料的原件（四重校验缺一不删）
 scripts/
   补录-doc转docx.ps1       [DEPRECATED] 已由 doc_convert.py 取代，仅历史参考
-tests/                    99 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流…）
+tests/                    112 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁…）
 ```
 
 ## 快速开始
@@ -142,11 +143,14 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
 
 ## 尚未实现（明确记录，不假装有）
 
-- `verify_ledger.py`（G1-G7 统一核账门禁）：docs/15 方案已定（影子库对账 / skip_log / FAIL 阻断），
-  脚本与 `tests/test_verify_ledger.py` 均未落地；当前由 `gate.py --audit` 覆盖其中的文本质量维度；
-- `cluster` 的 canonical 落库：吸附算法与 99 区三态判定已实现（`cluster.py`），
+- ~~`verify_ledger.py`（G1-G7 统一核账门禁）~~ **已落地（2026-11-17）**：`tools/verify_ledger.py`
+  + `tests/test_verify_ledger.py`（13 条）+ `meta/skip_log.json`。生产首跑：G4/G5 PASS，
+  G1/G2/G3 FAIL（487 篇无题 / 131 篇有 md 未入库 / 5,192 topic 空串——docs/15 记录的既有债务，
+  清单已产 `build/backfill_plan.csv`）；与 docs/15 原方案的两处偏差见 docs/17 §5；
+- `cluster` 的 canonical 落库：吸附算法与 99 区三态判定已实现，
   簇结果尚未写入 `canonical_questions` / `question_variants` 表（增量吸附的存储层）；
 - `classify` 归因②档的向量近邻：标题 2-gram 近邻投票已实现（`--neighbor`），
-  基于文档向量索引的语义近邻未做。
+  基于文档向量索引的语义近邻未做；
+- `refresh.py`（K1 编排）：影子库 + 原子切换，verify_ledger 的 G1-G5 接入点。
 
 详见 `docs/04-工具链SOP.md` 与 `docs/15-检验门禁与线上打标方案-2026-11-17.md`。
