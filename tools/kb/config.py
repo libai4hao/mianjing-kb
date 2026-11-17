@@ -64,6 +64,7 @@ OVERRIDES_FILE = META_DIR / "overrides.json"
 EXCLUSIONS_FILE = META_DIR / "exclusions.json"   # P2-⑤：出题池排除（保留检索、不抽题）
 
 # ---------- OCR ----------
+# 2026-11-17：本机引擎迁至 v2.1.5（旧 v2.1.4 Paddle 目录已删）；可用 KB_OCR_ENGINE_DIR 覆盖
 OCR_ENGINE_DIR = Path(os.environ.get(
     "KB_OCR_ENGINE_DIR",
     r"<OCR_ENGINE_DIR>",
