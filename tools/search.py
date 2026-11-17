@@ -57,10 +57,18 @@ def keyword_search(con, query: str, limit: int = 10, topic: str | None = None,
         filt += " AND q.qtype=?"
         params.append(qtype)
     if len(query) >= 3:
+        # FTS5 MATCH 语法敏感（? " 等会炸），trigram 下用引号短语查询最稳：
+        # 原文任意串 → "..." 字面匹配，内部双引号双写转义；空结果回退 LIKE。
+        fts_query = '"' + query.replace('"', '""') + '"'
         rows = con.execute(
             _SELECT + "FROM questions_fts f JOIN questions q ON q.qid=f.rowid" + _JOIN +
             "WHERE questions_fts MATCH ?" + filt + " LIMIT ?",
-            [query, *params, limit]).fetchall()
+            [fts_query, *params, limit]).fetchall()
+        if not rows:
+            rows = con.execute(
+                _SELECT + "FROM questions q" + _JOIN +
+                "WHERE (q.q_text LIKE ? OR q.a_text LIKE ?)" + filt + " LIMIT ?",
+                [f"%{query}%", f"%{query}%", *params, limit]).fetchall()
     else:
         rows = con.execute(
             _SELECT + "FROM questions q" + _JOIN +
