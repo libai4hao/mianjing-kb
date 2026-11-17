@@ -140,6 +140,51 @@ def _run_one(entry: dict, extractor: str = "pymupdf4llm") -> dict | None:
         shutil.rmtree(tmpd, ignore_errors=True)
 
 
+def _target_md(entry: dict) -> Path:
+    """convert_one 的落盘路径：<mdroot>/<category>/<topic>/<stem>.md"""
+    cat = CAT_MAP.get(entry.get("category") or "", "题库")
+    stem = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", Path(entry["title"]).stem).strip()[:80]
+    return MD_ROOT / cat / (entry.get("topic") or "综合") / f"{stem}.md"
+
+
+def _hash_suffix(entry: dict) -> str:
+    """md 文件名后缀：doc_hash 前 8 位（同名件互不覆盖；extract 按路径算 hash 仍然稳定）。"""
+    h = entry.get("doc_hash") or ""
+    return h[:8] or "nohash"
+
+
+def _rename_to_hashed(entry: dict) -> Path | None:
+    """把 convert_one 刚写出的 <stem>.md 改名成 <stem>__<hash8>.md，避免同名覆盖。"""
+    t = _target_md(entry)
+    if not t.exists():
+        return None
+    new = t.with_name(f"{t.stem}__{_hash_suffix(entry)}{t.suffix}")
+    try:
+        if new.exists():
+            new.unlink()
+        t.rename(new)
+        return new
+    except OSError:
+        return t
+
+
+def rehash_existing() -> None:
+    """给已转好但还没带 hash 后缀的 md 补改名（断点续跑前的一次性修正）。"""
+    log = json.loads(CONVERT_LOG.read_text(encoding="utf-8")) if CONVERT_LOG.exists() else []
+    plan = {p["rel"]: p for p in json.loads(PLAN_FILE.read_text(encoding="utf-8"))["plan"]}
+    moved = 0
+    for rec in log:
+        if not rec.get("ok"):
+            continue
+        e = plan.get(rec["rel"])
+        if not e:
+            continue
+        got = _rename_to_hashed(e)
+        if got and got.name != _target_md(e).name:
+            moved += 1
+    print(json.dumps({"rehashed": moved}, ensure_ascii=False))
+
+
 def convert(limit: int = 0, only_pdf: bool = False) -> None:
     plan = json.loads(PLAN_FILE.read_text(encoding="utf-8"))["plan"] if PLAN_FILE.exists() else build_plan()
     log = json.loads(CONVERT_LOG.read_text(encoding="utf-8")) if CONVERT_LOG.exists() else []
@@ -153,11 +198,24 @@ def convert(limit: int = 0, only_pdf: bool = False) -> None:
     t0 = time.perf_counter()
     ok = fail = 0
     for i, e in enumerate(todo):
+        # 转换前：目标 md 若已存在（同名件先写过），先按 hash 后缀改名收走，杜绝覆盖
+        tgt = _target_md(e)
+        if tgt.exists():
+            bak = tgt.with_name(f"{tgt.stem}__pre{tgt.suffix}")
+            try:
+                if bak.exists():
+                    bak.unlink()
+                tgt.rename(bak)
+            except OSError:
+                pass
         r = _run_one(e)
         if r is None or not r.get("ok") and r.get("extractor") == "pymupdf4llm":
             r2 = _run_one(e, "pypdf")
             r = r2 if (r2 and r2.get("ok")) else (r or r2 or {})
-        rec = {"rel": e["rel"], "doc_hash": e["doc_hash"], "at": NOW(), **(r or {})}
+        md_hashed = _rename_to_hashed(e) if r and r.get("ok") else None
+        rec = {"rel": e["rel"], "doc_hash": e["doc_hash"], "at": NOW(),
+               "md": str(md_hashed.relative_to(MD_ROOT).as_posix()) if md_hashed else None,
+               **(r or {})}
         log = [l for l in log if l["rel"] != e["rel"]] + [rec]
         if rec.get("ok"):
             ok += 1
@@ -217,11 +275,14 @@ def main(argv=None) -> int:
     ap.add_argument("--only-pdf", action="store_true")
     ap.add_argument("--ocr-list", action="store_true")
     ap.add_argument("--merge-ocr", action="store_true")
+    ap.add_argument("--rehash", action="store_true", help="给已完成但没带 hash 后缀的 md 补改名")
     args = ap.parse_args(argv)
     if args.plan:
         build_plan()
     if args.convert:
         convert(args.limit, args.only_pdf)
+    if args.rehash:
+        rehash_existing()
     if args.ocr_list:
         write_ocr_list()
     if args.merge_ocr:
