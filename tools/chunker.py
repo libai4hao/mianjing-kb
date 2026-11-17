@@ -27,6 +27,21 @@ R8  单题 > 1200 token 时按空行段落续切：续块 style 加 "/续"、qid
 R9  标题粘连（"## 1. A…2. B"）：行内出现 n==qid+1 的编号时原地拆成两题。
 R10 首题之前、无法归类的编号内容 → leftovers（绝不并入上一题）。
 
+chunk_v2(md_text) —— 切题器 v2 规范（2026-11-17 拍板，放宽判题信号 + 自检）
+------------------------------------------------------------------
+什么算一题（满足任一，不要求有题号）：
+  1) 明确题号（v1 已有）；2) 问句：独立行以？结尾或含 什么是/如何/为什么/区别/谈谈/介绍/说说/有没有；
+  3) 标题+讲解（v1 标题块）；4) 考点+答案："知识点：/考点：" 行。
+什么不算：目录/代码块/表格/页眉页脚/水印/致谢·招聘广告（promo 行→leftovers why=致谢/广告）。
+R2' 答案内部的列举编号与句中问词不判新题：只切"空行前置的独立问句行"。
+输出：{"items":[{"seq","q","a","span","qtype","conf"}], "probe":[{"span","why"}],
+       "coverage":float, "note":"扣除明细"}
+  - qtype ∈ 八股|算法|项目|场景|HR（关键词启发式）
+  - conf：high(题号/问句) / low(标题/考点) / none
+  - coverage = items 覆盖字符 / (全长 - 可扣除字符)，扣除=目录/代码/表格/页码/引用/水印/致谢
+  - items 为空时 probe 必须非空（1–3 个候选区块）
+render(md_text)：两步输出（第一步纯文本清单 ≤12 字/行，第二步 JSON）。
+
 已知局限（诚实声明）
 --------------------
 - 空行后跳号且无问号的行按答案列表处理（并入当前题块），极端样本可能漏题；
@@ -54,6 +69,20 @@ RE_TOC = re.compile(r'[.．·•…]{3,}\s*\d{1,4}\s*$')
 RE_PAGE = re.compile(r'^\s*(?:第\s*\d{1,4}\s*页(?:\s*[/共]\s*\d{1,4}\s*页)?|[-—–]\s*\d{1,4}\s*[-—–]?|\d{1,4})\s*$')
 RE_IMG = re.compile(r'!\[[^\]]*\]\([^)]+\)')
 RE_GLUED = re.compile(r'(?:^|[\u4e00-\u9fff。？?!，,、；;：:\s])(\d{1,3})\s*[.、．]\s*(?=[^\d\s])')
+
+# ---- v2 信号 ----
+RE_INTERROGATIVE = re.compile(r'什么是|如何|为什么|区别|谈谈|介绍|说说|有没有|怎么办|怎么实现')
+RE_QEND = re.compile(r'[?？]\s*$')
+RE_KPOINT = re.compile(r'^\s*(?:#{1,6}\s*)?(?:知识点|考点|面试点)[:：]\s*(.+?)\s*$')
+RE_PROMO = re.compile(r'(公众号|扫码|二维码|简历投递|招聘|内推|关注我|感谢阅读|欢迎关注|联系方式|免费领取|资料领取|付费|星球|广告|推广|更多资源)')
+RE_LIST_ITEM = re.compile(r'^\s*(?:[-*+•]|[>|\]]|#{1,6}\s|\d{1,3}\s*[.、．)）]|[（(]\d{1,3}[)）])')
+
+
+def _is_qline(s: str) -> bool:
+    """v2 问句行判定：以？结尾，或问词出现在行首 8 字内（防"做详细介绍"类行中误命中）。"""
+    if RE_QEND.search(s):
+        return True
+    return RE_INTERROGATIVE.search(s[:8]) is not None
 
 _HAN = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8,
         "九": 9, "十": 10, "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15,
@@ -113,6 +142,9 @@ def chunk(md_text: str) -> Dict:
             continue
         if s.startswith(">"):
             kinds[i] = "quote"
+            continue
+        if len(s) <= 40 and RE_PROMO.search(s):   # v2: 致谢/招聘广告短行
+            kinds[i] = "ack"
             continue
         if RE_TOC.search(s):
             kinds[i] = "toc"
@@ -189,7 +221,8 @@ def chunk(md_text: str) -> Dict:
                 runs[-1] = (runs[-1][0], runs[-1][1], i + 1)   # 空行并入当前 run
                 continue
             why = {"page": "页码", "toc": "目录行", "doc_header": "文档头",
-                   "quote": "引用块(来源)", "code": "块前代码", "table": "块前表格"
+                   "quote": "引用块(来源)", "code": "块前代码", "table": "块前表格",
+                   "ack": "致谢/广告"
                    }.get(k, None)
             if why is None:
                 why = "水印" if (k == "text" and s in watermark) else "未识别正文"
@@ -216,6 +249,8 @@ def chunk(md_text: str) -> Dict:
                 why = "页码"
             elif k == "toc":
                 why = "目录行"
+            elif k == "ack":
+                why = "致谢/广告"
             elif kinds[j] == "text" and lines[j].strip() in watermark:
                 why = "水印"
             if why:
@@ -288,3 +323,184 @@ def _paras_with_spans(a_text: str, base: int):
         pos = m.end()
     parts.append((a_text[pos:], (base + pos, base + len(a_text))))
     return parts
+
+
+# ============================ chunk_v2 ============================
+
+_QTYPE_RULES = [
+    ("HR", re.compile(r'自我介绍|介绍(一下|下)?自己|优缺点|职业规划|离职|薪资|加班|反问|为什么选择|团队合作|抗压|兴趣爱好|最大的收获|性格')),
+    ("算法", re.compile(r'算法|复杂度|链表|二叉|动态规划|排序|手写|手撕|[Ll]eet[Cc]ode|数组|栈和队列|拓扑')),
+    ("项目", re.compile(r'项目|简历|你负责|遇到的难点|架构演进|上线流程')),
+    ("场景", re.compile(r'如何设计|怎么设计|设计一个|设计一套|线上|生产环境|排查|宕机|秒杀|高并发|怎么办|突发|限流')),
+]
+_QTYPE_DEFAULT = "八股"
+
+
+def classify_qtype(q_text: str) -> str:
+    for t, rx in _QTYPE_RULES:
+        if rx.search(q_text):
+            return t
+    return _QTYPE_DEFAULT
+
+
+def _conf_of(style: str, q_text: str) -> str:
+    if style in ("题号", "问句"):
+        return "high"
+    if RE_QEND.search(q_text) or RE_INTERROGATIVE.search(q_text):
+        return "high"
+    return "low"
+
+
+def _split_answers(a_text: str, a_base: int):
+    """v2 后置切分：a_text 内"空行前置的独立问句/考点行"另起新题（R2' 守卫）。
+
+    返回 (head_a_text, new_items)；new_items 的 q 为原文行文本。
+    """
+    out, lines = [], a_text.splitlines(keepends=True)
+    starts, pos = [], 0
+    for ln in lines:
+        starts.append(pos); pos += len(ln)
+    starts.append(pos)
+    prev_blank, in_code, cur = True, False, []
+
+    def flush(end_rel):
+        if cur:
+            s = starts[cur[0]]
+            out.append(a_text[s:end_rel])
+
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("```"):
+            in_code = not in_code
+            cur.append(i); continue
+        if in_code:
+            cur.append(i); continue
+        if (prev_blank and 0 < len(s) <= 120 and not RE_LIST_ITEM.match(s)
+                and not RE_DECIMAL.match(s)
+                and (RE_KPOINT.match(s) or _is_qline(s))):
+            flush(starts[i])
+            cur = [i]
+        else:
+            cur.append(i)
+        prev_blank = not s
+    flush(len(a_text))
+    if not out:
+        return a_text, []
+    head = out[0]
+    new_items = []
+    for seg in out[1:]:
+        first_line = seg.split("\n", 1)[0].strip()
+        m = RE_KPOINT.match(first_line)
+        new_items.append({"q": (m.group(1) if m else first_line)[:200], "a": seg,
+                          "style": "考点" if m else "问句"})
+    # span 相对原文：段起点 = a_base + 该段首字符偏移（逐段累计）
+    rel, spans = 0, []
+    for seg in out:
+        spans.append((a_base + rel, a_base + rel + len(seg)))
+        rel += len(seg)
+    for it, (s, e) in zip(new_items, spans[1:]):
+        it["span"] = [s, e]
+    return head, new_items
+
+
+def chunk_v2(md_text: str) -> Dict:
+    """切题器 v2：items/probe/coverage/note（判据见模块 docstring）。"""
+    res = chunk(md_text)
+    items: List[dict] = []
+    seq = [0]
+
+    def add(q, a, span, style):
+        seq[0] += 1
+        items.append({"seq": seq[0], "q": q, "a": a, "span": list(span),
+                      "qtype": classify_qtype(q), "conf": _conf_of(style, q)})
+
+    for b in res["blocks"]:
+        if b["style"].endswith("/续") and items:          # 续块并回上一题
+            items[-1]["a"] = (items[-1]["a"] + "\n" + b["a_text"]).strip("\n")
+            items[-1]["span"][1] = b["source_span"][1]
+            continue
+        a_rest, extra = _split_answers(b["a_text"], b["source_span"][0])
+        end = extra[0]["span"][0] if extra else b["source_span"][1]
+        add(b["q_text"], a_rest, [b["source_span"][0], end], b["style"])
+        for e in extra:
+            add(e["q"], e["a"], e["span"], e["style"])
+
+    # probe：items 为空时给 1–3 个候选区块
+    probe = []
+    if not items:
+        lines = md_text.splitlines(keepends=True)
+        starts, pos = [], 0
+        for ln in lines:
+            starts.append(pos); pos += len(ln)
+        starts.append(pos)
+        in_code = False
+        for i, ln in enumerate(lines):
+            s = ln.strip()
+            if s.startswith("```"):
+                in_code = not in_code; continue
+            if in_code or RE_TOC.search(s) or RE_PAGE.match(s) or not s:
+                continue
+            if (_match_question(ln) or RE_KPOINT.match(s)
+                    or ((RE_QEND.search(s) or RE_INTERROGATIVE.search(s)) and len(s) <= 160)):
+                why = ("题号行" if _match_question(ln) else
+                       "考点行" if RE_KPOINT.match(s) else "问句行")
+                probe.append({"span": [starts[i], starts[i + 1]], "why": why})
+                if len(probe) >= 3:
+                    break
+
+    # coverage：items 覆盖 / (全长 - 可扣除)
+    total = len(md_text)
+    covered = sum(max(0, it["span"][1] - it["span"][0]) for it in items)
+    deduct_detail: Dict[str, int] = {}
+    deduct = 0
+    for l in res["leftovers"]:
+        if l["why"] == "未识别正文":
+            continue
+        s, e = l["span"]
+        deduct += e - s
+        deduct_detail[l["why"]] = deduct_detail.get(l["why"], 0) + (e - s)
+    denom = max(1, total - deduct)
+    coverage = round(covered / denom, 4) if total else 1.0
+    note = "扣除:" + (", ".join(f"{k} {v}" for k, v in sorted(deduct_detail.items())) or "无") \
+           + f"; 总长 {total}, 覆盖 {covered}, 扣除 {deduct}"
+    return {"items": items, "probe": probe, "coverage": coverage, "note": note}
+
+
+def _summary(q: str) -> str:
+    s = re.sub(r'\s+', '', q)
+    return s[:12] if s else "(无题干)"
+
+
+def render(md_text: str) -> str:
+    """两步输出：第一步纯文本清单，第二步 JSON。"""
+    import json as _json
+    v2 = chunk_v2(md_text)
+    lines = ["第一步：题目清单"]
+    if v2["items"]:
+        lines += [f"{it['seq']}. {_summary(it['q'])}" for it in v2["items"]]
+    else:
+        lines.append("无")
+    v2_out = {k: v for k, v in v2.items() if k != "note"}
+    lines += ["", "第二步：", _json.dumps(v2_out, ensure_ascii=False, indent=1),
+              "", v2["note"]]
+    return "\n".join(lines)
+
+
+def main(argv=None) -> int:
+    import argparse
+    import json as _json
+    ap = argparse.ArgumentParser(description="面经切题器（v2 两步输出）")
+    ap.add_argument("file", nargs="?", help="输入 md/txt 文件；缺省读 stdin")
+    ap.add_argument("--v1", action="store_true", help="输出 v1 blocks/leftovers schema")
+    args = ap.parse_args(argv)
+    import sys as _sys
+    text = open(args.file, encoding="utf-8").read() if args.file else _sys.stdin.read()
+    if args.v1:
+        print(_json.dumps(chunk(text), ensure_ascii=False, indent=1))
+    else:
+        print(render(text))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
