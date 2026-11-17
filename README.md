@@ -55,7 +55,7 @@ tools/
   purge_origin.py         删除已收入语料的原件（四重校验缺一不删）
 scripts/
   补录-doc转docx.ps1       [DEPRECATED] 已由 doc_convert.py 取代，仅历史参考
-tests/                    122 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁…）
+tests/                    123 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁…）
 ```
 
 ## 快速开始
@@ -145,21 +145,20 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
 
 ## 尚未实现（明确记录，不假装有）
 
-- ~~`verify_ledger.py`（G1-G7 统一核账门禁）~~ **已落地（2026-11-17）**：`tools/verify_ledger.py`
-  + `tests/test_verify_ledger.py`（13 条）+ `meta/skip_log.json`。生产首跑：G4/G5 PASS，
-  G1/G2/G3 FAIL（487 篇无题 / 131 篇有 md 未入库 / 5,192 topic 空串——docs/15 记录的既有债务，
-  清单已产 `build/backfill_plan.csv`）；与 docs/15 原方案的两处偏差见 docs/17 §5；
-- `cluster` 的 canonical 落库 ~~待做~~ **已落地（2026-11-17）**：`tools/canonical.py` 全量重建
-  （13,296 题 → 6,455 簇，多文档 3,079；增量吸附待题量到 1e5 再做，见 docstring 简化声明）；
-- `classify` 归因②档的向量近邻 **已落地（2026-11-17）**：`--neighbor --vec`（fastembed
-  标题余弦，门槛 cos≥0.85 + conf≥0.6）；当前文档级未分类 0 件，能力就绪待新批次导入；
-- `refresh.py`（K1 编排）**已落地（2026-11-17）**：影子重建 + 向量回填 + G1-G5 + 原子切换；
-  生产冒烟 FAIL 正确阻断（影子删除、线上哈希不变）。保护对象是重建风险最高的 面经库.db
-  （kb.sqlite 批量写入走单事务，无需影子），偏差见 docs/17。
+- ~~`verify_ledger.py`（G1-G7 统一核账门禁）~~ **已落地**：G1-G5 终检全 PASS，生产 面经库.db
+  已原子切换（1,434 doc_contents / 18,642 题 / 18,642 向量 / topic 空串归零）；偏差见 docs/17；
+- ~~canonical 落库（cluster 算法 → 存储层）~~ **已落地**：8,931 簇 / 18,642 变体，
+  增量吸附待题量到 1e5 再做（docstring 简化声明）；
+- ~~向量近邻②档（classify --vec）~~ **已落地**：当前文档级未分类 0 件，能力待新批次导入；
+- ~~`refresh.py`（K1 影子编排）~~ **已落地**：已执行首次生产原子切换；
+- **chunker v2 判题信号增强**（`**问句？**` 粗体行）：432 件讲解型 md（面试突击转写体）切不出题，
+  已按 `chunker_no_split` 如实登记 skip_log（docs/17 §5）；增强后需全量重切 + 门禁复核；
+- **G6 打标质量门禁**：线上打标（docs/15 §3 batch_label）未启用，LLM key 待配置后转硬；
+- **向量增量（K2）**：当前全量重建约 6 分钟，暂无增量需求。
 
 ## 仍待消化（数据债，非代码缺口）
 
-- G1-G3 数据债务（487 篇无题 / 131 篇有 md 未入库 / 5,192 topic 空串）：
-  由 docs/15 §4 补录与打标流程消化（K11/K13 + backfill_plan.csv），门禁只负责暴露。
+- ~~G1-G3 数据债务~~ **已清零（2026-11-17）**：487 篇无题 → 转换 528 + OCR 补录 12 件全落盘，
+  131 篇有 md 未入库 → 重建并入，5,192 topic 空串 → 继承链归零；终检 G1-G5 全 PASS。
 
 详见 `docs/04-工具链SOP.md` 与 `docs/15-检验门禁与线上打标方案-2026-11-17.md`。
