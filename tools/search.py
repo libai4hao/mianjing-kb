@@ -38,6 +38,14 @@ def _con(db_path: Path):
     return con
 
 
+_JOIN = (
+    " LEFT JOIN documents d ON d.doc_hash=q.doc_hash "
+    " LEFT JOIN doc_contents dc ON dc.mirror_hash=q.doc_hash "
+)
+_SELECT = ("SELECT q.qid, q.q_text, q.qtype, q.topic, "
+           "COALESCE(d.file_name, dc.md_rel) AS source, q.a_text ")
+
+
 def keyword_search(con, query: str, limit: int = 10, topic: str | None = None,
                    qtype: str | None = None) -> list[dict]:
     filt = ""
@@ -50,15 +58,12 @@ def keyword_search(con, query: str, limit: int = 10, topic: str | None = None,
         params.append(qtype)
     if len(query) >= 3:
         rows = con.execute(
-            "SELECT q.qid, q.q_text, q.qtype, q.topic, d.file_name "
-            "FROM questions_fts f JOIN questions q ON q.qid=f.rowid "
-            "LEFT JOIN documents d ON d.doc_hash=q.doc_hash "
+            _SELECT + "FROM questions_fts f JOIN questions q ON q.qid=f.rowid" + _JOIN +
             "WHERE questions_fts MATCH ?" + filt + " LIMIT ?",
             [query, *params, limit]).fetchall()
     else:
         rows = con.execute(
-            "SELECT q.qid, q.q_text, q.qtype, q.topic, d.file_name "
-            "FROM questions q LEFT JOIN documents d ON d.doc_hash=q.doc_hash "
+            _SELECT + "FROM questions q" + _JOIN +
             "WHERE (q.q_text LIKE ? OR q.a_text LIKE ?)" + filt + " LIMIT ?",
             [f"%{query}%", f"%{query}%", *params, limit]).fetchall()
     return [dict(r) for r in rows]
@@ -83,12 +88,11 @@ def vector_search(con, query: str, limit: int = 10, topic: str | None = None,
     vec = embed_texts([query])[0]
     import sqlite_vec
     rows = con.execute(
-        "SELECT q.qid, q.q_text, q.qtype, q.topic, d.file_name, v.distance "
-        "FROM vec_questions v JOIN questions q ON q.qid=v.rowid "
-        "LEFT JOIN documents d ON d.doc_hash=q.doc_hash "
+        _SELECT + ", q.qid AS _qid, v.distance "
+        "FROM vec_questions v JOIN questions q ON q.qid=v.rowid" + _JOIN +
         "WHERE v.embedding MATCH ? AND k = ?" + filt + " ORDER BY distance",
         [sqlite_vec.serialize_float32(vec), int(limit), *params]).fetchall()
-    return [dict(r) for r in rows]
+    return [{k: v for k, v in dict(r).items() if k != "_qid"} for r in rows]
 
 
 def rrf_fuse(rank_a: list[int], rank_b: list[int], k: int = RRF_K) -> list[tuple[int, float]]:
@@ -115,6 +119,15 @@ def hybrid_search(con, query: str, limit: int = 10, topic: str | None = None,
     return out
 
 
+def rag_contexts(con, query: str, limit: int = 6, topic: str | None = None,
+                 qtype: str | None = None, a_max: int = 800) -> dict:
+    """P3-③：RAG 管线结构化输出——直接可作为 LLM prompt 的 context 组装体。"""
+    rows = hybrid_search(con, query, limit, topic, qtype)
+    return {"query": query, "contexts": [
+        {"qid": r["qid"], "question": r["q_text"][:300], "answer": (r.get("a_text") or "")[:a_max],
+         "source": r.get("source"), "topic": r["topic"], "qtype": r["qtype"]} for r in rows]}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="面经混合检索")
     ap.add_argument("query", nargs="+")
@@ -122,10 +135,17 @@ def main(argv=None) -> int:
     ap.add_argument("--topic", default=None)
     ap.add_argument("--qtype", default=None)
     ap.add_argument("--limit", type=int, default=10)
+    ap.add_argument("--format", choices=["json", "rag"], default="json",
+                    help="rag=面向 LLM 管线的 contexts 结构（hybrid）")
     ap.add_argument("--db", default=str(OUT_DB))
     args = ap.parse_args(argv)
     query = " ".join(args.query)
     con = _con(Path(args.db))
+    if args.format == "rag":
+        out = rag_contexts(con, query, args.limit, args.topic, args.qtype)
+        con.close()
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+        return 0
     if args.mode == "kw":
         rows = keyword_search(con, query, args.limit, args.topic, args.qtype)
     elif args.mode == "vec":
@@ -139,6 +159,7 @@ def main(argv=None) -> int:
     con.close()
     for r in rows:
         r["q_text"] = r["q_text"][:80]
+        r["a_text"] = (r.get("a_text") or "")[:200]
     print(json.dumps({"query": query, "mode": args.mode, "hits": len(rows), "rows": rows},
                      ensure_ascii=False, indent=1))
     return 0

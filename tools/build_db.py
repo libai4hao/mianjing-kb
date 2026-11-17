@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sqlite3
 import sys
@@ -55,7 +56,10 @@ CREATE TABLE questions(
   q_norm_hash TEXT, topic TEXT, category TEXT);
 CREATE INDEX IF NOT EXISTS idx_qdoc ON questions(doc_hash);
 CREATE INDEX IF NOT EXISTS idx_qnorm ON questions(q_norm_hash);
-CREATE TABLE doc_contents(doc_id INTEGER PRIMARY KEY, md_rel TEXT, doc_hash TEXT, content TEXT);
+CREATE TABLE doc_contents(doc_id INTEGER PRIMARY KEY, md_rel TEXT, doc_hash TEXT,
+  mirror_hash TEXT, content TEXT);
+CREATE INDEX IF NOT EXISTS idx_dc_mirror ON doc_contents(mirror_hash);
+CREATE INDEX IF NOT EXISTS idx_dc_doc ON doc_contents(doc_hash);
 CREATE VIRTUAL TABLE questions_fts USING fts5(q_text, a_text, tokenize='trigram');
 CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram');
 """)
@@ -89,8 +93,10 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
         stem = Path(rel).stem
         base = _base_stem(stem)
         text = p.read_text(encoding="utf-8", errors="replace")
-        out.execute("INSERT INTO doc_contents(md_rel, doc_hash, content) VALUES(?,?,?)",
-                    (rel, by_stem.get(base) or by_stem.get(stem), text[:200000]))
+        # P3-③：镜像 hash 回链——md 镜像题的 doc_hash = sha256("md-mirror:"+rel)[:16]
+        mirror_hash = hashlib.sha256(("md-mirror:" + rel).encode("utf-8")).hexdigest()[:16]
+        out.execute("INSERT INTO doc_contents(md_rel, doc_hash, mirror_hash, content) VALUES(?,?,?,?)",
+                    (rel, by_stem.get(base) or by_stem.get(stem), mirror_hash, text[:200000]))
         out.execute("INSERT INTO docs_fts(rowid, file_name, content) VALUES(?,?,?)",
                     (out.execute("SELECT last_insert_rowid()").fetchone()[0], stem, text[:100000]))
         n_docs_content += 1
