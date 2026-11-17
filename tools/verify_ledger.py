@@ -51,11 +51,15 @@ SKIP_REASONS = ("no_text_layer", "garbled", "converted_only", "duplicate_of", "n
 
 
 def base_stem(stem: str) -> str:
-    """剥 `<stem>_<hash8>` / `<stem>__<hash8>` 同名冲突后缀（build_db._base_stem 同款）。"""
-    for cut in (9, 10):          # `_a1b2c3d4` 9 字符；`__a1b2c3d4` 10 字符
-        if len(stem) > cut and stem[-cut] == "_" and \
-                all(c in "0123456789abcdef" for c in stem[-cut + 1:]):
-            return stem[:-cut]
+    """剥 `<stem>_<hash8>`（reconvert 单下划线）/ `<stem>__<hash8>`（backfill 双下划线）
+    同名冲突后缀。双下划线必须先判且判两位，否则剥成 `stem_` 留尾（2026-11-17 审核修复，
+    同 build_db._base_stem）。"""
+    if len(stem) > 10 and stem[-10] == "_" and stem[-9] == "_" and \
+            all(c in "0123456789abcdef" for c in stem[-8:]):
+        return stem[:-10]
+    if len(stem) > 9 and stem[-9] == "_" and \
+            all(c in "0123456789abcdef" for c in stem[-8:]):
+        return stem[:-9]
     return stem
 
 

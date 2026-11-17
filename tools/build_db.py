@@ -31,8 +31,14 @@ MD_ROOT = Path(config.CORPUS_ROOT) / "20-题库MD"
 
 
 def _base_stem(stem: str) -> str:
-    """` stem_<hash8>` 同名冲突后缀剥壳：`面试题_a1b2c3d4` → `面试题`。"""
-    if len(stem) > 9 and stem[-9] == "_" and all(c in "0123456789abcdef" for c in stem[-8:]):
+    """剥同名冲突后缀：`面试题_a1b2c3d4`（reconvert 单下划线）与
+    `面试题__a1b2c3d4`（backfill 双下划线）两种口径都要剥干净。
+    双下划线必须先判且判两位——否则会被单下划线分支剥成 `面试题_` 留尾（2026-11-17 审核修复）。"""
+    if len(stem) > 10 and stem[-10] == "_" and stem[-9] == "_" and \
+            all(c in "0123456789abcdef" for c in stem[-8:]):
+        return stem[:-10]
+    if len(stem) > 9 and stem[-9] == "_" and \
+            all(c in "0123456789abcdef" for c in stem[-8:]):
         return stem[:-9]
     return stem
 
@@ -71,22 +77,15 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
     out.executemany(
         "INSERT INTO documents VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         [tuple(r) for r in docs])
-    # ---- questions ----
-    qs = src.execute(
-        "SELECT q.qid, q.doc_hash, q.seq, q.q_text, q.a_text, q.qtype, q.conf, q.q_norm_hash, "
-        "       COALESCE(sd.topic,''), COALESCE(sd.category,'') "
-        "FROM questions q LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash").fetchall()
-    out.executemany(
-        "INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?)",
-        [(r[0], r[1], r[2], r[3], r[4][:8000], r[5], r[6], r[7], r[8], r[9]) for r in qs])
-    out.executemany(
-        "INSERT INTO questions_fts(rowid, q_text, a_text) VALUES(?,?,?)",
-        [(r[0], r[3], r[4][:8000]) for r in qs])
-    # ---- doc_contents：20-题库MD 正文（检索原文） ----
-    # md 与源文档的对应：转换口径是 stem 同名（同名冲突件带 doc_hash 后缀），这里按 stem 关联 best-effort
+    # ---- doc_contents：20-题库MD 正文（检索原文）——先于 questions 落库 ----
+    # G3/K12 修复（docs/15，2026-11-17）：镜像题（doc_hash=sha256("md-mirror:"+rel)[:16]，
+    # 无台账行）的 topic 此前落空串（生产 5,192 条），按继承链补齐：
+    #   源文档 topic →（无源行时）md_rel 倒数第二段目录（转换约定 parent=topic，docs/14 K11 目录推断）
     by_stem = {}
     for r in docs:
         by_stem.setdefault(Path(r["file_name"]).stem, r["doc_hash"])
+    mirror_topic: dict[str, str] = {}
+    mirror_cat: dict[str, str] = {}
     n_docs_content = 0
     for p in sorted(MD_ROOT.rglob("*.md")):
         rel = p.relative_to(MD_ROOT).as_posix()
@@ -95,11 +94,32 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
         text = p.read_text(encoding="utf-8", errors="replace")
         # P3-③：镜像 hash 回链——md 镜像题的 doc_hash = sha256("md-mirror:"+rel)[:16]
         mirror_hash = hashlib.sha256(("md-mirror:" + rel).encode("utf-8")).hexdigest()[:16]
+        parts = rel.split("/")
+        t_guess = parts[-2] if len(parts) >= 2 else ""   # <category>/<topic>/<stem>.md
+        c_guess = parts[0] if len(parts) >= 2 else ""
+        mirror_topic[mirror_hash] = t_guess
+        mirror_cat[mirror_hash] = c_guess
+        doc_hash = by_stem.get(base) or by_stem.get(stem)
+        if doc_hash:                                     # 源件 topic 空时同样走目录推断兜底
+            mirror_topic.setdefault(doc_hash, t_guess)
+            mirror_cat.setdefault(doc_hash, c_guess)
         out.execute("INSERT INTO doc_contents(md_rel, doc_hash, mirror_hash, content) VALUES(?,?,?,?)",
-                    (rel, by_stem.get(base) or by_stem.get(stem), mirror_hash, text[:200000]))
+                    (rel, doc_hash, mirror_hash, text[:200000]))
         out.execute("INSERT INTO docs_fts(rowid, file_name, content) VALUES(?,?,?)",
                     (out.execute("SELECT last_insert_rowid()").fetchone()[0], stem, text[:100000]))
         n_docs_content += 1
+    # ---- questions ----
+    qs = src.execute(
+        "SELECT q.qid, q.doc_hash, q.seq, q.q_text, q.a_text, q.qtype, q.conf, q.q_norm_hash, "
+        "       COALESCE(sd.topic,''), COALESCE(sd.category,'') "
+        "FROM questions q LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash").fetchall()
+    out.executemany(
+        "INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?)",
+        [(r[0], r[1], r[2], r[3], r[4][:8000], r[5], r[6], r[7],
+          r[8] or mirror_topic.get(r[1], ""), r[9] or mirror_cat.get(r[1], "")) for r in qs])
+    out.executemany(
+        "INSERT INTO questions_fts(rowid, q_text, a_text) VALUES(?,?,?)",
+        [(r[0], r[3], r[4][:8000]) for r in qs])
     out.commit()
     n_doc = out.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
     n_q = out.execute("SELECT COUNT(*) FROM questions").fetchone()[0]

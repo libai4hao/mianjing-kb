@@ -1,18 +1,24 @@
 # -*- coding: utf-8 -*-
-"""P2-④ build_db 轻量测试：stem 剥壳 + 查询路由（LIKE 兜底 / FTS trigram）。"""
+"""P2-④ build_db 测试：stem 剥壳 + 查询路由（LIKE 兜底 / FTS trigram）+ 镜像题 topic 继承链。"""
+import hashlib
 import sqlite3
+import sys
+from pathlib import Path
 
 import pytest
 
-from tools.build_db import _base_stem, demo_query
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.build_db import _base_stem, demo_query  # noqa: E402
 
 
 def test_base_stem():
     assert _base_stem("面试题") == "面试题"
     assert _base_stem("面试题_a1b2c3d4") == "面试题"
+    assert _base_stem("面试题__a1b2c3d4") == "面试题"    # backfill 双下划线口径（审核修复：先判两位）
     assert _base_stem("ab_cdef123") == "ab_cdef123"          # 后缀不足 8 位十六进制
     assert _base_stem("面试题_12345678") == "面试题"           # 纯数字 8 位也在 hex 空间，会被剥掉（可接受）
     assert _base_stem("ab") == "ab"
+    assert _base_stem("ab__cdef1234") == "ab"
 
 
 @pytest.fixture()
@@ -47,3 +53,47 @@ def test_query_fts_trigram(mini_db):
     hits = demo_query(mini_db, "HashMap", 5)
     assert len(hits) == 1 and "扩容" in hits[0]["q_text"]
     assert demo_query(mini_db, "不存在的词", 5) == []
+
+
+def test_mirror_topic_inheritance(tmp_path, monkeypatch):
+    """G3/K12 修复：镜像题（无台账行）topic 落空串 → 继承链 源文档 topic → md_rel 目录段。"""
+    from tools import build_db as bdb
+    from tools.kb import config, db as kbdb
+    corpus = tmp_path / "corpus"
+    build = corpus / "21-面经数据库" / "build"
+    md_dir = corpus / "20-题库MD" / "题库" / "JVM"
+    build.mkdir(parents=True)
+    md_dir.mkdir(parents=True)
+    monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
+    monkeypatch.setattr(config, "BUILD_DIR", build)
+    monkeypatch.setattr(bdb, "MD_ROOT", corpus / "20-题库MD")
+
+    mirror_rel = "题库/JVM/甲.md"
+    mirror_h = hashlib.sha256(("md-mirror:" + mirror_rel).encode()).hexdigest()[:16]
+    kb = kbdb.connect(build / "kb.sqlite")
+    kb.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+        "dir_path, status, batch_id, first_seen_at, last_seen_at, topic, category) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("h1", "h1" + "0" * 48, "甲.pdf", ".pdf", 1, "x/甲.pdf", "02", "classified", "t",
+         "now", "now", "JVM", "题库"))
+    kb.execute(
+        "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
+        "q_norm_hash, simhash, span_start, span_end, extracted_at) VALUES "
+        "(1, 'h1', 1, '什么是JVM？', '', '八股', 'high', '什么是jvm', 'x', 0, 0, 1, 'now')")
+    kb.execute(
+        "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
+        "q_norm_hash, simhash, span_start, span_end, extracted_at) VALUES "
+        "(2, ?, 1, '什么是类加载？', '', '八股', 'high', '什么是类加载', 'y', 0, 0, 1, 'now')",
+        (mirror_h,))
+    kb.commit()
+    kb.close()
+    (md_dir / "甲.md").write_text("# 甲\n\n什么是JVM？", encoding="utf-8")
+
+    out_db = build / "面经库.db"
+    bdb.build(out_db=out_db)
+    con = sqlite3.connect(str(out_db))
+    rows = {r[0]: (r[1], r[2]) for r in con.execute("SELECT qid, topic, category FROM questions")}
+    con.close()
+    assert rows[1] == ("JVM", "题库")      # 源题：走台账 topic（不变）
+    assert rows[2] == ("JVM", "题库")      # 镜像题：无台账行 → md_rel 目录段继承，不再空串

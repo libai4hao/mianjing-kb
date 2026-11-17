@@ -57,11 +57,13 @@ def _stem(name: str) -> str:
 
 
 def _search_hashes() -> set[str]:
-    """检索库里有题的 doc_hash 集合（路径 hash 口径，与 extract 一致）。"""
+    """有题的 doc_hash 集合（源 hash + md-mirror hash，与 extract 口径一致）。
+
+    审核修复（2026-11-17）：原读面经库.db（派生库，陈旧则漏判），改读台账 kb.sqlite
+    的 questions——它是全量事实源且随 extract 即时更新。
+    """
     import sqlite3 as s3
-    if not SEARCH_DB.exists():
-        return set()
-    con = s3.connect(f"file:{SEARCH_DB.as_posix()}?mode=ro", uri=True)
+    con = s3.connect(f"file:{LEDGER.as_posix()}?mode=ro", uri=True)
     try:
         return {r[0] for r in con.execute("SELECT DISTINCT doc_hash FROM questions")}
     finally:
@@ -69,6 +71,12 @@ def _search_hashes() -> set[str]:
 
 
 def build_plan() -> list[dict]:
+    """圈定转换缺口。口径对齐 docs/15 G1（2026-11-17 审核后放宽）：
+
+    classified 且源在盘的每篇，只要【没有任何 md 覆盖】就进 plan——
+    原口径"源或镜像有题就跳过"会把「有题但没 md」的 477 篇漏在 G1 外；
+    现在只有「md 已存在且（源或镜像）有题」才算已覆盖。
+    """
     md_by_stem: dict[str, list[str]] = {}
     if MD_ROOT.exists():
         for p in MD_ROOT.rglob("*.md"):
@@ -89,27 +97,35 @@ def build_plan() -> list[dict]:
         if not src.exists():
             skip.append({"doc_hash": r["doc_hash"], "file_name": r["file_name"], "why": "src_missing"})
             continue
-        if r["doc_hash"] in qs:
-            continue
         cands = md_by_stem.get(_stem(r["file_name"]), [])
+        covered = False          # 有 md 且（源或镜像）有题 = G1 已覆盖
+        has_md = bool(cands)
         for rel in cands:
             h = hashlib.sha256(("md-mirror:" + rel).encode()).hexdigest()[:16]
-            if h in qs:
-                skip.append({"doc_hash": r["doc_hash"], "file_name": r["file_name"], "why": "md_mirror_has_questions", "md": rel})
+            if h in qs or r["doc_hash"] in qs:
+                covered = True
+                skip.append({"doc_hash": r["doc_hash"], "file_name": r["file_name"],
+                             "why": "md_mirror_has_questions", "md": rel})
                 break
-        else:
-            try:
-                rel_src = src.relative_to(CORPUS).as_posix()
-            except ValueError:
-                skip.append({"doc_hash": r["doc_hash"], "file_name": r["file_name"], "why": "outside_corpus"})
-                continue
-            cat = CAT_MAP.get(r["category"] or "") or ("面经" if "面经" in (r["category"] or "") else "题库")
-            plan.append({
-                "doc_hash": r["doc_hash"], "rel": rel_src, "title": r["file_name"],
-                "ext": (r["ext"] or src.suffix), "category": cat,
-                "topic": r["topic"] or "综合", "src_path": str(src),
-                "size": src.stat().st_size,
-            })
+        if covered:
+            continue
+        if has_md:
+            # md 存在但切不出题（G2 ③，多为讲解型 md，chunker v2 已知局限）——转 md 无意义
+            skip.append({"doc_hash": r["doc_hash"], "file_name": r["file_name"],
+                         "why": "md_exists_zero_questions", "md": cands[0]})
+            continue
+        try:
+            rel_src = src.relative_to(CORPUS).as_posix()
+        except ValueError:
+            skip.append({"doc_hash": r["doc_hash"], "file_name": r["file_name"], "why": "outside_corpus"})
+            continue
+        cat = CAT_MAP.get(r["category"] or "") or ("面经" if "面经" in (r["category"] or "") else "题库")
+        plan.append({
+            "doc_hash": r["doc_hash"], "rel": rel_src, "title": r["file_name"],
+            "ext": (r["ext"] or src.suffix), "category": cat,
+            "topic": r["topic"] or "综合", "src_path": str(src),
+            "size": src.stat().st_size,
+        })
     plan.sort(key=lambda x: (-x["size"]))
     PLAN_FILE.write_text(json.dumps({"generated_at": NOW(), "plan": plan, "skip": skip},
                                     ensure_ascii=False, indent=1), encoding="utf-8")
@@ -242,29 +258,62 @@ def write_ocr_list() -> None:
 
 
 def merge_ocr() -> None:
-    """把 build/ocr_text/<rel>.txt 落成 20-题库MD/<category>/<topic>/<stem>.md（无 md 的件）。"""
+    """把 build/ocr_text/<rel>.txt 落成 20-题库MD/<category>/<topic>/<stem>.md（无 md 的件）。
+
+    K13 修正（2026-11-17）：同名不同件（多份「投资分析.docx」分属百度/美团/迅雷）原按
+    "同 stem 存在即跳过"会被误吞，改为 backfill 落盘同款 __<hash8> 后缀口径：
+    hash 取 plan 条目 doc_hash[:8]，无 plan 时算源文件 sha256[:8]；以本 rel 自己的
+    hash 后缀 md 是否已存在判幂等。
+    """
+    import hashlib as _h
     plan = {p["rel"]: p for p in json.loads(PLAN_FILE.read_text(encoding="utf-8"))["plan"]} \
         if PLAN_FILE.exists() else {}
+    # 审核修复（2026-11-17）：源 rel 已有 md（backfill ok / gate_report 落盘行）→ 跳过，
+    # 否则同一源会既落正式 md 又落 __hash 副本，镜像题重复计频
+    rel_to_md: dict[str, Path] = {}
+    log_p = BUILD / "backfill_convert_log.json"
+    if log_p.exists():
+        for l in json.loads(log_p.read_text(encoding="utf-8")):
+            if l.get("ok") and l.get("md"):
+                rel_to_md[l["rel"]] = MD_ROOT / l["md"]
+    gate_p = BUILD / "gate_report.json"
+    if gate_p.exists():
+        for r in json.loads(gate_p.read_text(encoding="utf-8")).get("rows", []):
+            m = r.get("md")
+            if m and Path(m).exists():
+                rel_to_md[r["rel"].replace("\\", "/")] = Path(m)   # gate 行 rel 是反斜杠，统一 posix
     ocr_root = BUILD / "ocr_text"
     made, skipped = 0, 0
     for txt in sorted(ocr_root.rglob("*.txt")):
         rel = txt.relative_to(ocr_root).as_posix()
         src_rel = rel[:-4] if rel.endswith(".txt") else rel   # 去掉 ".pdf.txt" 里的 .txt
-        src_rel = re.sub(r"\.(pdf|docx|doc|pptx|rtf|txt|md)$", lambda m: m.group(1), src_rel, flags=re.I)
         stem = Path(src_rel).stem
-        cand = MD_ROOT.rglob(f"{stem}.md")
-        if any(cand):
+        if src_rel in rel_to_md and Path(rel_to_md[src_rel]).exists():
             skipped += 1
             continue
         p = plan.get(src_rel) or plan.get(rel)
-        cat = (p or {}).get("category", "题库")
-        topic = (p or {}).get("topic", "综合")
-        out_dir = MD_ROOT / CAT_MAP.get(cat, "题库") / (topic or "综合")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        body = txt.read_text(encoding="utf-8", errors="replace")
-        (out_dir / f"{stem}.md").write_text(body, encoding="utf-8")
+        suffix = ((p or {}).get("doc_hash") or "")[:8]
+        if not suffix:
+            src = CORPUS / src_rel
+            if src.exists():
+                suffix = _h.sha256(src.read_bytes()).hexdigest()[:8]
+        if suffix:
+            target = MD_ROOT / CAT_MAP.get((p or {}).get("category", "题库"), "题库") \
+                / ((p or {}).get("topic") or "综合") / f"{stem}__{suffix}.md"
+            if target.exists():
+                skipped += 1
+                continue
+        else:
+            # 无法归属（plan 无条目且源件已删）：同 stem 任何 md 已存在就不能区分，跳过
+            if any(MD_ROOT.rglob(f"{stem}*.md")):
+                skipped += 1
+                continue
+            target = MD_ROOT / "题库" / "综合" / f"{stem}.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(txt.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
         made += 1
-    print(json.dumps({"new_md": made, "skipped_md_exists": skipped}, ensure_ascii=False))
+        print(f"[merge] {src_rel[:70]} -> {target.relative_to(MD_ROOT).as_posix()}")
+    print(json.dumps({"new_md": made, "skipped": skipped}, ensure_ascii=False))
 
 
 def main(argv=None) -> int:
