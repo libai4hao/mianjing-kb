@@ -85,38 +85,43 @@ def grounded(answer: str, contexts: list[dict]) -> bool:
     return False
 
 
-def run(model: str, n: int, seed: int) -> dict:
+def run(model: str, n: int, seed: int, tasks: tuple[str, ...] = ("t1", "t2")) -> dict:
     qs = sample_questions(n, seed)
     con = _con(OUT_DB)
     t1_rows, t2_rows = [], []
     for i, q in enumerate(qs):
         # T1 RAG 问答
-        ctx = rag_contexts(con, q["q_text"][:60], 3)
-        ctx_txt = "\n\n".join(f"[{j+1}] {c['question']}\n{c['answer'][:400]}"
-                              for j, c in enumerate(ctx["contexts"]))
-        prompt = (f"根据以下参考资料回答面试题。若资料不足以回答，请明确说\"资料不足\"。\n\n"
-                  f"题目：{q['q_text']}\n\n参考资料：\n{ctx_txt}")
-        try:
-            ans, lat = chat(model, prompt)
-            t1_rows.append({"qid": q["qid"], "latency": round(lat, 2),
-                            "chars": len(ans), "grounded": grounded(ans, ctx["contexts"]),
-                            "answer": ans[:400]})
-        except Exception as ex:  # noqa: BLE001
-            t1_rows.append({"qid": q["qid"], "err": f"{type(ex).__name__}: {ex}"[:120]})
+        if "t1" in tasks:
+            ctx = rag_contexts(con, q["q_text"][:60], 3)
+            ctx_txt = "\n\n".join(f"[{j+1}] {c['question']}\n{c['answer'][:400]}"
+                                  for j, c in enumerate(ctx["contexts"]))
+            prompt = (f"根据以下参考资料回答面试题。若资料不足以回答，请明确说\"资料不足\"。\n\n"
+                      f"题目：{q['q_text']}\n\n参考资料：\n{ctx_txt}")
+            try:
+                ans, lat = chat(model, prompt)
+                t1_rows.append({"qid": q["qid"], "latency": round(lat, 2),
+                                "chars": len(ans), "grounded": grounded(ans, ctx["contexts"]),
+                                "answer": ans[:400]})
+            except Exception as ex:  # noqa: BLE001
+                t1_rows.append({"qid": q["qid"], "err": f"{type(ex).__name__}: {ex}"[:120]})
         # T2 结构化抽取
-        prompt2 = ("你是面试题标注器。阅读题目与答案，只输出 JSON，不要解释：\n"
-                   '{"qtype": "八股|算法|HR|场景|项目", "difficulty": 1-5整数, "tags": ["关键词", ...]}\n\n'
-                   f"题目：{q['q_text'][:300]}\n答案：{q['a_text'][:800]}")
-        try:
-            out2, lat2 = chat(model, prompt2)
-            m = re.search(r"\{.*\}", out2, re.S)
-            parsed = json.loads(m.group(0)) if m else None
-            ok = parsed is not None and parsed.get("qtype") in QTYPES
-            t2_rows.append({"qid": q["qid"], "json_ok": ok,
-                            "qtype_correct": bool(ok and parsed.get("qtype") == q["qtype"]),
-                            "latency": round(lat2, 2)})
-        except Exception as ex:  # noqa: BLE001
-            t2_rows.append({"qid": q["qid"], "json_ok": False, "err": f"{type(ex).__name__}"[:60]})
+        if "t2" in tasks:
+            prompt2 = ("你是面试题标注器。阅读题目与答案，只输出 JSON，不要解释。\n"
+                       '格式：{"qtype": <从 八股/算法/HR/场景/项目 中选恰好一个>, '
+                       '"difficulty": <1-5整数>, "tags": [<关键词>, ...]}\n\n'
+                       f"题目：{q['q_text'][:300]}\n答案：{q['a_text'][:800]}")
+            try:
+                out2, lat2 = chat(model, prompt2)
+                m = re.search(r"\{.*\}", out2, re.S)
+                parsed = json.loads(m.group(0)) if m else None
+                ok = parsed is not None and parsed.get("qtype") in QTYPES
+                t2_rows.append({"qid": q["qid"], "json_ok": ok,
+                                "qtype_correct": bool(ok and parsed.get("qtype") == q["qtype"]),
+                                "qtype_pred": (parsed or {}).get("qtype"),
+                                "raw": out2[:200],
+                                "latency": round(lat2, 2)})
+            except Exception as ex:  # noqa: BLE001
+                t2_rows.append({"qid": q["qid"], "json_ok": False, "err": f"{type(ex).__name__}"[:60]})
     con.close()
 
     def _stat(rows, key):
@@ -139,8 +144,9 @@ def run(model: str, n: int, seed: int) -> dict:
                        "json_ok_rate": _stat(t2_rows, "json_ok"),
                        "qtype_acc": _stat(t2_rows, "qtype_correct")},
     }
-    out = {"summary": summary, "t1": t1_rows, "t2": t2_rows}
-    outp = Path(config.BUILD_DIR) / f"llm_smoke_{model.replace(':', '_').replace('/', '_')}.json"
+    out = {"summary": summary, "t1": t1_rows, "t2": t2_rows, "tasks": list(tasks)}
+    suffix = "" if set(tasks) >= {"t1", "t2"} else "_" + "".join(tasks)
+    outp = Path(config.BUILD_DIR) / f"llm_smoke_{model.replace(':', '_').replace('/', '_')}{suffix}.json"
     outp.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     return {"summary": summary, "out": str(outp)}
 
@@ -150,8 +156,10 @@ def main(argv=None) -> int:
     ap.add_argument("--model", required=True)
     ap.add_argument("--n", type=int, default=20)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--tasks", default="t1,t2", help="t1/t2 或逗号组合，如 --tasks t2 只补测抽取")
     args = ap.parse_args(argv)
-    res = run(args.model, args.n, args.seed)
+    tasks = tuple(t.strip() for t in args.tasks.split(",") if t.strip())
+    res = run(args.model, args.n, args.seed, tasks)
     print(json.dumps(res["summary"], ensure_ascii=False, indent=1))
     print("detail:", res["out"])
     return 0
