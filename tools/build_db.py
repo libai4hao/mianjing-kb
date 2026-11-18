@@ -93,7 +93,14 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
     mirror_topic: dict[str, str] = {}
     mirror_cat: dict[str, str] = {}
     n_docs_content = 0
-    for p in sorted(MD_ROOT.rglob("*.md")):
+    md_paths = sorted(MD_ROOT.rglob("*.md")) if MD_ROOT.exists() else []
+    import re
+    _pat = re.compile(r"(?:__|_)[0-9a-f]{8}$")
+    _hashed = {(p.parent, _pat.sub("", p.stem)) for p in md_paths if _pat.search(p.stem)}
+    for p in md_paths:
+        # 旧 x.md 与 reconvert 生成的 x_<hash8>.md 同目录共存时只收新版，避免同一原文双份
+        if not _pat.search(p.stem) and (p.parent, p.stem) in _hashed:
+            continue
         rel = p.relative_to(MD_ROOT).as_posix()
         stem = Path(rel).stem
         base = _base_stem(stem).strip().lower()

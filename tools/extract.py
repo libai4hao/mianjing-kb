@@ -54,6 +54,25 @@ def _excluded_rels() -> tuple[set[str], set[str]]:
     return src, mds
 
 
+def _md_mirror_paths() -> tuple[list[Path], int]:
+    """返回 (参与抽题的 md, 被跳过的旧同名 md 数)。
+
+    reconvert/backfill 生成的 `x_<hash8>.md` 与旧 `x.md` 会在 rglob 里同时出现；
+    同一目录同一 base 已有带哈希版本时跳过旧文件，避免同一原文抽两遍、题频虚高。
+    """
+    import re
+    paths = sorted(config.QUESTION_MD_DIR.rglob("*.md")) if config.QUESTION_MD_DIR.exists() else []
+    pat = re.compile(r"(?:__|_)[0-9a-f]{8}$")
+    hashed = {(p.parent, pat.sub("", p.stem)) for p in paths if pat.search(p.stem)}
+    kept, skipped = [], 0
+    for p in paths:
+        if not pat.search(p.stem) and (p.parent, p.stem) in hashed:
+            skipped += 1
+            continue
+        kept.append(p)
+    return kept, skipped
+
+
 def doc_pool(conn) -> list[tuple[str, Path]]:
     """(doc_hash, path)：classified 件 + 20-题库MD md 镜像（无行孤儿按路径自算 hash 前缀）。
     exclusions.json 命中的件不进题池（P2-⑤：保留检索、不抽题）。"""
@@ -72,7 +91,8 @@ def doc_pool(conn) -> list[tuple[str, Path]]:
             continue
         pool[r["doc_hash"]] = p
     if config.QUESTION_MD_DIR.exists():
-        for p in config.QUESTION_MD_DIR.rglob("*.md"):
+        paths, _skipped = _md_mirror_paths()
+        for p in paths:
             # 镜像 md 无 DB 行：doc_hash 按路径稳定（内容 hash 会在 md 被改写时产生孤儿行——
             # OCR 合并/懒加载每改一次 md，旧 hash 的题行就残留累积，2026-11-17 修复）
             rel = p.relative_to(config.QUESTION_MD_DIR).as_posix()

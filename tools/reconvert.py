@@ -3,7 +3,8 @@
 
 - 输出名带 doc_hash 后缀（sha256[:8]），杜绝再次同名覆盖
 - 复用存量转换器 21-面经数据库\\tools\\convert_one.py（pymupdf4llm 主路 + 图片抽取）
-- 源件已不存在/隔离的跳过并记因；结果写 build/reconvert_log.json
+- 源件已不存在/隔离的跳过并记因；每件追加 build/reconvert.jsonl，另存带时间戳的
+  reconvert_log-*.json（reconvert_log.json 保留为最新副本）；失败数 >0 时退出码 1
 
 用法：
     python tools/reconvert.py --dry-run     # 只算清单不落盘
@@ -13,18 +14,19 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import os
 import sys
 import time
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
 
-from kb import config, db  # noqa: E402
+from kb import config, db, hashing  # noqa: E402
 
 # 审核修复（2026-11-18）：原 insert(0) 会把语料侧 tools 顶到最前，遮蔽本仓库同名模块
 # （同进程后续 from build_db import build 会解析到语料侧旧模块）；改为 append 放到末尾。
@@ -38,23 +40,48 @@ def _load_convert_one():
     return convert_one
 
 
-try:
-    convert_one = _load_convert_one()
-except ModuleNotFoundError:   # 未配语料根或该机没有语料侧工具
-    convert_one = None
+convert_one = None
+
+
+def _require_convert_one():
+    """延迟加载：convert_one 自身依赖缺失（如 pymupdf4llm）不能被误报成"没配语料根"。"""
+    global convert_one
+    if convert_one is not None:
+        return convert_one
+    try:
+        convert_one = _load_convert_one()
+    except ModuleNotFoundError as ex:
+        if ex.name == "convert_one":
+            raise RuntimeError(
+                "找不到语料侧 convert_one 模块：请设置 KB_CORPUS_ROOT 指向语料根"
+                "（其中应含 21-面经数据库/tools/convert_one.py）") from ex
+        raise RuntimeError(f"convert_one 的依赖缺失：{ex.name}（请先安装该依赖）") from ex
+    return convert_one
+
+
+def _read_md(path: Path) -> str:
+    """md 源解码：先 utf-8-sig，再 gb18030；替换符过多直接失败，不静默污染文本。"""
+    for enc in ("utf-8-sig", "gb18030"):
+        try:
+            text = path.read_text(encoding=enc)
+        except UnicodeDecodeError:
+            continue
+        bad = text.count("\ufffd")
+        if bad > max(3, len(text) // 1000):
+            raise ValueError(f"{path.name}: {enc} 解码后含 {bad} 个替换符")
+        return text
+    raise ValueError(f"{path.name}: 既不是 UTF-8 也不是 GB18030")
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
 
 BUILD = Path(config.BUILD_DIR)             # P1-3 修复（2026-11-17 审核）：路径统一走 config
 MD_ROOT = Path(config.QUESTION_MD_DIR)     # KB_* 环境变量可覆盖，换机器不再失效
 CAT_MAP = {"题库": "题库", "真题": "真题", "面经": "面经", "个人面经": "个人面经", "专题笔记": "专题笔记"}
-
-
-def _require_convert_one():
-    """取存量转换器；拿不到就给一句能照做的错误，而不是 ModuleNotFoundError 栈。"""
-    if convert_one is not None:
-        return convert_one
-    raise RuntimeError(
-        "找不到语料侧 convert_one 模块：请设置 KB_CORPUS_ROOT 指向语料根"
-        "（其中应含 21-面经数据库/tools/convert_one.py）")
 
 
 
@@ -72,7 +99,8 @@ def losers_from_log() -> list[dict]:
 
 
 def sha16(p: Path) -> str:
-    return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+    """复用 kb.hashing.doc_hash，避免文件名哈希与库内 doc_hash 分叉。"""
+    return hashing.doc_hash(p)
 
 
 def convert_one_entry(rel: str, category: str, topic: str, dry_run: bool) -> dict:
@@ -96,27 +124,67 @@ def convert_one_entry(rel: str, category: str, topic: str, dry_run: bool) -> dic
         if ext == ".pdf":
             md, pages, kept, skipped = cv.pdf_to_md(
                 str(src), str(out_dir / "images"), stem + f"_{doc_hash[:8]}", "pymupdf4llm")
-            ratio = cv.cjk_ratio(md)
-            if ratio < 0.05:
-                out.update(ok=False, err=f"低CJK({ratio:.1%})")
-                return out
         elif ext == ".docx":
             md = cv.docx_to_md(str(src))
-            pages, kept, skipped, ratio = 1, 0, 0, cv.cjk_ratio(md)
+            pages, kept, skipped = 1, 0, 0
         elif ext == ".md":
             # md 源的"转换"就是拷贝（原转换器不支持 .md，这 2 条当时也是直接落 md）
-            md = src.read_text(encoding="utf-8", errors="replace")
-            pages, kept, skipped, ratio = 1, 0, 0, cv.cjk_ratio(md)
+            md = _read_md(src)
+            pages, kept, skipped = 1, 0, 0
         else:
             out.update(ok=False, err=f"暂不支持 {ext}")
             return out
+        ratio = cv.cjk_ratio(md)
+        if ratio < 0.05:
+            out.update(ok=False, err=f"低CJK({ratio:.1%})")
+            return out
         out_dir.mkdir(parents=True, exist_ok=True)
-        md_path.write_text(md, encoding="utf-8")
+        _write_atomic(md_path, md)
         out.update(ok=True, chars=len(md), pages=pages, cjk=round(ratio, 3),
                    imgs_kept=kept, imgs_skipped=skipped)
     except Exception as ex:  # noqa: BLE001
         out.update(ok=False, err=f"{type(ex).__name__}: {str(ex)[:200]}")
     return out
+
+
+def _extra_job(conn, rel: str) -> dict | None:
+    """--extra 必须按"目录 + 文件名"精确匹配；0 条或多条都报错，不猜。"""
+    posix = rel.replace("\\", "/")
+    p = Path(posix)
+    if p.is_absolute():
+        try:
+            p = p.resolve().relative_to(Path(config.CORPUS_ROOT).resolve())
+            posix = p.as_posix()
+        except ValueError:
+            print(f"[error] extra 不在语料根内: {rel}", file=sys.stderr)
+            return None
+    dir_path = p.parent.as_posix() if str(p.parent) not in (".", "") else ""
+    name = p.name
+    rows = conn.execute(
+        "SELECT category, topic, dir_path, status FROM source_documents "
+        "WHERE dir_path=? AND file_name=?",
+        (dir_path, name),
+    ).fetchall()
+    if len(rows) != 1:
+        print(f"[error] extra 匹配到 {len(rows)} 条记录（要求唯一）: {rel}", file=sys.stderr)
+        return None
+    row = rows[0]
+    if row["status"] != "classified":
+        print(f"[warn] extra 记录不是 classified（{row['status']}）: {rel}", file=sys.stderr)
+        return None
+    return {"rel": f"{row['dir_path']}/{name}" if row["dir_path"] else name,
+            "category": row["category"], "topic": row["topic"] or "综合", "_extra": True}
+
+
+def _converter_meta(cv) -> dict:
+    path = getattr(cv, "__file__", None)
+    sha = hashing.sha256_file(path) if path and Path(path).is_file() else None
+    try:
+        from importlib.metadata import version
+        ver = version("pymupdf4llm")
+    except Exception:  # noqa: BLE001
+        ver = None
+    return {"convert_one": path, "convert_one_sha256": sha, "pymupdf4llm": ver}
 
 
 def main(argv=None) -> int:
@@ -125,37 +193,54 @@ def main(argv=None) -> int:
     ap.add_argument("--extra", nargs="*", default=[], help="追加补转的语料树相对路径")
     args = ap.parse_args(argv)
 
-    jobs = losers_from_log()
+    try:
+        jobs = losers_from_log()
+    except FileNotFoundError:
+        print(f"[fatal] 缺少转换日志：{BUILD / 'convert_log.json'}", file=sys.stderr)
+        return 2
+    except (OSError, json.JSONDecodeError) as ex:
+        print(f"[fatal] 转换日志不可读：{ex}", file=sys.stderr)
+        return 2
     conn = db.connect(config.DB_PATH, create=False)
-    # 追加补转件：category/topic 取 DB 行
-    for rel in args.extra:
-        posix = rel.replace("\\", "/")
-        name = Path(posix).name
-        row = conn.execute(
-            "SELECT category, topic, dir_path FROM source_documents WHERE file_name=? AND status='classified'",
-            (name,)).fetchone()
-        if row:
-            jobs.append({"rel": str(Path(row["dir_path"]).joinpath(name)), "category": row["category"],
-                         "topic": row["topic"] or "综合", "_extra": True})
-        else:
-            print(f"[warn] extra 未找到 classified 行: {rel}", file=sys.stderr)
-    conn.close()
+    try:
+        for rel in args.extra:
+            job = _extra_job(conn, rel)
+            if job:
+                jobs.append(job)
+    finally:
+        conn.close()
 
+    cv = _require_convert_one() if jobs else None
+    meta = _converter_meta(cv) if cv else {}
     started = time.perf_counter()
-    results = [convert_one_entry(j["rel"], j["category"], j["topic"], args.dry_run) for j in jobs]
+    results = []
+    log_dir = BUILD
+    log_dir.mkdir(parents=True, exist_ok=True)
+    jsonl = log_dir / "reconvert.jsonl"
+    for job in jobs:
+        r = convert_one_entry(job["rel"], job["category"], job["topic"], args.dry_run)
+        results.append(r)
+        if not args.dry_run:
+            with jsonl.open("a", encoding="utf-8") as fh:   # 每件追加：崩溃也能断点排查
+                fh.write(json.dumps({**r, "at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")},
+                                    ensure_ascii=False) + "\n")
     elapsed = time.perf_counter() - started
     if not args.dry_run:
-        (BUILD / "reconvert_log.json").write_text(
-            json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+        payload = {"meta": meta, "results": results}
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        run_log = log_dir / f"reconvert_log-{stamp}.json"
+        text = json.dumps(payload, ensure_ascii=False, indent=1)
+        _write_atomic(run_log, text)
+        _write_atomic(log_dir / "reconvert_log.json", text)   # 兼容旧文档口径
     ok_n = sum(1 for r in results if r["ok"] is True)
     skip_n = sum(1 for r in results if r["ok"] is False and r.get("err") == "源件不存在（已删/隔离）")
     fail_n = sum(1 for r in results if r["ok"] is False and r.get("err") != "源件不存在（已删/隔离）")
     print(json.dumps({"jobs": len(results), "ok": ok_n, "skipped_src_gone": skip_n,
-                      "failed": fail_n, "dry_run": args.dry_run,
+                      "failed": fail_n, "dry_run": args.dry_run, "meta": meta,
                       "elapsed_sec": round(elapsed, 1),
                       "failures": [r for r in results if r["ok"] is False][:30]},
                      ensure_ascii=False, indent=1))
-    return 0
+    return 0 if fail_n == 0 else 1
 
 
 if __name__ == "__main__":

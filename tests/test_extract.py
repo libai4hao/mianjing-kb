@@ -172,3 +172,16 @@ def test_pool_hash_stable_across_content_change(tmp_env, monkeypatch):
     removed = extract.purge_orphans(conn, {key2})
     assert removed == 1
     assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash='deadbeefdeadbeef'").fetchone()[0] == 0
+
+
+def test_pool_skips_old_md_when_hash_sibling_exists(tmp_env):
+    """旧 x.md 与 reconvert 生成的 x_<hash8>.md 共存时，只抽带哈希的新版，避免重复计题。"""
+    corpus, conn = tmp_env
+    md_dir = config.QUESTION_MD_DIR
+    (md_dir / "题库").mkdir(parents=True)
+    old = md_dir / "题库" / "x.md"
+    new = md_dir / "题库" / "x_abcd1234.md"
+    old.write_text(MD_A, encoding="utf-8")
+    new.write_text(MD_A, encoding="utf-8")
+    names = {v.name for _, v in extract.doc_pool(conn)}
+    assert new.name in names and old.name not in names

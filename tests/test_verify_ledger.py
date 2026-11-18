@@ -393,3 +393,19 @@ def test_g6b_pass_and_fail(tmp_path):
     assert g2["detail"]["weak_topics"] == ["JVM"]
     assert g2["detail"]["matrix"]["JVM"] == {"数据库": 5, "JVM": 15}
     conn.close()
+
+
+def test_g5_new_converted_note_requires_target_record(mini_env):
+    """新格式 converted_to:<dir>/<name>#<hash> 必须能解析到一条未退役的后继记录。"""
+    kb = mini_env["kb"]
+    kb.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+        "dir_path, status, batch_id, first_seen_at, last_seen_at, note) VALUES "
+        "(?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("deadbeefdeadbeef", "0" * 64, "丁.doc", ".doc", 4, str(mini_env["corpus"] / "03" / "丁.doc"),
+         "03-数据库", "superseded", "t", "now", "now",
+         "converted_to:03-数据库/丁.docx#abcd1234 | needs_convert"))
+    kb.commit()
+    g = vl.g5_disk(kb, mini_env["corpus"], mini_env["build"])
+    assert g["state"] == "FAIL"
+    assert any(f["kind"] == "converted_target_missing" for f in g["fails"])

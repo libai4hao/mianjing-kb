@@ -287,6 +287,20 @@ def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
         # superseded：在盘则须在 99 区，或 note 有留痕（converted_to 原地转换 /
         # review_cli 退役确认——"已退役待物理清理"是合法中间态，docs/15 G5 意图=有记录即过）；
         # 不在盘则同样须有留痕（note / retire_log）
+        # 新格式 converted_to:<dir>/<name>#<hash> 额外校验后继记录：必须存在且未被退役，
+        # 否则"原 .doc 已 superseded、docx 根本没入库"，purge 的 superseded_no_replacement 会虚高。
+        for part in (r["note"] or "").split(" | "):
+            if part.startswith("converted_to:") and "#" in part:
+                target = part.split(":", 1)[1].split("#", 1)[0].strip()
+                name = target.rsplit("/", 1)[-1]
+                dir_path = target.rsplit("/", 1)[0] if "/" in target else ""
+                trow = kb_conn.execute(
+                    "SELECT status FROM source_documents WHERE file_name=? AND dir_path=? "
+                    "AND status NOT IN ('absent','superseded','quarantined')",
+                    (name, dir_path)).fetchone()
+                if trow is None:
+                    fails.append({"kind": "converted_target_missing", "rel": r["file_name"],
+                                  "target": target})
         if src.exists():
             in_99 = (r["dir_path"] or "").startswith(config.QUARANTINE_PREFIX) \
                     or config.QUARANTINE_PREFIX in str(src)
