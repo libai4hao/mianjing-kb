@@ -34,6 +34,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kb import config, db  # noqa: E402
+from kb.vocab import OTHER_TOPIC, topic_vocab  # noqa: E402
 from llm_client import ConfigError, chat, chat_json, redact, resolve_config  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
@@ -42,6 +43,11 @@ SYSTEM = ("你是面试题标注器。阅读题目与答案片段，只输出 JS
           '{"topic": <2-8字主题，如 "Java基础"/"MySQL"/"Redis">, '
           '"qtype": <从 八股/算法/HR/场景/项目 中选恰好一个>, '
           '"difficulty": <1-5整数>, "tags": [<关键词>, ...]}')
+# 批次三 R2：词表非空时换锁枚举版（docs/13 §5——封闭词表防主题碎片化）
+VOCAB_SYSTEM = ("你是面试题标注器。阅读题目与答案片段，只输出 JSON 对象，格式："
+                '{{"topic": <主题，必须从词表中选恰好一个：{vocab}；拿不准选其他>, '
+                '"qtype": <从 八股/算法/HR/场景/项目 中选恰好一个>, '
+                '"difficulty": <1-5整数>, "tags": [<关键词>, ...]}}')
 
 
 def pick_targets(conn, limit: int = 0) -> list[dict]:
@@ -61,15 +67,27 @@ def pick_targets(conn, limit: int = 0) -> list[dict]:
 
 
 def label_one(cfg: dict, q: dict) -> dict:
-    """单题打标：脱敏 → LLM → staging 行（失败抛异常，调用方落 failed 队列）。"""
+    """单题打标：脱敏 → LLM → staging 行（失败抛异常，调用方落 failed 队列）。
+
+    批次三 R2：词表非空时 SYSTEM 换锁枚举版，且落表前兜底——topic 不在词表
+    改"其他" + review_state='pending'（prompt 锁 + 落表双保险）；词表降级
+    （空元组）走旧口径（自由主题，review_state=None）。
+    """
+    vocab = topic_vocab()
+    system = VOCAB_SYSTEM.format(vocab="、".join(vocab)) if vocab else SYSTEM
     text = f"{q['q_text'][:300]}\n{q['a_text'][:300]}"
     clean, hit = redact(text)
-    r = chat_json(cfg, SYSTEM, f"题目与答案片段：\n{clean}", max_tokens=128)
+    r = chat_json(cfg, system, f"题目与答案片段：\n{clean}", max_tokens=128)
     obj = r.get("obj")
     if obj is None:
         raise RuntimeError("JSON 解析失败")
+    topic = str(obj.get("topic") or "").strip()[:40]
+    review_state = None
+    if vocab and topic not in vocab:
+        topic = OTHER_TOPIC
+        review_state = "pending"
     return {"qid": q["qid"], "q_norm_hash": q.get("q_norm_hash"),
-            "topic": str(obj.get("topic") or "").strip()[:40],
+            "topic": topic,
             "qtype": obj.get("qtype"), "difficulty": obj.get("difficulty"),
             "tags": json.dumps(obj.get("tags") or [], ensure_ascii=False),
             "provider": cfg["provider"], "model": cfg["model"],
@@ -77,6 +95,7 @@ def label_one(cfg: dict, q: dict) -> dict:
             "tokens": r["tokens"],
             "prompt_tokens": r.get("prompt_tokens"),
             "completion_tokens": r.get("completion_tokens"),
+            "review_state": review_state,
             "labeled_at": datetime.now().strftime(NOW_FMT)}
 
 
@@ -84,11 +103,11 @@ def write_staging(conn, rows: list[dict]) -> int:
     conn.executemany(
         "INSERT OR REPLACE INTO labels_staging "
         "(qid, q_norm_hash, topic, qtype, difficulty, tags, provider, model, "
-        "redacted, latency_ms, tokens, prompt_tokens, completion_tokens, labeled_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        [[r[k] for k in ("qid", "q_norm_hash", "topic", "qtype", "difficulty", "tags",
-                         "provider", "model", "redacted", "latency_ms", "tokens",
-                         "prompt_tokens", "completion_tokens", "labeled_at")]
+        "redacted, latency_ms, tokens, prompt_tokens, completion_tokens, labeled_at, review_state) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [[r.get(k) for k in ("qid", "q_norm_hash", "topic", "qtype", "difficulty", "tags",
+                             "provider", "model", "redacted", "latency_ms", "tokens",
+                             "prompt_tokens", "completion_tokens", "labeled_at", "review_state")]
          for r in rows])
     conn.commit()
     return len(rows)

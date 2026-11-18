@@ -45,6 +45,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kb import config, hashing  # noqa: E402
+from kb.vocab import topic_vocab  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 SKIP_REASONS = ("no_text_layer", "garbled", "converted_only", "duplicate_of",
@@ -352,14 +353,19 @@ def g6_label(kb_conn) -> dict:
                         "difficulty": r["difficulty"], "bad_fields": why})
     ok_rate = 1 - len(bad) / n
 
-    # 软指标：新 topic 占比（现有 questions 未出现过的主题）
-    known = {r[0] for r in kb_conn.execute(
-        "SELECT DISTINCT topic FROM questions WHERE topic IS NOT NULL AND topic != ''")}
+    # 软指标：新 topic 占比。基线优先用封闭词表（批次三 R2，2026-11-19）——词表封闭后
+    # drift 捕捉的是 prompt 锁失败（词表外主题漏网）；词表不可用退回 questions 现有分布。
+    known = set(topic_vocab())
+    if known:
+        drift_baseline = "vocab"
+    else:
+        known = {r[0] for r in kb_conn.execute(
+            "SELECT DISTINCT topic FROM questions WHERE topic IS NOT NULL AND topic != ''")}
+        drift_baseline = "questions"
     if known:
         new_topics = {r["topic"] for r in rows if (r["topic"] or "").strip()} - known
         n_new = sum(1 for r in rows if (r["topic"] or "").strip() in new_topics)
         drift = n_new / n
-        drift_baseline = "questions"
     else:
         # F8/bug1（2026-11-19）：首批打标时 questions 的 topic 必然全空（无基线），
         # 漂移指标无意义——原实现此时 drift=1.0 必 WARN，属误报。跳过并留痕。

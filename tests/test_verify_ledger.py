@@ -252,12 +252,14 @@ def test_g6_skip_and_pass_and_fail(mini_env):
     assert any(f.get("kind") == "schema_ok_rate" for f in g3["fails"])
 
 
-def test_g6_first_batch_no_drift_warn(mini_env):
+def test_g6_first_batch_no_drift_warn(mini_env, monkeypatch):
     """F8/bug1：首批打标（questions 现有 topic 全空=无基线）不得因 drift 误报 WARN。
 
     原实现 drift 基线=questions 现有非空 topic，首批打标前必空 → 所有 topic 都算
     "新主题" → drift=1.0 必 WARN。无基线时漂移指标无意义，应跳过并留痕。
+    批次三 R2 后该分支仅在词表不可用（topic_vocab 空）时可达——monkeypatch 模拟。
     """
+    monkeypatch.setattr(vl, "topic_vocab", lambda: ())
     kb = mini_env["kb"]
     kb.execute("INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
                "q_norm_hash, simhash, span_start, span_end, topic, extracted_at) VALUES "
@@ -270,6 +272,26 @@ def test_g6_first_batch_no_drift_warn(mini_env):
     assert g["state"] == "PASS"
     assert g["detail"]["new_topic_ratio"] == 0.0
     assert g["detail"].get("drift_baseline") == "none(首批)"
+
+
+def test_g6_drift_vocab_baseline(mini_env, monkeypatch):
+    """批次三 R2：词表非空 → drift 基线=词表——词表外主题算漂移（捕捉 prompt 锁失败）。"""
+    monkeypatch.setattr(vl, "topic_vocab", lambda: ("JVM", "Redis", "其他"))
+    kb = mini_env["kb"]
+    kb.execute("INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, provider, "
+               "model, redacted, latency_ms, tokens, labeled_at) VALUES "
+               "(1,'JVM','八股',3,'[]','p','m',0,1,1,'now'),"
+               "(2,'玄学','八股',3,'[]','p','m',0,1,1,'now'),"
+               "(3,'怪谈','八股',3,'[]','p','m',0,1,1,'now')")
+    kb.commit()
+    g = vl.g6_label(kb)
+    assert g["detail"]["drift_baseline"] == "vocab"
+    assert g["state"] == "WARN"                    # 2/3 词表外 > 0.15
+    # 全部落回词表内 → 漂移归零
+    kb.execute("UPDATE labels_staging SET topic='Redis' WHERE qid IN (2,3)")
+    kb.commit()
+    g2 = vl.g6_label(kb)
+    assert g2["state"] == "PASS" and g2["detail"]["new_topic_ratio"] == 0.0
 
 
 # ---------------- main / exit code ----------------

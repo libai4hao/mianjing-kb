@@ -378,3 +378,43 @@ def test_eval_golden_writes_report(mini_db):
     assert g["state"] == "PASS"
     data = json.loads((config.BUILD_DIR / "label_eval.json").read_text(encoding="utf-8"))
     assert data["state"] == "PASS" and data["detail"]["topic_acc"] == 1.0
+
+
+# ---- 批次三 R2：封闭词表——label_one 锁枚举 + 词表外兜底 ----
+
+def test_label_one_vocab_lock_and_fallback(monkeypatch):
+    """词表非空 → SYSTEM 锁枚举（词表注入 prompt）；词表外输出改"其他"+pending。"""
+    monkeypatch.setattr(bl, "topic_vocab", lambda: ("JVM", "Redis", "其他"))
+    sent = {}
+
+    def fake_chat_json(cfg, system, user, **kw):
+        sent["system"] = system
+        return {"obj": {"topic": "玄学", "qtype": "八股", "difficulty": 3, "tags": []},
+                "latency_ms": 5, "tokens": 10, "prompt_tokens": 7, "completion_tokens": 3}
+
+    monkeypatch.setattr(bl, "chat_json", fake_chat_json)
+    row = bl.label_one(CFG, {"qid": 9, "q_norm_hash": "h9", "q_text": "题", "a_text": "答"})
+    assert "词表" in sent["system"] and "JVM" in sent["system"] and "其他" in sent["system"]
+    assert row["topic"] == "其他" and row["review_state"] == "pending"
+
+    def fake2(cfg, system, user, **kw):
+        return {"obj": {"topic": "JVM", "qtype": "八股", "difficulty": 3, "tags": []},
+                "latency_ms": 5, "tokens": 10, "prompt_tokens": 7, "completion_tokens": 3}
+
+    monkeypatch.setattr(bl, "chat_json", fake2)
+    row2 = bl.label_one(CFG, {"qid": 10, "q_norm_hash": "h10", "q_text": "题", "a_text": "答"})
+    assert row2["topic"] == "JVM" and row2["review_state"] is None
+
+
+def test_label_one_no_vocab_keeps_free_topic(monkeypatch):
+    """词表降级（空元组）→ 旧口径：不锁枚举、不兜底，review_state=None。"""
+    monkeypatch.setattr(bl, "topic_vocab", lambda: ())
+
+    def fake(cfg, system, user, **kw):
+        assert system == bl.SYSTEM
+        return {"obj": {"topic": "玄学", "qtype": "八股", "difficulty": 3, "tags": []},
+                "latency_ms": 5, "tokens": 10, "prompt_tokens": 7, "completion_tokens": 3}
+
+    monkeypatch.setattr(bl, "chat_json", fake)
+    row = bl.label_one(CFG, {"qid": 9, "q_norm_hash": "h9", "q_text": "题", "a_text": "答"})
+    assert row["topic"] == "玄学" and row["review_state"] is None
