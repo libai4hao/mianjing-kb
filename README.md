@@ -171,6 +171,12 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
   `python tools\batch_label.py --check` → 打标 → `--sample 50` 人工抽查 → `--merge`
   → `python tools\refresh.py --reembed`（检索库 topic 是快照，merge 只写 kb.sqlite）。
   local 路径（ollama qwen3-4b）已端到端实测（3 题真打标→G6→merge 落库）；
+  **金标层+复核层已落地（2026-11-19 批次二/三）**：`--golden-sample 50` 分层抽样
+  人工填 gold → `--golden-load` 回灌 → G6b 门禁（topic 准确率 ≥0.8，`--eval` 看
+  混淆矩阵/弱项主题，FAIL 拒绝 merge）+ `--review` LLM 预审三类可疑标签
+  （词表外/低置信/金标弱区）→ `--review-list`/`--review-resolve` 人工终审
+  （分歧行 merge 不落库，终审后放行）；封闭词表（topic_rules.yaml 并集+"其他"
+  兜底）锁住主题碎片化；`LLM_NUM_CTX` 上下文窗口透传。闭环详见 docs/15 §3.8；
 - **向量增量（K2）**：当前全量重嵌约 9 分钟，暂无增量需求。
 
 ## 仍待消化（数据债，非代码缺口）
