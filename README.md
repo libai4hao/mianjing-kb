@@ -57,7 +57,7 @@ tools/
   purge_origin.py         删除已收入语料的原件（四重校验缺一不删）
 scripts/
   补录-doc转docx.ps1       [DEPRECATED] 已由 doc_convert.py 取代，仅历史参考
-tests/                    187 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁/LLM 客户端/打标/高风险工具守护…）
+tests/                    243 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁/LLM 客户端/打标/金标/复核/高风险工具守护…）
 ```
 
 ## 快速开始

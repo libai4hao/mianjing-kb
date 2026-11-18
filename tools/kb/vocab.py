@@ -19,25 +19,22 @@ LEGACY_MARKER = "未分类"      # 分类阶段的"无主题"标记，不是合�
 def topic_vocab() -> tuple[str, ...]:
     try:
         import yaml
-    except ImportError:
-        return ()
-    path = Path(config.TOPIC_RULES_FILE)
-    if not path.exists():
-        return ()
-    try:
+        path = Path(config.TOPIC_RULES_FILE)
+        if not path.exists():
+            return ()
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception:  # noqa: BLE001 —— 损坏的 yaml 同样降级，不阻断打标
+        topics: set[str] = set()
+        for r in data.get("rules") or []:
+            if r.get("topic"):
+                topics.add(str(r["topic"]))
+        for r in data.get("title_only_rules") or []:
+            if r.get("topic"):
+                topics.add(str(r["topic"]))
+        for t in (data.get("folder_topics") or {}).values():
+            if t:
+                topics.add(str(t))
+    except Exception:  # noqa: BLE001 —— 缺失/损坏（含结构错误）一律降级，不阻断打标
         return ()
-    topics: set[str] = set()
-    for r in data.get("rules") or []:
-        if r.get("topic"):
-            topics.add(str(r["topic"]))
-    for r in data.get("title_only_rules") or []:
-        if r.get("topic"):
-            topics.add(str(r["topic"]))
-    for t in (data.get("folder_topics") or {}).values():
-        if t:
-            topics.add(str(t))
     topics.discard(LEGACY_MARKER)
     topics.add(OTHER_TOPIC)
     return tuple(sorted(topics))

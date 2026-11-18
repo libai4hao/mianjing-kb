@@ -47,3 +47,18 @@ def test_topic_vocab_missing_file_degrades(tmp_path, monkeypatch):
     topic_vocab.cache_clear()
     assert topic_vocab() == ()
     topic_vocab.cache_clear()
+
+
+def test_topic_vocab_structural_corruption_degrades(tmp_path, monkeypatch):
+    """评审 Minor#1：yaml 结构损坏（顶层 list / folder_topics 非 dict）→ 空元组不裸崩。"""
+    p1 = tmp_path / "broken1.yaml"
+    p1.write_text("- a\n- b\n", encoding="utf-8")      # 顶层是 list → data.get 会 AttributeError
+    monkeypatch.setattr(config, "TOPIC_RULES_FILE", p1)
+    topic_vocab.cache_clear()
+    assert topic_vocab() == ()
+    p2 = tmp_path / "broken2.yaml"
+    p2.write_text("rules: [Redis]\nfolder_topics: [7, 12]\n", encoding="utf-8")
+    monkeypatch.setattr(config, "TOPIC_RULES_FILE", p2)
+    topic_vocab.cache_clear()
+    assert topic_vocab() == ()
+    topic_vocab.cache_clear()

@@ -234,6 +234,16 @@ def golden_sample(conn, n: int) -> dict:
               "topic_gold": "", "qtype_gold": "", "difficulty_gold": None}
              for it in picked]
     path = Path(config.BUILD_DIR) / "golden_todo.json"
+    if path.exists():            # 评审 Important#4：已有未回灌清单 → 拒绝重抽防覆盖
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(old, dict) and old.get("items"):
+                return {"ok": False, "path": str(path),
+                        "note": f"已存在待回灌金标文件（{len(old['items'])} 条）——先 "
+                                "--golden-load 回灌，或删除/改名该文件后重抽"
+                                "（防覆盖人工已填内容）"}
+        except Exception:  # noqa: BLE001 —— 损坏文件不挡重抽
+            pass
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"sampled": len(items), "items": items},
                                ensure_ascii=False, indent=1), encoding="utf-8")
@@ -245,9 +255,22 @@ def golden_load(conn, path, annotator: str = "human") -> dict:
 
     校验：q_norm_hash/topic_gold 非空、qtype_gold ∈ QTYPES 或空、
     difficulty_gold ∈ 1-5 或空；任何非法项整批拒绝（全部通过才写入）。
+    回灌成功后把清单文件改名 golden_todo.loaded-<ts>.json 留档（评审 Important#4）
+    ——此后 --golden-sample 可自由重抽，不会撞覆盖守卫。
     """
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    items = data.get("items") if isinstance(data, dict) else data
+    p = Path(path)
+    if not p.exists():           # 评审 Minor#2：文件缺失/坏 JSON/顶层非对象优雅拒绝
+        return {"ok": False, "errors": [f"文件不存在: {p}"],
+                "note": "先 --golden-sample 生成清单，人工填写后再回灌"}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as ex:
+        return {"ok": False, "errors": [f"JSON 读取失败: {ex}"],
+                "note": "检查文件编码/内容后重试"}
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return {"ok": False, "errors": ["顶层必须是含 items 数组的 JSON 对象"],
+                "note": "清单格式见 --golden-sample 输出"}
+    items = data["items"]
     errs: list[str] = []
     for i, it in enumerate(items):
         if not (it.get("q_norm_hash") or "").strip():
@@ -273,7 +296,14 @@ def golden_load(conn, path, annotator: str = "human") -> dict:
           it.get("difficulty_gold"), annotator, now] for it in items])
     conn.commit()
     total = conn.execute("SELECT COUNT(*) FROM golden_labels").fetchone()[0]
-    return {"ok": True, "loaded": len(items), "total": total}
+    archived = None
+    try:                         # 评审 Important#4：回灌成功后清单改名留档 → 可自由重抽
+        archived = p.with_name(f"golden_todo.loaded-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json")
+        p.rename(archived)
+    except OSError:
+        archived = None          # 留档失败不影响回灌结果
+    return {"ok": True, "loaded": len(items), "total": total,
+            "archived_to": str(archived) if archived else None}
 
 
 def eval_golden(conn) -> dict:
@@ -302,7 +332,8 @@ REVIEW_SYSTEM = (
 def review_targets(conn, limit: int = 0) -> list[dict]:
     """三类复核目标：词表外（含兜底"其他"）/ 低置信（conf low/none）/ 金标弱区。
 
-    金标弱区 = 该 staging 主题在金标对照中准确率 <0.8（与 G6b weak_topics 同口径）；
+    金标弱区 = 金标对照判定该行 topic 不符（按行 EXISTS；评审 Important#2：
+    与 G6b 按金标主题聚合的 weak_topics 同源——错行混进高准确率预测组也必进复核）；
     review_state 非 NULL 的已复核行不重选。
     """
     vocab = topic_vocab()
@@ -315,10 +346,9 @@ def review_targets(conn, limit: int = 0) -> list[dict]:
     else:                        # 词表降级：只盯兜底"其他"
         out_cond = "s.topic = ?"
         params.append(OTHER_TOPIC)
-    weak_cond = ("s.topic IN (SELECT s2.topic FROM labels_staging s2 "
-                 "JOIN golden_labels g ON g.q_norm_hash = s2.q_norm_hash "
-                 "GROUP BY s2.topic "
-                 "HAVING AVG(CASE WHEN s2.topic = g.topic_gold THEN 1 ELSE 0 END) < 0.8)")
+    weak_cond = ("EXISTS (SELECT 1 FROM golden_labels g "
+                 "WHERE g.q_norm_hash = s.q_norm_hash "
+                 "  AND COALESCE(s.topic, '') != g.topic_gold)")
     sql = ("SELECT s.qid, s.topic, s.qtype, s.difficulty, s.tags, "
            "       q.q_text, q.a_text, q.conf "
            "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
@@ -404,6 +434,7 @@ def run_review(cfg, conn, *, limit: int = 0, budget: float = 10.0,
                 for f in futs:
                     f.cancel()
                 break
+    # agree/disagree 为全表累计（含此前轮次）；targets/reviewed 是本轮口径（评审 Minor#3）
     agree = conn.execute("SELECT COUNT(*) FROM labels_staging "
                          "WHERE review_state='agree'").fetchone()[0]
     disagree = conn.execute("SELECT COUNT(*) FROM labels_staging "
@@ -417,10 +448,12 @@ def run_review(cfg, conn, *, limit: int = 0, budget: float = 10.0,
 
 
 def review_list(conn) -> list[dict]:
-    """待人工终审清单（disagree 优先，pending 兜底）。"""
+    """待人工终审清单（disagree 优先，pending 兜底；评审 Important#1：LEFT JOIN
+    ——题干已失效的分歧孤儿行也列出，终审唯一出口 --review-resolve）。"""
     rows = conn.execute(
-        "SELECT s.qid, s.topic, s.qtype, s.difficulty, s.review_state, s.review_note, q.q_text "
-        "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
+        "SELECT s.qid, s.topic, s.qtype, s.difficulty, s.review_state, s.review_note, "
+        "       COALESCE(q.q_text, '(题干已失效)') AS q_text "
+        "FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
         "WHERE s.review_state IN ('disagree','pending') "
         "ORDER BY CASE WHEN s.review_state='disagree' THEN 0 ELSE 1 END, s.qid").fetchall()
     return [dict(r) for r in rows]
@@ -486,6 +519,8 @@ def merge(conn, drop_orphans: bool = False) -> dict:
     - 评审 Important#2（2026-11-19）：孤儿行拒绝时列出 qid（人工清理有抓手）；
       drop_orphans=True 清掉孤儿行后继续 merge——run_batch 跳过 staging 已有
       qid，重跑打标清不掉孤儿，没有这个出口主工作流会死锁。
+    - 评审 Important#1（2026-11-19）：分歧行不算孤儿——--drop-orphans 不误删
+      人工分歧（终审唯一出口 --review-resolve）；G6b 拒绝时 gate 标 "G6b"。
     """
     from verify_ledger import g6_label, g6b_golden
     g6 = g6_label(conn)
@@ -497,17 +532,19 @@ def merge(conn, drop_orphans: bool = False) -> dict:
     g6b = g6b_golden(conn)
     if g6b["state"] == "FAIL":
         weak = ",".join(g6b["detail"].get("weak_topics") or []) or "-"
-        return {"ok": False, "gate": g6["state"], "g6b": g6b["detail"],
+        return {"ok": False, "gate": "G6b", "g6b": g6b["detail"],
                 "note": f"金标抽检准确率 <0.8（G6b FAIL，弱项主题：{weak}），"
                         "staging 保留未 merge——--eval 看混淆矩阵，修标签或补金标后重试"}
     orphans = conn.execute(
         "SELECT COUNT(*) FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
-        "WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash)"
+        "WHERE (q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash)) "
+        "  AND s.review_state IS NOT 'disagree'"    # 评审 Important#1：分歧行不算孤儿
     ).fetchone()[0]
     if orphans:
         orphan_qids = [r[0] for r in conn.execute(
             "SELECT s.qid FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
-            "WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash) "
+            "WHERE (q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash)) "
+            "  AND s.review_state IS NOT 'disagree' "
             "ORDER BY s.qid LIMIT 10").fetchall()]
         if not drop_orphans:
             return {"ok": False, "gate": g6["state"], "orphans": orphans,
@@ -518,7 +555,8 @@ def merge(conn, drop_orphans: bool = False) -> dict:
         conn.execute(
             "DELETE FROM labels_staging WHERE qid IN ("
             "  SELECT s.qid FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
-            "  WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash))")
+            "  WHERE (q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash)) "
+            "    AND s.review_state IS NOT 'disagree')")
     n = conn.execute("SELECT COUNT(*) FROM labels_staging "
                      "WHERE review_state IS NOT 'disagree'").fetchone()[0]
     conn.execute(
@@ -612,9 +650,9 @@ def main(argv=None) -> int:
             return 0
         if args.golden_sample:
             out = golden_sample(conn, args.golden_sample)
-            out.pop("items")                 # 清单在文件里，控制台只报摘要
+            out.pop("items", None)           # 清单在文件里，控制台只报摘要
             print(json.dumps(out, ensure_ascii=False, indent=1))
-            return 0
+            return 0 if out.get("ok", True) else 1
         if args.golden_load:
             out = golden_load(conn, Path(args.golden_load), annotator=args.annotator)
             print(json.dumps(out, ensure_ascii=False, indent=1))
@@ -629,8 +667,10 @@ def main(argv=None) -> int:
         if args.review_list:
             rows = review_list(conn)
             for r in rows:
+                note = (r['review_note'] or '')[:80]   # 评审 Important#3：打印建议供人工判断
+                sug = f" | 建议: {note}" if note else ""
                 print(f"  [{r['review_state']:<9}] qid={r['qid']:<6} topic={r['topic']:<10} "
-                      f"| {r['q_text'][:40]}")
+                      f"| {(r['q_text'] or '')[:40]}{sug}")
             print(json.dumps({"listed": len(rows)}, ensure_ascii=False))
             return 0
         if args.review_resolve:
