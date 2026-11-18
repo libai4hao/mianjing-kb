@@ -418,3 +418,81 @@ def test_label_one_no_vocab_keeps_free_topic(monkeypatch):
     monkeypatch.setattr(bl, "chat_json", fake)
     row = bl.label_one(CFG, {"qid": 9, "q_norm_hash": "h9", "q_text": "题", "a_text": "答"})
     assert row["topic"] == "玄学" and row["review_state"] is None
+
+
+# ---- 批次三 R3：复核执行层（--review / --review-list / --review-resolve）----
+
+def test_review_targets_three_classes(mini_db, monkeypatch):
+    """R3 复核目标=三类：词表外（含其他）/低置信/金标弱区；已复核不再选。"""
+    monkeypatch.setattr(bl, "topic_vocab", lambda: ("JVM", "Redis", "其他"))
+    _stage(mini_db, 1, "其他")
+    _stage(mini_db, 2, "玄学")     # A 词表外
+    _stage(mini_db, 3, "JVM")      # B 低置信
+    mini_db.execute("UPDATE questions SET conf='low' WHERE qid=3")
+    _stage(mini_db, 4, "JVM")      # C 金标弱区（staging JVM vs gold MySQL）
+    mini_db.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                    "VALUES ('hash4', '题', 'MySQL', 'now')")
+    mini_db.execute("UPDATE labels_staging SET review_state='agree' WHERE qid=1")  # 已复核
+    mini_db.commit()
+    got = {t["qid"] for t in bl.review_targets(mini_db)}
+    assert got == {2, 3, 4}
+
+
+def test_run_review_updates_states(mini_db, monkeypatch, tmp_path):
+    """R3：agree→agree+note；disagree→disagree+建议 JSON；失败不阻塞。"""
+    _stage(mini_db, 1, "玄学")
+    _stage(mini_db, 2, "怪谈")
+    _stage(mini_db, 3, "乱码")
+    mini_db.commit()
+
+    def fake_review_one(cfg, row):
+        if row["qid"] == 3:
+            raise RuntimeError("LLM 超时")
+        if row["qid"] == 1:
+            return {"verdict": "agree", "suggestion": {}, "note": "主题合理",
+                    "review_model": cfg["model"], "prompt_tokens": 60, "completion_tokens": 15}
+        return {"verdict": "disagree",
+                "suggestion": {"topic": "Redis", "qtype": "八股", "difficulty": 2},
+                "note": "主题错标", "review_model": cfg["model"],
+                "prompt_tokens": 60, "completion_tokens": 15}
+
+    monkeypatch.setattr(bl, "review_one", fake_review_one)
+    out = bl.run_review(CFG, mini_db, failed_path=tmp_path / "rf.jsonl")
+    assert out["reviewed"] == 2 and out["failed"] == 1
+    r1 = mini_db.execute("SELECT review_state, review_note FROM labels_staging WHERE qid=1").fetchone()
+    assert r1[0] == "agree" and "主题合理" in r1[1]
+    r2 = mini_db.execute("SELECT review_state FROM labels_staging WHERE qid=2").fetchone()
+    assert r2[0] == "disagree"
+    note2 = mini_db.execute("SELECT review_note FROM labels_staging WHERE qid=2").fetchone()[0]
+    assert json.loads(note2)["suggestion"]["topic"] == "Redis"
+
+
+def test_merge_holds_disagree_rows(mini_db, monkeypatch, tmp_path):
+    """R3：merge 不落库不删 disagree 分歧行（n_review_hold 输出），终审后放行。"""
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    mini_db.execute("UPDATE labels_staging SET review_state='disagree', review_note=? WHERE qid=1",
+                    (json.dumps({"suggestion": {"topic": "Redis"}}, ensure_ascii=False),))
+    mini_db.commit()
+    out = bl.merge(mini_db)
+    assert out["ok"] and out["merged"] == 2 and out["n_review_hold"] == 1
+    assert mini_db.execute("SELECT topic FROM questions WHERE qid=1").fetchone()[0] == ""
+    left = mini_db.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0]
+    assert left == 1  # 分歧行保留在 staging
+
+
+def test_review_resolve_keep_suggest_drop(mini_db):
+    """R3 终审出口：keep=agree；suggest=应用建议+agree；drop=删行；未知 token 上报。"""
+    _stage(mini_db, 1, "玄学")
+    _stage(mini_db, 2, "怪谈")
+    _stage(mini_db, 3, "乱码")
+    mini_db.execute("UPDATE labels_staging SET review_state='disagree', review_note=? WHERE qid=2",
+                    (json.dumps({"suggestion": {"topic": "Redis", "qtype": "八股", "difficulty": 2},
+                                 "note": "错标"}, ensure_ascii=False),))
+    mini_db.commit()
+    out = bl.review_resolve(mini_db, "1:keep 2:suggest 3:drop 999:drop bad:keep")
+    assert out["resolved"] == 3 and out["unknown"] == ["999:drop", "bad:keep"]
+    assert mini_db.execute("SELECT review_state FROM labels_staging WHERE qid=1").fetchone()[0] == "agree"
+    r2 = mini_db.execute("SELECT topic, qtype, difficulty, review_state FROM labels_staging WHERE qid=2").fetchone()
+    assert tuple(r2) == ("Redis", "八股", 2, "agree")
+    assert mini_db.execute("SELECT COUNT(*) FROM labels_staging WHERE qid=3").fetchone()[0] == 0

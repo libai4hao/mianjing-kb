@@ -285,6 +285,186 @@ def eval_golden(conn) -> dict:
     return g
 
 
+# ---- 批次三 R3：复核执行层（2026-11-19，docs/项目审核报告/修复方案-2026-11-19.md §八）----
+
+REVIEW_SYSTEM = (
+    "你是面试题标注复核员。给出题目、答案片段与当前标签，判断标签是否正确。"
+    "topic 必须从词表选恰好一个：{vocab}；拿不准给建议主题并说明理由。"
+    '只输出 JSON 对象：{{"verdict": <agree 或 disagree>, '
+    '"topic": <建议主题，agree 时可省>, "qtype": <八股/算法/HR/场景/项目>, '
+    '"difficulty": <1-5整数>, "note": <一句话理由>}}'
+)
+
+
+def review_targets(conn, limit: int = 0) -> list[dict]:
+    """三类复核目标：词表外（含兜底"其他"）/ 低置信（conf low/none）/ 金标弱区。
+
+    金标弱区 = 该 staging 主题在金标对照中准确率 <0.8（与 G6b weak_topics 同口径）；
+    review_state 非 NULL 的已复核行不重选。
+    """
+    vocab = topic_vocab()
+    params: list = []
+    if vocab:
+        ph = ",".join("?" for _ in vocab)
+        out_cond = f"(s.topic NOT IN ({ph}) OR s.topic = ?)"
+        params.extend(vocab)
+        params.append(OTHER_TOPIC)
+    else:                        # 词表降级：只盯兜底"其他"
+        out_cond = "s.topic = ?"
+        params.append(OTHER_TOPIC)
+    weak_cond = ("s.topic IN (SELECT s2.topic FROM labels_staging s2 "
+                 "JOIN golden_labels g ON g.q_norm_hash = s2.q_norm_hash "
+                 "GROUP BY s2.topic "
+                 "HAVING AVG(CASE WHEN s2.topic = g.topic_gold THEN 1 ELSE 0 END) < 0.8)")
+    sql = ("SELECT s.qid, s.topic, s.qtype, s.difficulty, s.tags, "
+           "       q.q_text, q.a_text, q.conf "
+           "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
+           "WHERE s.review_state IS NULL "
+           f"  AND ({out_cond} OR q.conf IN ('low','none') OR {weak_cond}) "
+           "ORDER BY s.qid")
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def review_one(cfg: dict, row: dict) -> dict:
+    """单题复核：LLM 判 agree/disagree，失败抛异常（run_review 记 failed 不阻塞）。"""
+    vocab = topic_vocab()
+    vocab_hint = "、".join(vocab) if vocab else "（词表不可用，给 2-8 字主题建议）"
+    system = REVIEW_SYSTEM.format(vocab=vocab_hint)
+    text = (f"题目：{(row['q_text'] or '')[:300]}\n"
+            f"答案片段：{(row['a_text'] or '')[:200]}\n"
+            f"当前标签：topic={row['topic']} qtype={row['qtype']} "
+            f"difficulty={row['difficulty']} tags={row['tags']}")
+    clean, _ = redact(text)
+    r = chat_json(cfg, system, clean, max_tokens=160)
+    obj = r.get("obj")
+    if obj is None:
+        raise RuntimeError(f"JSON 解析失败: {str(r.get('raw'))[:80]}")
+    verdict = str(obj.get("verdict") or "").strip().lower()
+    if verdict not in ("agree", "disagree"):
+        raise RuntimeError(f"verdict 非法: {verdict!r}")
+    return {"verdict": verdict,
+            "suggestion": {"topic": obj.get("topic"), "qtype": obj.get("qtype"),
+                           "difficulty": obj.get("difficulty")},
+            "note": str(obj.get("note") or "")[:200],
+            "review_model": cfg["model"],
+            "prompt_tokens": r.get("prompt_tokens") or 0,
+            "completion_tokens": r.get("completion_tokens") or 0}
+
+
+def run_review(cfg, conn, *, limit: int = 0, budget: float = 10.0,
+               failed_path: Path | None = None) -> dict:
+    """LLM 复核三类可疑标签 → review_state/review_model/review_note。
+
+    agree → 'agree'（review_note 存理由）；disagree → 'disagree'（review_note 存
+    建议 JSON）——分歧行 merge 不落库，人工 --review-resolve 终审后放行；
+    单题失败不阻塞（build/review_failed.jsonl）。--limit/--budget 与打标共用。
+    """
+    targets = review_targets(conn, limit)
+    failed_path = failed_path or (Path(config.BUILD_DIR) / "review_failed.jsonl")
+    failed_path.parent.mkdir(parents=True, exist_ok=True)
+    done, failed, in_total, out_total = 0, [], 0, 0
+    started = time.perf_counter()
+
+    def _worker(row):
+        try:
+            return row, review_one(cfg, row), None
+        except Exception as ex:              # noqa: BLE001 —— 单题失败不阻塞
+            return row, None, ex
+
+    with ThreadPoolExecutor(max_workers=cfg["concurrency"]) as pool:
+        futs = [pool.submit(_worker, t) for t in targets]
+        for fut in as_completed(futs):
+            row, res, exc = fut.result()
+            if exc is not None:
+                failed.append({"qid": row["qid"],
+                               "err": f"{type(exc).__name__}: {str(exc)[:160]}",
+                               "at": datetime.now().strftime(NOW_FMT)})
+                with failed_path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(failed[-1], ensure_ascii=False) + "\n")
+                continue
+            if res["verdict"] == "agree":
+                note = res["note"]
+            else:
+                note = json.dumps({"suggestion": res["suggestion"], "note": res["note"]},
+                                  ensure_ascii=False)
+            conn.execute("UPDATE labels_staging SET review_state=?, review_model=?, "
+                         "review_note=? WHERE qid=?",
+                         (res["verdict"], res["review_model"], note, row["qid"]))
+            conn.commit()
+            done += 1
+            in_total += res["prompt_tokens"]
+            out_total += res["completion_tokens"]
+            cost = (in_total * cfg["price"][0] + out_total * cfg["price"][1]) / 1e6
+            if budget and cost > budget:
+                for f in futs:
+                    f.cancel()
+                break
+    agree = conn.execute("SELECT COUNT(*) FROM labels_staging "
+                         "WHERE review_state='agree'").fetchone()[0]
+    disagree = conn.execute("SELECT COUNT(*) FROM labels_staging "
+                            "WHERE review_state='disagree'").fetchone()[0]
+    return {"targets": len(targets), "reviewed": done, "failed": len(failed),
+            "agree": agree, "disagree": disagree,
+            "est_cost_yuan": round((in_total * cfg["price"][0]
+                                    + out_total * cfg["price"][1]) / 1e6, 4),
+            "elapsed_sec": round(time.perf_counter() - started, 1),
+            "failed_log": str(failed_path) if failed else None}
+
+
+def review_list(conn) -> list[dict]:
+    """待人工终审清单（disagree 优先，pending 兜底）。"""
+    rows = conn.execute(
+        "SELECT s.qid, s.topic, s.qtype, s.difficulty, s.review_state, s.review_note, q.q_text "
+        "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
+        "WHERE s.review_state IN ('disagree','pending') "
+        "ORDER BY CASE WHEN s.review_state='disagree' THEN 0 ELSE 1 END, s.qid").fetchall()
+    return [dict(r) for r in rows]
+
+
+def review_resolve(conn, spec: str) -> dict:
+    """人工终审 "qid:action ..."（keep/suggest/drop）——merge 分歧行的唯一出口。
+
+    keep=维持原标签（review_state='agree'）；suggest=把 review_note 里的建议
+    应用到标签列再 'agree'；drop=DELETE 行。未知/无行 token 进 unknown 上报。
+    """
+    resolved, unknown = 0, []
+    for token in spec.split():
+        try:
+            qid_s, action = token.split(":", 1)
+            qid = int(qid_s)
+        except ValueError:
+            unknown.append(token)
+            continue
+        row = conn.execute("SELECT * FROM labels_staging WHERE qid=?", (qid,)).fetchone()
+        if row is None:
+            unknown.append(token)
+            continue
+        if action == "keep":
+            conn.execute("UPDATE labels_staging SET review_state='agree' WHERE qid=?", (qid,))
+        elif action == "suggest":
+            try:
+                sug = (json.loads(row["review_note"]) or {}).get("suggestion") or {}
+            except (json.JSONDecodeError, TypeError):
+                unknown.append(token)
+                continue
+            conn.execute(
+                "UPDATE labels_staging SET "
+                "topic=COALESCE(NULLIF(?,''),topic), qtype=COALESCE(?,qtype), "
+                "difficulty=COALESCE(?,difficulty), review_state='agree' WHERE qid=?",
+                (str(sug.get("topic") or "").strip()[:40], sug.get("qtype"),
+                 sug.get("difficulty"), qid))
+        elif action == "drop":
+            conn.execute("DELETE FROM labels_staging WHERE qid=?", (qid,))
+        else:
+            unknown.append(token)
+            continue
+        resolved += 1
+    conn.commit()
+    return {"resolved": resolved, "unknown": unknown}
+
+
 def merge(conn, drop_orphans: bool = False) -> dict:
     """G6 门禁复核 → FAIL 拒绝；PASS/WARN 放行（WARN=软门禁，提示人工抽查）。
 
@@ -295,6 +475,8 @@ def merge(conn, drop_orphans: bool = False) -> dict:
     - F9 四列落库：topic/qtype/difficulty/tags；F3 空 topic/qtype 不覆盖已有值。
     - F1 打标事实落档 label_facts（同事务，按 q_norm_hash 跨重切存活，007）。
     - F4 next_step：merge 只写 kb.sqlite，检索库 topic 是 build_db 快照须 refresh。
+    - 批次三 R3：review_state='disagree' 的分歧行不落库、不落 facts、不删——
+      人工 --review-resolve 终审后（agree）下次 merge 自然放行。
     - 评审 Important#2（2026-11-19）：孤儿行拒绝时列出 qid（人工清理有抓手）；
       drop_orphans=True 清掉孤儿行后继续 merge——run_batch 跳过 staging 已有
       qid，重跑打标清不掉孤儿，没有这个出口主工作流会死锁。
@@ -331,7 +513,8 @@ def merge(conn, drop_orphans: bool = False) -> dict:
             "DELETE FROM labels_staging WHERE qid IN ("
             "  SELECT s.qid FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
             "  WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash))")
-    n = conn.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0]
+    n = conn.execute("SELECT COUNT(*) FROM labels_staging "
+                     "WHERE review_state IS NOT 'disagree'").fetchone()[0]
     conn.execute(
         "UPDATE questions SET "
         " topic=COALESCE(NULLIF((SELECT s.topic FROM labels_staging s "
@@ -339,16 +522,18 @@ def merge(conn, drop_orphans: bool = False) -> dict:
         " qtype=COALESCE((SELECT s.qtype FROM labels_staging s WHERE s.qid=questions.qid), qtype), "
         " difficulty=(SELECT s.difficulty FROM labels_staging s WHERE s.qid=questions.qid), "
         " tags=(SELECT s.tags FROM labels_staging s WHERE s.qid=questions.qid) "
-        "WHERE qid IN (SELECT qid FROM labels_staging)")
+        "WHERE qid IN (SELECT qid FROM labels_staging WHERE review_state IS NOT 'disagree')")
     conn.execute(
         "INSERT OR REPLACE INTO label_facts "
         "SELECT q.q_norm_hash, s.topic, s.qtype, s.difficulty, s.tags, ? "
         "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
-        "WHERE COALESCE(s.topic, '') != ''",
+        "WHERE COALESCE(s.topic, '') != '' AND s.review_state IS NOT 'disagree'",
         (datetime.now().strftime(NOW_FMT),))
-    conn.execute("DELETE FROM labels_staging")
+    conn.execute("DELETE FROM labels_staging WHERE review_state IS NOT 'disagree'")
     conn.commit()
-    out = {"ok": True, "merged": n, "gate": g6["state"],
+    holds = conn.execute("SELECT COUNT(*) FROM labels_staging "
+                         "WHERE review_state='disagree'").fetchone()[0]
+    out = {"ok": True, "merged": n, "n_review_hold": holds, "gate": g6["state"],
            "next_step": "python tools/refresh.py --reembed"
                         "  # 检索库 topic 是快照，merge 只写 kb.sqlite（B2）"}
     if orphans:
@@ -376,6 +561,13 @@ def main(argv=None) -> int:
     ap.add_argument("--annotator", default="human", help="金标标注人（--golden-load 用）")
     ap.add_argument("--eval", action="store_true",
                     help="金标抽检评估（G6b 准确率/混淆矩阵）→ build/label_eval.json")
+    # 批次三 R3（2026-11-19）：复核执行层——LLM 预审 + 人工终审 + 分歧放行
+    ap.add_argument("--review", action="store_true",
+                    help="LLM 复核三类可疑标签（词表外/低置信/金标弱区）→ review_state")
+    ap.add_argument("--review-list", action="store_true",
+                    help="打印待人工终审清单（disagree 优先，pending 次之）")
+    ap.add_argument("--review-resolve", default="", metavar="SPEC",
+                    help='人工终审 "qid:action ..."（keep/suggest/drop），如 "12:keep 33:suggest"')
     # F10（2026-11-19）：docs/15 §3.5 承诺的三旗标——此前 argparse 未声明，
     # 照文档敲命令报 unrecognized arguments。
     ap.add_argument("--provider", choices=("local", "online"),
@@ -422,6 +614,21 @@ def main(argv=None) -> int:
         if args.eval:
             g = eval_golden(conn)
             return 0 if g["state"] != "FAIL" else 1
+        if args.review:
+            out = run_review(cfg, conn, limit=args.limit, budget=args.budget)
+            print(json.dumps(out, ensure_ascii=False, indent=1))
+            return 0
+        if args.review_list:
+            rows = review_list(conn)
+            for r in rows:
+                print(f"  [{r['review_state']:<9}] qid={r['qid']:<6} topic={r['topic']:<10} "
+                      f"| {r['q_text'][:40]}")
+            print(json.dumps({"listed": len(rows)}, ensure_ascii=False))
+            return 0
+        if args.review_resolve:
+            out = review_resolve(conn, args.review_resolve)
+            print(json.dumps(out, ensure_ascii=False, indent=1))
+            return 0 if not out["unknown"] else 1
         if args.merge:
             out = merge(conn, drop_orphans=args.drop_orphans)
             print(json.dumps(out, ensure_ascii=False, indent=1))
