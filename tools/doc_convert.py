@@ -135,9 +135,9 @@ def main(argv=None) -> int:
     try:
         for src in files:
             try:
-                ok, how = convert(word, src, args.force)
+                how = convert(word, src, args.force)[1]
             except Exception as ex:                      # noqa: BLE001
-                ok, how = False, f"{type(ex).__name__}: {ex}"[:120]
+                how = f"{type(ex).__name__}: {ex}"[:120]
                 word = win32.Dispatch("Word.Application")   # Word 崩了就重开一个
                 word.Visible = False
                 word.DisplayAlerts = 0

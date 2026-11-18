@@ -23,7 +23,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kb import config, db  # noqa: E402
-from question_freq import cluster, hamming  # noqa: E402
+from question_freq import cluster  # noqa: E402
 
 
 def _unsigned64(v: int) -> int:

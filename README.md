@@ -10,9 +10,11 @@
 ## 目录
 
 ```
-docs/                     方案与决策（00 决策记录 ~ 17 审核修复；**06 部署方案 v2-R2 为当前口径**）
+docs/                     方案与决策（00 决策记录 ~ 20 专题落档；**06 部署方案 v2-R2 为当前口径**）
 meta/
-  schema/001~004_*.sql    schema：原文档表 / parent_dir+清单视图 / 源边界 / questions 表
+  schema/001~009_*.sql    schema：原文档表 / parent_dir+清单视图 / 源边界 / questions /
+                          labels_staging / label_facts / golden_labels / 复核三列
+                          （006 只有题级 topic 的 ALTER，无独立文件，见 tools/kb/db.py::_ensure_question_topic）
   topic_rules.yaml        文件名 → topic（30 条，源自语料内 inventory.py）
   folder_rules.yaml       目录结构位 → category / source_trust；包装词；顶层主题目录；reject_patterns
   overrides.json          人工分类覆盖表（P1-5，最高优先级）
@@ -57,8 +59,17 @@ tools/
   purge_origin.py         删除已收入语料的原件（四重校验缺一不删）
 scripts/
   补录-doc转docx.ps1       [DEPRECATED] 已由 doc_convert.py 取代，仅历史参考
-tests/                    243 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁/LLM 客户端/打标/金标/复核/高风险工具守护…）
+tests/                    253 个用例（pytest 全绿；textmetrics/intake/classify/gate/切题/检索/分流/核账门禁/LLM 客户端/打标/金标/复核/高风险工具守护…）
 ```
+
+## 依赖
+
+```powershell
+& $py -m pip install -r requirements.txt    # PyYAML / pymupdf / sqlite-vec / fastembed / pywin32
+```
+
+OCR 不是 pip 包：走外置引擎 PaddleOCR-json v1.4.1（`KB_OCR_ENGINE_EXE` 指定）；
+`.doc` 读文本与 `.docx` 转换需要本机装 Office（Word COM，仅 Windows）。
 
 ## 快速开始
 
@@ -74,7 +85,7 @@ Set-Location -LiteralPath $repo
 # 2. 分类（先分类，再处理）
 & $py tools\classify.py --db $db            # 判 pending_classify 的记录
 & $py tools\classify.py --db $db --stats    # 看分布
-& $py tools\classify.py --db $db --redo     # 改规则后重判（不动 quarantined）
+& $py tools\classify.py --db $db --redo     # 改规则后重判（不动 quarantined / processed）
 
 # 3. 门禁（检查 md 产物的文本质量）
 & $py tools\gate.py --md-dir "<CORPUS_ROOT>\20-题库MD" --db $db --top 12

@@ -1,0 +1,21 @@
+# 运行时依赖（按用途分组；Windows + Python 3.11 实测）
+# 安装：& $py -m pip install -r requirements.txt
+
+# ---- 核心入库管线（intake / classify / gate / build_db / search）----
+PyYAML>=6.0
+pymupdf>=1.24            # PDF 文本层 + 页级渲染（OCR 前处理）
+
+# ---- 向量层（embed_questions / search --mode vec / classify --vec）----
+fastembed>=0.4           # 题向量（默认 bge 系模型，首次跑会下载）
+sqlite-vec>=0.1.6        # sqlite-vec 扩展：vec_questions 虚拟表
+
+# ---- Windows 专属（doc_convert / question_freq 的 .doc 抽取）----
+pywin32>=306; sys_platform == "win32"
+
+# ---- 开发与门禁 ----
+pytest>=8
+pyflakes>=3
+
+# 非 pip 依赖（需单独安装，代码里按路径调用）：
+#   PaddleOCR-json v1.4.1   —— ocr_pages 的页级 OCR 引擎（KB_OCR_ENGINE_EXE / KB_OCR_ENGINE_DIR）
+#   Word（Office 2007+）    —— .doc → .docx、.doc 取文本（Word COM）

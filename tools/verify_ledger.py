@@ -507,7 +507,7 @@ def write_report(build_dir: Path, gates: list[dict], elapsed: float) -> tuple[Pa
 
     lines = [f"# 核账门禁报告（{summary['at']}）", "",
              f"- 结论：**{summary['verdict']}**（硬门禁 FAIL {len(hard_fail)} 道，耗时 {summary['elapsed_sec']}s）",
-             f"- 口径：G1-G5 刷新后必跑；G6 打标后；G7 pre-commit（--docs）", ""]
+             "- 口径：G1-G5 刷新后必跑；G6 打标后；G7 pre-commit（--docs）", ""]
     for g in gates:
         n = len(g["fails"])
         lines.append(f"## {g['id']} {g['name']} — {g['state']}（{g['level']}，问题 {n} 项）")
