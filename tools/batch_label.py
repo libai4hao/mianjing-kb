@@ -254,6 +254,18 @@ def golden_load(conn, path, annotator: str = "human") -> dict:
     return {"ok": True, "loaded": len(items), "total": total}
 
 
+def eval_golden(conn) -> dict:
+    """批次二 G3 --eval：调 G6b 金标抽检 → build/label_eval.json（全量矩阵+弱项）。"""
+    from verify_ledger import g6b_golden
+    g = g6b_golden(conn)
+    path = Path(config.BUILD_DIR) / "label_eval.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(g, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(json.dumps({"state": g["state"], "detail": g["detail"], "report": str(path)},
+                     ensure_ascii=False, indent=1))
+    return g
+
+
 def merge(conn, drop_orphans: bool = False) -> dict:
     """G6 门禁复核 → FAIL 拒绝；PASS/WARN 放行（WARN=软门禁，提示人工抽查）。
 
@@ -268,13 +280,19 @@ def merge(conn, drop_orphans: bool = False) -> dict:
       drop_orphans=True 清掉孤儿行后继续 merge——run_batch 跳过 staging 已有
       qid，重跑打标清不掉孤儿，没有这个出口主工作流会死锁。
     """
-    from verify_ledger import g6_label
+    from verify_ledger import g6_label, g6b_golden
     g6 = g6_label(conn)
     if g6["state"] == "FAIL":
         return {"ok": False, "gate": "FAIL", "fails": g6["fails"][:5],
                 "note": "G6 schema 合格率未过，staging 保留未 merge"}
     if g6["state"] == "SKIP":
         return {"ok": False, "gate": "SKIP", "note": "labels_staging 为空，无可 merge"}
+    g6b = g6b_golden(conn)
+    if g6b["state"] == "FAIL":
+        weak = ",".join(g6b["detail"].get("weak_topics") or []) or "-"
+        return {"ok": False, "gate": g6["state"], "g6b": g6b["detail"],
+                "note": f"金标抽检准确率 <0.8（G6b FAIL，弱项主题：{weak}），"
+                        "staging 保留未 merge——--eval 看混淆矩阵，修标签或补金标后重试"}
     orphans = conn.execute(
         "SELECT COUNT(*) FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
         "WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash)"
@@ -337,6 +355,8 @@ def main(argv=None) -> int:
     ap.add_argument("--golden-load", default="",
                     help="回灌填好的 golden_todo.json → golden_labels（非法项整批拒绝）")
     ap.add_argument("--annotator", default="human", help="金标标注人（--golden-load 用）")
+    ap.add_argument("--eval", action="store_true",
+                    help="金标抽检评估（G6b 准确率/混淆矩阵）→ build/label_eval.json")
     # F10（2026-11-19）：docs/15 §3.5 承诺的三旗标——此前 argparse 未声明，
     # 照文档敲命令报 unrecognized arguments。
     ap.add_argument("--provider", choices=("local", "online"),
@@ -380,6 +400,9 @@ def main(argv=None) -> int:
             out = golden_load(conn, Path(args.golden_load), annotator=args.annotator)
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if out["ok"] else 1
+        if args.eval:
+            g = eval_golden(conn)
+            return 0 if g["state"] != "FAIL" else 1
         if args.merge:
             out = merge(conn, drop_orphans=args.drop_orphans)
             print(json.dumps(out, ensure_ascii=False, indent=1))

@@ -352,3 +352,29 @@ def test_golden_load_rejects_invalid_whole_batch(mini_db, tmp_path):
     out = bl.golden_load(mini_db, p)
     assert not out["ok"] and out["rejected"] == 3 and len(out["errors"]) <= 10
     assert mini_db.execute("SELECT COUNT(*) FROM golden_labels").fetchone()[0] == 0
+
+
+def test_merge_rejects_on_g6b_fail(mini_db):
+    """批次二 G3：金标抽检 <0.8 → merge 拒绝（staging 保留），提示看弱项。"""
+    for i in range(20):
+        _stage(mini_db, 100 + i, "JVM")                # q_norm_hash=hash{100+i}
+        mini_db.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                        "VALUES (?,?,?, 'now')", (f"hash{100 + i}", "题", "数据库"))
+    mini_db.commit()
+    out = bl.merge(mini_db)
+    assert not out["ok"] and "金标" in out["note"]
+    assert mini_db.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0] == 20
+    assert mini_db.execute("SELECT topic FROM questions WHERE qid=1").fetchone()[0] == ""
+
+
+def test_eval_golden_writes_report(mini_db):
+    """批次二 G3 --eval：调 g6b_golden 评准确率 → build/label_eval.json。"""
+    for i in range(20):
+        _stage(mini_db, 100 + i, "JVM")
+        mini_db.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                        "VALUES (?,?,?, 'now')", (f"hash{100 + i}", "题", "JVM"))
+    mini_db.commit()
+    g = bl.eval_golden(mini_db)
+    assert g["state"] == "PASS"
+    data = json.loads((config.BUILD_DIR / "label_eval.json").read_text(encoding="utf-8"))
+    assert data["state"] == "PASS" and data["detail"]["topic_acc"] == 1.0

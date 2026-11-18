@@ -302,3 +302,59 @@ def test_g7_docs_warns(tmp_path):
     assert g["state"] == "WARN"
     kinds = {x["kind"] for x in g["fails"]}
     assert kinds == {"tests_count_stale", "unimplemented_listed_but_exists", "docs_index_stale"}
+
+
+# ---- 批次二 G3：G6b 金标抽检门禁（docs/15 G6 规格"抽检准确率 ≥0.8"自动化）----
+
+def _golden_db(tmp_path):
+    from tools.kb import db as kbdb
+    return kbdb.connect(tmp_path / "kb.sqlite")     # 全迁移：labels_staging + golden_labels
+
+
+def _pair(conn, i: int, gold: str = "JVM", pred=None):
+    """插一对金标 + staging 行（q_norm_hash=gh{i}）；pred=None 表示标注与金标一致。"""
+    h = f"gh{i}"
+    conn.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                 "VALUES (?,?,?, 'now')", (h, f"题{i}", gold))
+    conn.execute("INSERT INTO labels_staging(qid, q_norm_hash, topic, qtype, difficulty, "
+                 "tags, provider, model, redacted, latency_ms, tokens, labeled_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?, 'now')",
+                 (1000 + i, h, gold if pred is None else pred,
+                  "八股", 3, "[]", "local", "m", 0, 1, 10))
+
+
+def test_g6b_skip_no_golden(tmp_path):
+    conn = _golden_db(tmp_path)
+    g = vl.g6b_golden(conn)
+    assert g["state"] == "SKIP"
+    conn.close()
+
+
+def test_g6b_skip_small_sample(tmp_path):
+    """matched < 20 → SKIP（样本不足不判准确率，不挡 merge）。"""
+    conn = _golden_db(tmp_path)
+    for i in range(5):
+        _pair(conn, i)
+    conn.commit()
+    g = vl.g6b_golden(conn)
+    assert g["state"] == "SKIP" and g["detail"]["matched"] == 5
+    conn.close()
+
+
+def test_g6b_pass_and_fail(tmp_path):
+    """20 matched：全对 PASS；5 题标错 → 0.75 FAIL + weak_topics + 混淆矩阵。"""
+    conn = _golden_db(tmp_path)
+    for i in range(20):
+        _pair(conn, i)
+    conn.commit()
+    g = vl.g6b_golden(conn)
+    assert g["state"] == "PASS" and g["detail"]["topic_acc"] == 1.0
+    assert g["detail"]["weak_topics"] == []
+    for i in range(5):
+        conn.execute("UPDATE labels_staging SET topic='数据库' WHERE qid=?", (1000 + i,))
+    conn.commit()
+    g2 = vl.g6b_golden(conn)
+    assert g2["state"] == "FAIL" and g2["detail"]["topic_acc"] == 0.75
+    assert g2["detail"]["weak_topics"] == ["JVM"]
+    assert g2["detail"]["matrix"]["JVM"] == {"数据库": 5, "JVM": 15}
+    conn.close()
