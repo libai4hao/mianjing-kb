@@ -34,6 +34,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     _ensure_questions(conn)
     _ensure_labels_staging(conn)
     _ensure_question_topic(conn)
+    _ensure_label_facts(conn)
     conn.commit()
 
 
@@ -88,6 +89,26 @@ def _ensure_question_topic(conn: sqlite3.Connection) -> None:
     """
     if not _column_exists(conn, "questions", "topic"):
         conn.execute("ALTER TABLE questions ADD COLUMN topic TEXT")
+
+
+def _ensure_label_facts(conn: sqlite3.Connection) -> None:
+    """007：label_facts 打标事实源 + staging/questions 伴随列（B1 修复，2026-11-19）。
+
+    label_facts 以 q_norm_hash 为主键——重 extract 会换 qid（AUTOINCREMENT 高水位
+    续号），打标事实按题干 hash 存活，extract 重切后按 hash 重挂；
+    labels_staging 加 q_norm_hash 供 merge 校验题干一致性（历史 NULL 行放行）；
+    questions 加 difficulty/tags（qtype 004 已有，merge 四列落库用）。
+    """
+    sql = (SCHEMA_FILE.parent / "007_label_facts.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    if not _column_exists(conn, "labels_staging", "q_norm_hash"):
+        conn.execute("ALTER TABLE labels_staging ADD COLUMN q_norm_hash TEXT")
+    for col in ("prompt_tokens", "completion_tokens"):   # F5：in/out 拆分计价（bug4）
+        if not _column_exists(conn, "labels_staging", col):
+            conn.execute(f"ALTER TABLE labels_staging ADD COLUMN {col} INTEGER")
+    for col, decl in (("difficulty", "INTEGER"), ("tags", "TEXT")):
+        if not _column_exists(conn, "questions", col):
+            conn.execute(f"ALTER TABLE questions ADD COLUMN {col} {decl}")
 
 
 @contextmanager

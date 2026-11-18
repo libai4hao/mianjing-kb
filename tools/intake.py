@@ -142,6 +142,25 @@ def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False) 
     return "moved", prev
 
 
+def retire_path_ghost(conn, dir_path: str, file_name: str, new_hash: str) -> int:
+    """F7（2026-11-19）：同路径换内容时退役旧行（幽灵行）。
+
+    intake 只按 hash 判重：同路径新内容判 added 落新行后，旧行（不同 hash）仍
+    classified——doc_pool 会同路径双份抽题，G5 只查 src 存在拦不住。旧行转
+    superseded + note replaced_by:<new_hash>，不再进任何清单（doc_pool/ingest_queue
+    都只取 classified）。返回退役行数。
+    """
+    cur = conn.execute(
+        # 评审 Minor#2（2026-11-19）：拼接保留旧行 note 留痕（needs_convert 等），
+        # 不整段覆盖——' | ' || NULL = NULL，旧行无 note 时 COALESCE 兜空串。
+        "UPDATE source_documents SET status='superseded', "
+        "note='replaced_by:' || ? || COALESCE(' | ' || note, '') "
+        "WHERE dir_path=? AND file_name=? AND doc_hash != ? "
+        "AND status NOT IN ('absent','superseded')",
+        (new_hash, dir_path, file_name, new_hash))
+    return cur.rowcount
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="登记源文档并做哈希判重")
     ap.add_argument("--root", default=str(config.CORPUS_ROOT), help="扫描根目录")
@@ -198,6 +217,9 @@ def main(argv=None) -> int:
                 continue
 
             if action in ("added", "quarantined"):
+                n_ghost = retire_path_ghost(conn, dir_of(rel), p.name, doc_hash)
+                if n_ghost:
+                    actions["ghost_retired"] += n_ghost
                 row = {
                     "doc_hash": doc_hash,
                     "sha256": sha,
@@ -228,6 +250,12 @@ def main(argv=None) -> int:
                         "last_seen_at=?, note=? WHERE doc_hash=?",
                         (dir_of(rel), parent_of(rel), p.name, str(p), now, note, doc_hash),
                     )
+                    # F7 补遗（评审 Important#1，2026-11-19）：行被（重）指到新路径时，
+                    # 该路径上不同 hash 的占用行同样要退役——移动/复制覆盖与原地改
+                    # 内容是同一故障模式（doc_pool 同路径双份抽题 + hash 绑错内容）。
+                    n_ghost = retire_path_ghost(conn, dir_of(rel), p.name, doc_hash)
+                    if n_ghost:
+                        actions["ghost_retired"] += n_ghost
                 else:
                     # duplicate：只更新"最后见到"，绝不改路径。
                     # 否则隔离区/别处的重名件会把库内记录的位置改走（曾踩过）。

@@ -128,8 +128,13 @@ def extract_doc(doc_hash: str, path: Path) -> list[dict]:
     return rows
 
 
-def store(conn, doc_hash: str, rows: list[dict]) -> None:
-    """幂等写入：先删该 doc 旧题再插（文档内容变了整篇重切）。"""
+def store(conn, doc_hash: str, rows: list[dict]) -> int:
+    """幂等写入：先删该 doc 旧题再插（文档内容变了整篇重切）。
+
+    B1 修复（2026-11-19）：插入后按 q_norm_hash 重挂 label_facts（007）里已 merge
+    的打标——重切会换 qid（AUTOINCREMENT 高水位续号），打标事实按题干 hash 存活。
+    返回重挂数。
+    """
     conn.execute("DELETE FROM questions WHERE doc_hash=?", (doc_hash,))
     if rows:
         cols = ",".join(rows[0].keys())
@@ -138,6 +143,16 @@ def store(conn, doc_hash: str, rows: list[dict]) -> None:
             f"INSERT INTO questions ({cols}) VALUES ({ph})",
             [[r[c] for c in rows[0]] for r in rows],
         )
+    cur = conn.execute(
+        "UPDATE questions SET "
+        " topic=(SELECT lf.topic FROM label_facts lf WHERE lf.q_norm_hash=questions.q_norm_hash), "
+        " qtype=COALESCE((SELECT lf.qtype FROM label_facts lf "
+        "                WHERE lf.q_norm_hash=questions.q_norm_hash), qtype), "
+        " difficulty=(SELECT lf.difficulty FROM label_facts lf "
+        "             WHERE lf.q_norm_hash=questions.q_norm_hash), "
+        " tags=(SELECT lf.tags FROM label_facts lf WHERE lf.q_norm_hash=questions.q_norm_hash) "
+        "WHERE doc_hash=? AND q_norm_hash IN (SELECT q_norm_hash FROM label_facts)", (doc_hash,))
+    return cur.rowcount
 
 
 def main(argv=None) -> int:
@@ -165,7 +180,7 @@ def main(argv=None) -> int:
     if args.limit:
         pool = pool[:args.limit]
     started = time.perf_counter()
-    n_docs = n_q = n_empty = n_err = n_del = 0
+    n_docs = n_q = n_empty = n_err = n_del = n_reattached = 0
     qtype: dict[str, int] = {}
     conf: dict[str, int] = {}
     for i, (doc_hash, p) in enumerate(pool):
@@ -183,16 +198,25 @@ def main(argv=None) -> int:
             qtype[r["qtype"]] = qtype.get(r["qtype"], 0) + 1
             conf[r["conf"]] = conf.get(r["conf"], 0) + 1
         if not args.dry_run:
-            store(conn, doc_hash, rows)
+            n_reattached += store(conn, doc_hash, rows)
         if (i + 1) % 200 == 0:
             print(f"[prog] {i + 1}/{len(pool)} docs, {n_q} questions", file=sys.stderr)
     if not args.dry_run:
         n_purged = purge_orphans(conn, {k for k, _ in pool})
+        n_lost = conn.execute("SELECT COUNT(*) FROM label_facts WHERE q_norm_hash NOT IN "
+                              "(SELECT q_norm_hash FROM questions)").fetchone()[0]
+        if n_lost:
+            print(f"[warn] label_facts 有 {n_lost} 条打标已无对应题（重切后真正丢失），"
+                  f"详见 docs/项目审核报告/修复方案-2026-11-19.md F1", file=sys.stderr)
         conn.commit()
+    else:
+        n_lost = 0
     elapsed = time.perf_counter() - started
     print(json.dumps({
         "docs": n_docs, "questions": n_q, "empty_docs": n_empty, "errors": n_err,
         "purged_orphan_docs": n_purged if not args.dry_run else 0,
+        "label_reattached": n_reattached if not args.dry_run else 0,
+        "label_facts_lost": n_lost,
         "dry_run": args.dry_run, "elapsed_sec": round(elapsed, 1),
         "qtype": qtype, "conf": conf,
     }, ensure_ascii=False, indent=1))

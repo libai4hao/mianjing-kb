@@ -1,8 +1,10 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """pipeline：新增文件的一条命令（去重 → 分类 → 入清单）。
 
 对应 docs/03 §10.4 的"先分类再处理"入口：
     intake（算 hash / 判重 / 写表） → classify（规则判类） → queue（导出可入库清单）
+
+转换/OCR/抽题/建库/refresh 不在本链（见 docs/04 SOP），本命令只管"新文件进台账"。
 
 用法：
     python tools/pipeline.py --check                       # 只预览：不写库，只报会新增/重复多少

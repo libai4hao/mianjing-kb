@@ -96,7 +96,9 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
         # P3-③：镜像 hash 回链——md 镜像题的 doc_hash = sha256("md-mirror:"+rel)[:16]
         mirror_hash = hashlib.sha256(("md-mirror:" + rel).encode("utf-8")).hexdigest()[:16]
         parts = rel.split("/")
-        t_guess = parts[-2] if len(parts) >= 2 else ""   # <category>/<topic>/<stem>.md
+        # F10（2026-11-19）：<category>/<topic>/<stem>.md 三段才有 topic 段；两段路径
+        # parts[-2]==parts[0]==category，原 len>=2 会把 category 误当 topic。
+        t_guess = parts[-2] if len(parts) >= 3 else ""
         c_guess = parts[0] if len(parts) >= 2 else ""
         mirror_topic[mirror_hash] = t_guess
         mirror_cat[mirror_hash] = c_guess

@@ -90,6 +90,126 @@ def test_deleted_then_returned_is_resurrected(corpus, tmp_path, capsys):
     assert summary["actions"]["resurrected"] == 1
 
 
+def test_same_path_new_content_retires_ghost(tmp_path, capsys):
+    """F7：同路径换内容（OCR 合并/懒加载改写）→ 旧行退役 superseded，不再双份抽题。
+
+    幽灵行：intake 只按 hash 判重，同路径新内容判 added 落新行，旧行（不同 hash）
+    仍 classified——doc_pool 同路径双份抽题，G5 只查 src 存在拦不住。
+    """
+    root = tmp_path / "corpus"
+    f = root / "12-综合题库" / "笔记.md"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"version 1")
+    db_path = tmp_path / "kb.sqlite"
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    capsys.readouterr()
+    # 模拟旧行已有入库成果（classified）
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE source_documents SET status='classified'")
+    conn.commit()
+    conn.close()
+
+    f.write_bytes(b"version 2 rewritten")          # 同路径、内容变了
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["actions"]["added"] == 1
+    assert summary["actions"].get("ghost_retired", 0) == 1
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    data = conn.execute("SELECT status, note FROM source_documents").fetchall()
+    conn.close()
+    assert len(data) == 2
+    old = [r for r in data if r["status"] == "superseded"]
+    new = [r for r in data if r["status"] == "pending_classify"]
+    assert len(old) == 1 and len(new) == 1
+    assert old[0]["note"].startswith("replaced_by:")
+
+
+def test_rescan_after_retire_is_stable(tmp_path, capsys):
+    """退役后再扫：新行正常 duplicate，旧行保持 superseded 不复活也不重复退役。"""
+    root = tmp_path / "corpus"
+    f = root / "12-综合题库" / "笔记.md"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"version 1")
+    db_path = tmp_path / "kb.sqlite"
+    main(["--root", str(root), "--db", str(db_path)])
+    capsys.readouterr()
+    f.write_bytes(b"version 2")
+    main(["--root", str(root), "--db", str(db_path)])
+    capsys.readouterr()
+
+    main(["--root", str(root), "--db", str(db_path)])
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["actions"].get("added", 0) == 0
+    assert summary["actions"].get("ghost_retired", 0) == 0
+    conn = sqlite3.connect(str(db_path))
+    n_super = conn.execute("SELECT COUNT(*) FROM source_documents WHERE status='superseded'").fetchone()[0]
+    conn.close()
+    assert n_super == 1
+
+
+def test_move_onto_occupied_path_retires_ghost(tmp_path, capsys):
+    """F7 补遗（评审 Important#1）：移动/改名落到已占用路径 → 占用行同样退役。
+
+    乙的内容改落到甲的路径：hash_b 行被改指过去，甲路径上 hash_a 的占用行若不清退，
+    仍 classified、src 仍存在——doc_pool 同路径双份抽题 + hash_a 绑错内容，与原地
+    改内容是同一故障模式。
+    """
+    root = tmp_path / "corpus"
+    d = root / "02-JVM"
+    d.mkdir(parents=True)
+    (d / "甲.pdf").write_bytes(b"%PDF-1.4 jia")
+    (d / "乙.pdf").write_bytes(b"%PDF-1.4 yi")
+    db_path = tmp_path / "kb.sqlite"
+    main(["--root", str(root), "--db", str(db_path)])
+    capsys.readouterr()
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE source_documents SET status='classified'")
+    conn.commit()
+    conn.close()
+
+    (d / "甲.pdf").unlink()
+    (d / "乙.pdf").rename(d / "甲.pdf")          # 乙的内容落到甲的路径上
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["actions"].get("renamed", 0) + summary["actions"].get("moved", 0) == 1
+    assert summary["actions"].get("ghost_retired", 0) == 1
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    data = conn.execute("SELECT status, note, file_name FROM source_documents").fetchall()
+    conn.close()
+    assert len(data) == 2
+    old = [r for r in data if r["status"] == "superseded"]
+    new = [r for r in data if r["status"] == "classified"]
+    assert len(old) == 1 and old[0]["note"].startswith("replaced_by:")
+    assert len(new) == 1 and new[0]["file_name"] == "甲.pdf"
+
+
+def test_retire_preserves_existing_note(tmp_path, capsys):
+    """评审 Minor#2：退役保留旧行原有 note 留痕（needs_convert 等），不整段覆盖。"""
+    root = tmp_path / "corpus"
+    d = root / "02-JVM"
+    d.mkdir(parents=True)
+    (d / "甲.pdf").write_bytes(b"%PDF-1.4 jia")
+    db_path = tmp_path / "kb.sqlite"
+    main(["--root", str(root), "--db", str(db_path)])
+    capsys.readouterr()
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE source_documents SET status='classified', note='needs_convert:1'")
+    conn.commit()
+    conn.close()
+
+    (d / "甲.pdf").write_bytes(b"%PDF-1.4 jia-v2")     # 同路径换内容
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    conn = sqlite3.connect(str(db_path))
+    note = conn.execute("SELECT note FROM source_documents WHERE status='superseded'").fetchone()[0]
+    conn.close()
+    assert note.startswith("replaced_by:")
+    assert "needs_convert:1" in note
+
+
 def test_dry_run_with_existing_db_does_not_write(corpus, tmp_path, capsys):
     """库已存在时 --dry-run 用只读连接，但仍要能口径一致地报重复数，且不写库（曾 crash）。"""
     db_path = tmp_path / "kb.sqlite"

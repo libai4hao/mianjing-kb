@@ -67,6 +67,22 @@ def copy_vec(src_db: Path, dst_db: Path) -> str:
                           "WHERE type='table' AND name='vec_questions'").fetchone()[0]
         if not has:
             return "absent（现行库无向量表）"
+        # B3 修复（2026-11-19）：向量按 rowid=qid 拷贝，现行库题行若与影子库 qid
+        # 对不上（存量库重切 AUTOINCREMENT 续号等场景），拷出的向量会张冠李戴——
+        # 先按 qid 比对 q_norm_hash，任何不匹配即中止（要向量化走 --reembed 重建）。
+        try:
+            mis = con.execute(
+                "SELECT COUNT(*) FROM cur.questions c LEFT JOIN main.questions m "
+                "ON m.qid=c.qid "
+                "WHERE m.qid IS NULL OR COALESCE(c.q_norm_hash,'')!=COALESCE(m.q_norm_hash,'')"
+            ).fetchone()[0]
+        except Exception as ex:  # noqa: BLE001
+            # 评审 Minor#4（2026-11-19）：旧库 questions 缺 q_norm_hash 列也走这
+            # handler——提示语补"列缺失"，别让人只盯着表。
+            return f"error: 向量对齐校验失败（questions 表/列缺失？）{type(ex).__name__}: {str(ex)[:80]}"
+        if mis:
+            return (f"error: 向量对齐校验失败：现行库 {mis} 行 qid/q_norm_hash 与影子库"
+                    "不匹配——重切后请 --reembed 重建向量，不要按 rowid 硬拷")
         try:
             import sqlite_vec
         except ImportError:

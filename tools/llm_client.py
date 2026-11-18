@@ -193,7 +193,8 @@ def _post(cfg: dict, payload: dict) -> tuple[int, dict]:
 def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
          max_tokens: int = 128, temperature: float = 0.1,
          retries: int = 3, sleep: float = 1.0) -> dict:
-    """一次对话（含重试退避）。返回 {text, latency_ms, tokens}；重试耗尽抛 RuntimeError。
+    """一次对话（含重试退避）。返回 {text, latency_ms, tokens, prompt_tokens,
+    completion_tokens}（F5：in/out 拆分，tokens 为两者合计）；重试耗尽抛 RuntimeError。
 
     降级链：429/5xx/超时/网络 → 指数退避重试；JSON 模式下解析失败也重试
     （第二次起在 system 末尾强化"只输出严格 JSON，不要任何其他文字"）。
@@ -227,6 +228,8 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()  # 思考链兜底剥离
             u = resp.get("usage") or {}
             return {"text": text, "latency_ms": latency,
+                    "prompt_tokens": int(u.get("prompt_tokens") or 0),
+                    "completion_tokens": int(u.get("completion_tokens") or 0),
                     "tokens": int(u.get("prompt_tokens") or 0) + int(u.get("completion_tokens") or 0)}
         last_err = f"status={st} {str(resp.get('error') or resp)[:160]}"
         if st and st not in (429, 500, 502, 503, 504) and st != 0:
@@ -235,8 +238,9 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
     raise RuntimeError(f"LLM 调用重试 {retries} 次耗尽: {last_err}")
 
 
-def chat_json(cfg: dict, system: str, user: str, **kw) -> dict | None:
-    """JSON 对话：chat + 宽松解析。解析失败返回 None（调用方落 failed 队列）。"""
+def chat_json(cfg: dict, system: str, user: str, **kw) -> dict:
+    """JSON 对话：chat + 宽松解析。解析失败返回 r（parse_failed=True, obj=None），
+    调用方按 r.get("obj") 判（obj=None 即失败，落 failed 队列）。"""
     r = chat(cfg, system, user, json_mode=True, **kw)
     obj = parse_json_loose(r["text"])
     if obj is None:

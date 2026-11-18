@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -49,7 +50,7 @@ def pick_targets(conn, limit: int = 0) -> list[dict]:
     优先级：文档级主题弱（空/综合/未分类）的题先打——价值最高（docs/15 §3.5 的
     "先做 4,011 综合级"精神）；文档级主题强的靠后（题级打标是锦上添花）。
     """
-    sql = ("SELECT q.qid, q.q_text, q.a_text FROM questions q "
+    sql = ("SELECT q.qid, q.q_text, q.a_text, q.q_norm_hash FROM questions q "
            "LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash "
            "WHERE q.topic IS NULL OR q.topic='' "
            "ORDER BY (sd.topic IS NULL OR sd.topic='' OR sd.topic='综合' OR sd.topic='未分类') DESC, "
@@ -67,21 +68,28 @@ def label_one(cfg: dict, q: dict) -> dict:
     obj = r.get("obj")
     if obj is None:
         raise RuntimeError("JSON 解析失败")
-    return {"qid": q["qid"], "topic": str(obj.get("topic") or "").strip()[:40],
+    return {"qid": q["qid"], "q_norm_hash": q.get("q_norm_hash"),
+            "topic": str(obj.get("topic") or "").strip()[:40],
             "qtype": obj.get("qtype"), "difficulty": obj.get("difficulty"),
             "tags": json.dumps(obj.get("tags") or [], ensure_ascii=False),
             "provider": cfg["provider"], "model": cfg["model"],
             "redacted": 1 if hit else 0, "latency_ms": r["latency_ms"],
-            "tokens": r["tokens"], "labeled_at": datetime.now().strftime(NOW_FMT)}
+            "tokens": r["tokens"],
+            "prompt_tokens": r.get("prompt_tokens"),
+            "completion_tokens": r.get("completion_tokens"),
+            "labeled_at": datetime.now().strftime(NOW_FMT)}
 
 
 def write_staging(conn, rows: list[dict]) -> int:
     conn.executemany(
         "INSERT OR REPLACE INTO labels_staging "
-        "(qid, topic, qtype, difficulty, tags, provider, model, redacted, latency_ms, tokens, labeled_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        [[r[k] for k in ("qid", "topic", "qtype", "difficulty", "tags", "provider", "model",
-                         "redacted", "latency_ms", "tokens", "labeled_at")] for r in rows])
+        "(qid, q_norm_hash, topic, qtype, difficulty, tags, provider, model, "
+        "redacted, latency_ms, tokens, prompt_tokens, completion_tokens, labeled_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [[r[k] for k in ("qid", "q_norm_hash", "topic", "qtype", "difficulty", "tags",
+                         "provider", "model", "redacted", "latency_ms", "tokens",
+                         "prompt_tokens", "completion_tokens", "labeled_at")]
+         for r in rows])
     conn.commit()
     return len(rows)
 
@@ -116,7 +124,7 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
     failed_path = failed_path or (Path(config.BUILD_DIR) / "label_failed.jsonl")
     failed_path.parent.mkdir(parents=True, exist_ok=True)
 
-    done, failed, tokens_total = [], [], 0
+    done, failed, tokens_total, in_total, out_total = [], [], 0, 0, 0
     started = time.perf_counter()
 
     def _worker(q):
@@ -138,9 +146,11 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
                 continue
             done.append(row)
             tokens_total += row["tokens"]
+            in_total += row.get("prompt_tokens") or 0
+            out_total += row.get("completion_tokens") or 0
             if not dry_run and len(done) % 20 == 0:
                 write_staging(conn, done[-20:])          # 每 20 题 flush（断点粒度）
-            cost = tokens_total * sum(cfg["price"]) / 1e6
+            cost = (in_total * cfg["price"][0] + out_total * cfg["price"][1]) / 1e6
             if budget and cost > budget:
                 for f in futs:
                     f.cancel()
@@ -149,7 +159,8 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
         write_staging(conn, done)
     return {"todo": len(todo), "labeled": len(done), "failed": len(failed),
             "tokens": tokens_total,
-            "est_cost_yuan": round(tokens_total * sum(cfg["price"]) / 1e6, 4),
+            "est_cost_yuan": round((in_total * cfg["price"][0]
+                                    + out_total * cfg["price"][1]) / 1e6, 4),
             "dry_run": dry_run, "budget": budget,
             "elapsed_sec": round(time.perf_counter() - started, 1),
             "failed_log": str(failed_path) if failed else None}
@@ -167,8 +178,20 @@ def sample_staging(conn, n: int) -> list[dict]:
     return [dict(r) for r in random.Random(42).sample(list(rows), k)]
 
 
-def merge(conn) -> dict:
-    """G6 门禁复核 → FAIL 拒绝；PASS/WARN 放行（WARN=软门禁，提示人工抽查）。"""
+def merge(conn, drop_orphans: bool = False) -> dict:
+    """G6 门禁复核 → FAIL 拒绝；PASS/WARN 放行（WARN=软门禁，提示人工抽查）。
+
+    2026-11-19 审核修复（docs/项目审核报告/修复方案-2026-11-19.md）：
+    - F6 孤儿行校验：qid 已失效或题干已变（q_norm_hash 不匹配）的 staging 行拒绝
+      merge——防跨 extract 残留行命中 0 行仍被静默清掉；历史行 q_norm_hash 为
+      NULL 放行（qid 对得上即可，向后兼容）。
+    - F9 四列落库：topic/qtype/difficulty/tags；F3 空 topic/qtype 不覆盖已有值。
+    - F1 打标事实落档 label_facts（同事务，按 q_norm_hash 跨重切存活，007）。
+    - F4 next_step：merge 只写 kb.sqlite，检索库 topic 是 build_db 快照须 refresh。
+    - 评审 Important#2（2026-11-19）：孤儿行拒绝时列出 qid（人工清理有抓手）；
+      drop_orphans=True 清掉孤儿行后继续 merge——run_batch 跳过 staging 已有
+      qid，重跑打标清不掉孤儿，没有这个出口主工作流会死锁。
+    """
     from verify_ledger import g6_label
     g6 = g6_label(conn)
     if g6["state"] == "FAIL":
@@ -176,13 +199,47 @@ def merge(conn) -> dict:
                 "note": "G6 schema 合格率未过，staging 保留未 merge"}
     if g6["state"] == "SKIP":
         return {"ok": False, "gate": "SKIP", "note": "labels_staging 为空，无可 merge"}
+    orphans = conn.execute(
+        "SELECT COUNT(*) FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
+        "WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash)"
+    ).fetchone()[0]
+    if orphans:
+        orphan_qids = [r[0] for r in conn.execute(
+            "SELECT s.qid FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
+            "WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash) "
+            "ORDER BY s.qid LIMIT 10").fetchall()]
+        if not drop_orphans:
+            return {"ok": False, "gate": g6["state"], "orphans": orphans,
+                    "orphan_qids": orphan_qids,
+                    "note": "staging 存在跨 extract 残留行（qid 已失效/题干已变），拒绝 merge——"
+                            "重跑打标清不掉孤儿（已打 qid 会跳过），用 --merge --drop-orphans "
+                            "清除后合并，或人工核对后手动清理"}
+        conn.execute(
+            "DELETE FROM labels_staging WHERE qid IN ("
+            "  SELECT s.qid FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
+            "  WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash))")
     n = conn.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0]
-    conn.execute("UPDATE questions SET topic=(SELECT topic FROM labels_staging "
-                 "WHERE labels_staging.qid=questions.qid) "
-                 "WHERE qid IN (SELECT qid FROM labels_staging)")
+    conn.execute(
+        "UPDATE questions SET "
+        " topic=COALESCE(NULLIF((SELECT s.topic FROM labels_staging s "
+        "                        WHERE s.qid=questions.qid), ''), topic), "
+        " qtype=COALESCE((SELECT s.qtype FROM labels_staging s WHERE s.qid=questions.qid), qtype), "
+        " difficulty=(SELECT s.difficulty FROM labels_staging s WHERE s.qid=questions.qid), "
+        " tags=(SELECT s.tags FROM labels_staging s WHERE s.qid=questions.qid) "
+        "WHERE qid IN (SELECT qid FROM labels_staging)")
+    conn.execute(
+        "INSERT OR REPLACE INTO label_facts "
+        "SELECT q.q_norm_hash, s.topic, s.qtype, s.difficulty, s.tags, ? "
+        "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
+        "WHERE COALESCE(s.topic, '') != ''",
+        (datetime.now().strftime(NOW_FMT),))
     conn.execute("DELETE FROM labels_staging")
     conn.commit()
-    out = {"ok": True, "merged": n, "gate": g6["state"]}
+    out = {"ok": True, "merged": n, "gate": g6["state"],
+           "next_step": "python tools/refresh.py --reembed"
+                        "  # 检索库 topic 是快照，merge 只写 kb.sqlite（B2）"}
+    if orphans:
+        out["dropped_orphans"] = orphans
     if g6["state"] == "WARN":
         out["note"] = "topic 漂移 WARN（软门禁不阻断）——建议 --sample 50 人工抽查确认"
     return out
@@ -196,8 +253,23 @@ def main(argv=None) -> int:
     ap.add_argument("--budget", type=float, default=10.0, help="预算封顶 ¥（超了自动停，docs/15 §3.5）")
     ap.add_argument("--sample", type=int, default=0, help="从 staging 随机抽 N 条打印（人工抽查）")
     ap.add_argument("--merge", action="store_true", help="G6 复核 + merge 进 questions")
+    ap.add_argument("--drop-orphans", action="store_true",
+                    help="与 --merge 连用：清除 staging 孤儿行（qid 已失效/题干已变）后继续合并")
+    # F10（2026-11-19）：docs/15 §3.5 承诺的三旗标——此前 argparse 未声明，
+    # 照文档敲命令报 unrecognized arguments。
+    ap.add_argument("--provider", choices=("local", "online"),
+                    help="LLM provider（写入 LLM_PROVIDER 后再解析配置）")
+    ap.add_argument("--concurrency", type=int, default=0,
+                    help="并发数（写入 LLM_CONCURRENCY 后再解析配置；0=不覆盖）")
+    ap.add_argument("--resume", action="store_true",
+                    help="兼容旗标：续跑是默认行为（staging 已有 qid 自动跳过），无需显式传")
     ap.add_argument("--db", default=str(config.DB_PATH))
     args = ap.parse_args(argv)
+
+    if args.provider:
+        os.environ["LLM_PROVIDER"] = args.provider
+    if args.concurrency:
+        os.environ["LLM_CONCURRENCY"] = str(args.concurrency)
 
     try:
         cfg = resolve_config()
@@ -218,7 +290,7 @@ def main(argv=None) -> int:
             print(json.dumps({"sampled": len(rows)}, ensure_ascii=False))
             return 0
         if args.merge:
-            out = merge(conn)
+            out = merge(conn, drop_orphans=args.drop_orphans)
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if out["ok"] else 1
         out = run_batch(cfg, conn, limit=args.limit, budget=args.budget, dry_run=args.dry_run)

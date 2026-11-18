@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS source_documents (
   first_seen_at TEXT NOT NULL,
   last_seen_at  TEXT NOT NULL,
   note          TEXT,
+  -- processing/processed/failed 为预留态，当前无工具写入（2026-11-19 复核确认）；
+  -- 动 CHECK 约束需重建表，收益为零，保留枚举仅作扩展位。
   CHECK (status IN (
     'pending_classify','classified','processing','processed',
     'rejected','failed','duplicate','moved','renamed','absent','superseded','quarantined'

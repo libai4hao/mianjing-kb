@@ -168,7 +168,8 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
   `batch_label.py`（staging 暂存/预算封顶/断点续跑/--sample 抽查/G6 复核 merge）+
   006 迁移（questions 题级 topic 列，打标事实源落点）。**key 一配置就可以用**：
   `[Environment]::SetEnvironmentVariable('LLM_KEY','sk-xxx','User')` 后
-  `python tools\batch_label.py --check` → 打标 → `--sample 50` 人工抽查 → `--merge`。
+  `python tools\batch_label.py --check` → 打标 → `--sample 50` 人工抽查 → `--merge`
+  → `python tools\refresh.py --reembed`（检索库 topic 是快照，merge 只写 kb.sqlite）。
   local 路径（ollama qwen3-4b）已端到端实测（3 题真打标→G6→merge 落库）；
 - **向量增量（K2）**：当前全量重嵌约 9 分钟，暂无增量需求。
 
