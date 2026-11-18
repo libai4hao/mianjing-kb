@@ -57,9 +57,16 @@ DEFAULTS = {
 }
 
 
+def _as_str(name: str, raw) -> str:
+    """配置值统一转字符串（os.environ 本就是 str；编程式调用传 int 等不得裸 AttributeError）。"""
+    if not isinstance(raw, str):
+        raise ConfigError(f"{name} 须为字符串，当前: {raw!r}（类型 {type(raw).__name__}）")
+    return raw
+
+
 def _parse_bool(name: str, raw: str) -> bool:
     """配置布尔解析（1/0 true/false yes/no on/off，大小写不敏感）；非法抛 ConfigError。"""
-    v = raw.strip().lower()
+    v = _as_str(name, raw).strip().lower()
     if v in ("1", "true", "yes", "on"):
         return True
     if v in ("0", "false", "no", "off"):
@@ -67,9 +74,33 @@ def _parse_bool(name: str, raw: str) -> bool:
     raise ConfigError(f"{name} 只接受 1/0 true/false yes/no on/off，当前: {raw!r}")
 
 
+def _parse_positive_int(name: str, raw: str) -> int:
+    """正整数配置（并发数）；非法/非正数抛 ConfigError 带指引。"""
+    v = _as_str(name, raw).strip()
+    try:
+        n = int(v)
+    except ValueError:
+        raise ConfigError(f"{name} 须为正整数，当前: {raw!r}") from None
+    if n <= 0:
+        raise ConfigError(f"{name} 须为正整数，当前: {raw!r}")
+    return n
+
+
+def _parse_positive_float(name: str, raw: str) -> float:
+    """正浮点配置（超时秒）；非法/非正数抛 ConfigError 带指引。"""
+    v = _as_str(name, raw).strip()
+    try:
+        f = float(v)
+    except ValueError:
+        raise ConfigError(f"{name} 须为正数，当前: {raw!r}") from None
+    if f <= 0:
+        raise ConfigError(f"{name} 须为正数，当前: {raw!r}")
+    return f
+
+
 def _parse_price(raw: str) -> tuple[float, float]:
     """配置价格解析：必须恰好"输入价,输出价"两个非负浮点数；非法抛 ConfigError。"""
-    parts = [p.strip() for p in raw.split(",")]
+    parts = [p.strip() for p in _as_str("LLM_PRICE", raw).split(",")]
     if len(parts) != 2:
         raise ConfigError(f'LLM_PRICE 格式须为 "输入价,输出价"（如 "1,4"），当前: {raw!r}')
     try:
@@ -84,7 +115,7 @@ def _parse_price(raw: str) -> tuple[float, float]:
 def resolve_config(env: dict | None = None) -> dict:
     """环境变量 → 完整配置。online 缺 key 抛 ConfigError（带指引，不静默降级烧本地 GPU）。"""
     e = env if env is not None else os.environ
-    provider = (e.get("LLM_PROVIDER") or "local").strip().lower()
+    provider = _as_str("LLM_PROVIDER", e.get("LLM_PROVIDER") or "local").strip().lower()
     if provider not in DEFAULTS:
         raise ConfigError(f"LLM_PROVIDER 只允许 local|online，当前: {provider!r}")
     d = DEFAULTS[provider]
@@ -94,11 +125,13 @@ def resolve_config(env: dict | None = None) -> dict:
         if e.get("LLM_JSON_MODE") else bool(d["json_mode"])
     cfg = {
         "provider": provider,
-        "base": (e.get("LLM_BASE") or d["base"]).rstrip("/"),
-        "model": e.get("LLM_MODEL") or d["model"],
-        "key": e.get("LLM_KEY") or "",
-        "concurrency": int(e.get("LLM_CONCURRENCY") or d["concurrency"]),
-        "timeout": float(e.get("LLM_TIMEOUT") or d["timeout"]),
+        "base": _as_str("LLM_BASE", e.get("LLM_BASE") or d["base"]).rstrip("/"),
+        "model": _as_str("LLM_MODEL", e.get("LLM_MODEL") or d["model"]),
+        "key": _as_str("LLM_KEY", e.get("LLM_KEY") or ""),
+        "concurrency": _parse_positive_int(
+            "LLM_CONCURRENCY", e.get("LLM_CONCURRENCY") or str(d["concurrency"])),
+        "timeout": _parse_positive_float(
+            "LLM_TIMEOUT", e.get("LLM_TIMEOUT") or str(d["timeout"])),
         "json_mode": json_mode,
         "price": _parse_price(e["LLM_PRICE"]) if e.get("LLM_PRICE") else d.get("price", (0.0, 0.0)),
     }

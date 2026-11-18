@@ -94,6 +94,37 @@ def test_price_empty_uses_provider_default():
     assert resolve_config(env={})["price"] == (0.0, 0.0)
 
 
+# ---------------- 配置解析一致性（2026-11-18 review：裸 ValueError/AttributeError） ----------------
+@pytest.mark.parametrize("key,val", [("LLM_CONCURRENCY", "bad"), ("LLM_TIMEOUT", "bad")])
+def test_numeric_config_bad_value_raises_config_error(key, val):
+    """并发/超时坏值须与 LLM_PRICE 同为 ConfigError（带变量名），不裸 ValueError 崩栈。"""
+    with pytest.raises(ConfigError, match=key) as ei:
+        resolve_config(env={key: val})
+    assert "当前" in str(ei.value)
+
+
+@pytest.mark.parametrize("key", ["LLM_CONCURRENCY", "LLM_TIMEOUT", "LLM_JSON_MODE", "LLM_PRICE"])
+def test_config_non_string_value_raises_config_error(key):
+    """编程式调用传非字符串（int）不得裸 AttributeError，须 ConfigError。"""
+    with pytest.raises(ConfigError, match=key):
+        resolve_config(env={key: 123})
+
+
+@pytest.mark.parametrize("key,val,expected", [
+    ("LLM_CONCURRENCY", "4", 4),
+    ("LLM_TIMEOUT", "12.5", 12.5),
+])
+def test_numeric_config_valid_values(key, val, expected):
+    assert resolve_config(env={key: val})[key.lower().replace("llm_", "")] == expected
+
+
+@pytest.mark.parametrize("key,val", [("LLM_CONCURRENCY", "0"), ("LLM_CONCURRENCY", "-1"),
+                                     ("LLM_TIMEOUT", "0"), ("LLM_TIMEOUT", "-5")])
+def test_numeric_config_rejects_nonpositive(key, val):
+    with pytest.raises(ConfigError, match=key):
+        resolve_config(env={key: val})
+
+
 # ---------------- 脱敏 ----------------
 def test_redact_all_kinds():
     t, hit = redact("联系 13812345678 或 me@qq.com，微信 wx_abc123，"
