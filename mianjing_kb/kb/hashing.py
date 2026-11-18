@@ -69,6 +69,15 @@ def _grams(text: str, ngram: int = 5, strip_punct: bool = True) -> list[int]:
             for i in range(len(norm) - ngram + 1)]
 
 
+# ---- reserved（T7，2026-11-19）------------------------------------------------
+# 下面三个函数没有生产调用，只被 tests/test_hashing.py 锁定行为：
+#   char_fingerprint / similarity / pixel_fingerprint
+# 生产判重走 sha256 / doc_hash；跨长度包含度用 threshold_containment。
+# 删除规则：基线提交 6a7fb68 起再累计 20 次提交仍无包外调用即删——
+#   git rev-list --count 6a7fb68..HEAD   # ≥20 时复查 grep，仍无调用就删
+# -----------------------------------------------------------------------------
+
+
 def char_fingerprint(text: str, k: int = 300, strip_punct: bool = True) -> list[int]:
     """字符指纹：归一后取 5-gram，保留最小的 k 个 64 位哈希（bottom-k 草图）。
 
@@ -79,7 +88,7 @@ def char_fingerprint(text: str, k: int = 300, strip_punct: bool = True) -> list[
 
 
 def similarity(a: list[int], b: list[int]) -> float:
-    """两枚 bottom-k 草图的相似度（交集 / 较小集合）。
+    """reserved（T7）：两枚 bottom-k 草图的相似度（交集 / 较小集合）。
 
     偏置说明：两边各自独立取 bottom-k 时，交集只统计低于较小阈值的共享 gram，
     长度差异大时估算值趋近 |A∩B| / max(|A|,|B|)，而不是注释口径的 /min。
@@ -122,7 +131,7 @@ def threshold_jaccard(a: frozenset[int], b: frozenset[int]) -> float | None:
 
 
 def pixel_fingerprint(pdf_path: Path | str, page: int = 0, dpi: int = 72) -> str | None:
-    """PDF 首页渲染后的像素指纹：只用于「疑似候选」的粗筛，绝不单独做判重/删除。
+    """reserved（T7）：PDF 首页渲染后的像素指纹，只用于「疑似候选」的粗筛，绝不单独做判重/删除。
 
     只哈希第 1 页 72 dpi，封面相同、首页空白（扫描件常见）都会撞指纹；
     必须再叠页数 + 文本/字符指纹一致才可判定同源，禁止单凭它删文件。

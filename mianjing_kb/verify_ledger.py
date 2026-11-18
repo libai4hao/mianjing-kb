@@ -44,7 +44,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, events, hashing, status  # noqa: E402
+from mianjing_kb.kb import config, events, hashing, labelspec, status  # noqa: E402
 from mianjing_kb.kb.vocab import topic_vocab  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
@@ -417,28 +417,53 @@ def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
 
 
 # ---------------- G6 打标质量 ----------------
-G6_QTYPES = ("八股", "算法", "HR", "场景", "项目")
+G6_QTYPES = labelspec.qtypes()      # T21：枚举单一来源（meta/label_schema.yaml）
+
+
+def _json_list_ok(raw, allowed: tuple[str, ...], cap: int) -> bool:
+    """多选列校验：空/None 放行（历史行没有该维度），有值则必须是 allowed 内的 JSON 数组且不超上限。"""
+    if raw is None or raw == "":
+        return True
+    try:
+        vals = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(vals, list) or len(vals) > cap:
+        return False
+    return all(isinstance(v, str) and v in allowed for v in vals)
 
 
 def g6_label(kb_conn) -> dict:
-    """打标质量（docs/15 §2 G6，2026-11-17 落地）。
+    """打标质量（docs/15 §2 G6，2026-11-17 落地；T21 扩维度）。
 
     staging 无行 → SKIP（打标未启用）；有行则：
       硬指标（FAIL 阻断 merge）：schema 合格率 ≥ 0.95——
         topic 非空且 ≤40 字、qtype ∈ 枚举、difficulty ∈ 1-5、tags 可解析为 JSON 数组；
+        T21 新维度：position ∈ 岗位枚举（≤2）、quality ∈ 质量枚举（≤3）、
+        canonical_q 非空且 ≤60 字——**只在有值时校验**（历史 staging 行没有这些列）。
       软指标（WARN 记录）：staging.topic 分布相对 questions 现有分布漂移——
-        新 topic（现有库未出现过的主题）占比 > 15% → WARN（可能是打标跑偏，人工抽查）。
+        新 topic（现有库未出现过的主题）占比 > 15% → WARN（可能是打标跑偏，人工抽查）；
+        T21 新维度覆盖率与标签归一命中数进 detail（可见、不阻断）。
     人工抽检环节（≥0.8 准确率）由 `batch_label --sample 50` 出清单人工核，无 ground truth 不自动判。
     """
     sql = ("SELECT COUNT(*) FROM labels_staging; "
-           "-- 合格: topic非空<=40字 AND qtype∈枚举 AND difficulty∈1..5 AND tags为JSON数组")
+           "-- 合格: topic非空<=40字 AND qtype∈枚举 AND difficulty∈1..5 AND tags为JSON数组 "
+           "AND position/quality 有值时合法 AND canonical_q 有值时<=60字")
     n = kb_conn.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0]
     if n == 0:
         return _gate("G6", "打标质量", "软→硬", "SKIP", [],
                      {"staged": 0, "note": "labels_staging 为空（打标未跑或已 merge）"}, sql)
     rows = kb_conn.execute(
-        "SELECT s.topic, s.qtype, s.difficulty, s.tags FROM labels_staging s").fetchall()
+        "SELECT s.topic, s.qtype, s.difficulty, s.tags, s.position, s.quality, "
+        "       s.canonical_q, s.tag_norm_hits FROM labels_staging s").fetchall()
+    pos_vals = labelspec.positions()
+    qual_vals = labelspec.quality_flags()
+    pos_cap = int(labelspec.field("position").get("max_items") or 2)
+    qual_cap = int(labelspec.field("quality").get("max_items") or 3)
+    canon_max = labelspec.canonical_max_len()
     bad = []
+    canon_filled = pos_filled = qual_filled = 0
+    norm_hits = 0
     for r in rows:
         why = []
         if not (r["topic"] or "").strip() or len(r["topic"]) > 40:
@@ -453,6 +478,20 @@ def g6_label(kb_conn) -> dict:
                 why.append("tags")
         except json.JSONDecodeError:
             why.append("tags")
+        if not _json_list_ok(r["position"], pos_vals, pos_cap):
+            why.append("position")
+        if not _json_list_ok(r["quality"], qual_vals, qual_cap):
+            why.append("quality")
+        canon = (r["canonical_q"] or "").strip()
+        if r["canonical_q"] is not None and (not canon or len(canon) > canon_max):
+            why.append("canonical_q")
+        if canon:
+            canon_filled += 1
+        if r["position"]:
+            pos_filled += 1
+        if r["quality"]:
+            qual_filled += 1
+        norm_hits += int(r["tag_norm_hits"] or 0)
         if why:
             bad.append({"topic": r["topic"], "qtype": r["qtype"],
                         "difficulty": r["difficulty"], "bad_fields": why})
@@ -492,7 +531,11 @@ def g6_label(kb_conn) -> dict:
     return _gate("G6", "打标质量", "软→硬", state, fails,
                  {"staged": n, "ok_rate": round(ok_rate, 4),
                   "new_topic_ratio": round(drift, 4),
-                  "drift_baseline": drift_baseline}, sql)
+                  "drift_baseline": drift_baseline,
+                  "coverage": {"canonical_q": canon_filled / n,
+                               "position": pos_filled / n,
+                               "quality": qual_filled / n},
+                  "tag_norm_hits": norm_hits}, sql)
 
 
 def g6b_golden(kb_conn) -> dict:

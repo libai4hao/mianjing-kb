@@ -271,6 +271,23 @@ def _ensure_document_events(conn: sqlite3.Connection) -> None:
     events.backfill(conn)
 
 
+def _ensure_label_dimensions(conn: sqlite3.Connection) -> None:
+    """012（T21）：标签维度扩展——questions / labels_staging 加 position/quality/canonical_q。
+
+    - position / quality 是多选，落库为 JSON 数组字符串；
+    - canonical_q 是"标准化问句"（≤60 字），供检索与去重，不同于 q_norm（去空白归一）；
+    - labels_staging 另加 tag_norm_hits：本次打标被同义词归一的标签数，用于量化合并率。
+    逐列判存在：迁移中断后重跑只补缺列（与 009 同口径）。
+    """
+    for col, decl in (("position", "TEXT"), ("quality", "TEXT"), ("canonical_q", "TEXT")):
+        if not _column_exists(conn, "questions", col):
+            conn.execute(f"ALTER TABLE questions ADD COLUMN {col} {decl}")
+        if not _column_exists(conn, "labels_staging", col):
+            conn.execute(f"ALTER TABLE labels_staging ADD COLUMN {col} {decl}")
+    if not _column_exists(conn, "labels_staging", "tag_norm_hits"):
+        conn.execute("ALTER TABLE labels_staging ADD COLUMN tag_norm_hits INTEGER")
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     """001：基础表（source_documents / batches 等）。脚本本身 IF NOT EXISTS，可直接重放。"""
     exec_script(conn, SCHEMA_FILE.read_text(encoding="utf-8"))
@@ -288,6 +305,7 @@ MIGRATIONS = [
     ("009_review_columns", _ensure_review_columns),
     ("010_batches_state", _ensure_batch_state),
     ("011_document_events", _ensure_document_events),
+    ("012_label_dimensions", _ensure_label_dimensions),
 ]
 
 
@@ -342,9 +360,11 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
 REQUIRED = {
     "source_documents": ("doc_hash", "sha256", "src_path", "dir_path", "status",
                          "parent_dir", "source_count", "sources_json"),
-    "questions": ("qid", "doc_hash", "topic", "difficulty", "tags"),
+    "questions": ("qid", "doc_hash", "topic", "difficulty", "tags",
+                  "position", "quality", "canonical_q"),
     "labels_staging": ("q_norm_hash", "prompt_tokens", "completion_tokens",
-                       "review_state", "review_model", "review_note"),
+                       "review_state", "review_model", "review_note",
+                       "position", "quality", "canonical_q", "tag_norm_hits"),
     "label_facts": ("q_norm_hash", "topic"),
     "golden_labels": ("q_norm_hash",),
     "batches": ("batch_id", "state", "updated_at"),

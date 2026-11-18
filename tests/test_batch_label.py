@@ -35,15 +35,22 @@ def test_cli_flags_provider_concurrency_resume(tmp_path, monkeypatch, capsys):
 
 
 def _fake_label(obj=None, fail_qids=()):
-    """返回 label_one 替身：fail_qids 中的题抛异常，其余返回固定打标。"""
+    """返回 label_one 替身：fail_qids 中的题抛异常，其余返回固定打标（含 T21 新维度）。"""
     def fake(cfg, q):
         if q["qid"] in fail_qids:
             raise RuntimeError("LLM 调用重试 3 次耗尽")
+        o = obj or {}
+        pos = o.get("position", ["后端"])
+        qual = o.get("quality")
         return {"qid": q["qid"], "q_norm_hash": q.get("q_norm_hash"),
-                "topic": (obj or {}).get("topic", "Java基础"),
-                "qtype": (obj or {}).get("qtype", "八股"),
-                "difficulty": (obj or {}).get("difficulty", 3),
-                "tags": json.dumps((obj or {}).get("tags", ["HashMap"]), ensure_ascii=False),
+                "topic": o.get("topic", "Java基础"),
+                "qtype": o.get("qtype", "八股"),
+                "difficulty": o.get("difficulty", 3),
+                "canonical_q": o.get("canonical_q", q["q_text"][:60]),
+                "position": json.dumps(pos, ensure_ascii=False) if pos else None,
+                "quality": json.dumps(qual, ensure_ascii=False) if qual else None,
+                "tag_norm_hits": o.get("tag_norm_hits", 0),
+                "tags": json.dumps(o.get("tags", ["HashMap"]), ensure_ascii=False),
                 "provider": cfg["provider"], "model": cfg["model"], "redacted": 0,
                 "latency_ms": 10, "tokens": 100,
                 "prompt_tokens": 80, "completion_tokens": 20, "labeled_at": "now"}
@@ -189,15 +196,20 @@ def test_staging_carries_q_norm_hash(mini_db, monkeypatch, tmp_path):
 
 
 def test_merge_writes_four_columns_and_facts(mini_db, monkeypatch, tmp_path):
-    """F9+F1：merge 四列（topic/qtype/difficulty/tags）落库 + label_facts 按 hash 落档。"""
+    """F9+F1+T21：merge 落 topic/qtype/difficulty/tags + position/quality/canonical_q + 事实按 hash 落档。"""
     monkeypatch.setattr(bl, "label_one", _fake_label(
-        {"topic": "Redis", "qtype": "八股", "difficulty": 4, "tags": ["缓存"]}))
+        {"topic": "Redis", "qtype": "八股", "difficulty": 4, "tags": ["缓存"],
+         "position": ["后端"], "quality": ["残缺"], "canonical_q": "Redis 的持久化方式有哪些"}))
     bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
     out = bl.merge(mini_db)
     assert out["ok"]
-    row = mini_db.execute("SELECT topic, qtype, difficulty, tags FROM questions WHERE qid=1").fetchone()
+    row = mini_db.execute(
+        "SELECT topic, qtype, difficulty, tags, position, quality, canonical_q "
+        "FROM questions WHERE qid=1").fetchone()
     assert row["topic"] == "Redis" and row["qtype"] == "八股"
     assert row["difficulty"] == 4 and row["tags"] == '["缓存"]'
+    assert row["position"] == '["后端"]' and row["quality"] == '["残缺"]'
+    assert row["canonical_q"] == "Redis 的持久化方式有哪些"
     facts = mini_db.execute("SELECT q_norm_hash, topic, difficulty FROM label_facts").fetchall()
     assert len(facts) == 3                                  # qid 1-3 各一条（hash 互异）
     assert {r["topic"] for r in facts} == {"Redis"}
@@ -430,6 +442,30 @@ def test_label_one_no_vocab_keeps_free_topic(monkeypatch):
     monkeypatch.setattr(bl, "chat_json", fake)
     row = bl.label_one(CFG, {"qid": 9, "q_norm_hash": "h9", "q_text": "题", "a_text": "答"})
     assert row["topic"] == "玄学" and row["review_state"] is None
+
+
+def test_label_one_new_dims_and_tag_normalization(monkeypatch):
+    """T21：prompt 覆盖 position/quality/canonical_q；标签同义归一；越界岗位降级并标 pending。"""
+    monkeypatch.setattr(bl, "topic_vocab", lambda: ("JVM", "Redis", "其他"))
+    sent = {}
+
+    def fake(cfg, system, user, **kw):
+        sent["system"] = system
+        return {"obj": {"topic": "JVM", "qtype": "八股", "difficulty": 3,
+                        "position": ["后端", "火星"], "quality": ["重复"],
+                        "canonical_q": "", "tags": ["JVM GC", "哈希表"]},
+                "latency_ms": 5, "tokens": 10, "prompt_tokens": 7, "completion_tokens": 3}
+
+    monkeypatch.setattr(bl, "chat_json", fake)
+    row = bl.label_one(CFG, {"qid": 11, "q_norm_hash": "h11",
+                             "q_text": "什么是 JVM 的类加载？", "a_text": "答"})
+    assert "canonical_q" in sent["system"] and "岗位" in sent["system"]
+    assert json.loads(row["position"]) == ["后端"]          # 火星 被丢弃
+    assert json.loads(row["quality"]) == ["重复"]
+    assert row["review_state"] == "pending"                # 有非法值 → 待复核
+    assert json.loads(row["tags"]) == ["JVM", "哈希表"]    # JVM GC → JVM
+    assert row["tag_norm_hits"] == 1
+    assert row["canonical_q"] == "什么是 JVM 的类加载？"    # 空 → 回退题干
 
 
 # ---- 批次三 R3：复核执行层（--review / --review-list / --review-resolve）----

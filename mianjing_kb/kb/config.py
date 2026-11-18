@@ -58,6 +58,9 @@ UNCLASSIFIED = "未分类"
 META_DIR = Path(os.environ.get("KB_META_DIR", str(Path(__file__).resolve().parents[2] / "meta")))
 TOPIC_RULES_FILE = META_DIR / "topic_rules.yaml"
 FOLDER_RULES_FILE = META_DIR / "folder_rules.yaml"
+LABEL_SCHEMA_FILE = META_DIR / "label_schema.yaml"     # T21：标签维度定义（prompt/G6 单一来源）
+TAG_SYNONYMS_FILE = META_DIR / "tag_synonyms.yaml"    # T21：标签同义词 → 规范标签
+TAG_VOCAB_FILE = META_DIR / "tag_vocab.yaml"          # T21：二级标签推荐词表（不强制封闭）
 # 人工覆盖表（P1-5）：key=语料树内 posix 相对路径，value={category/topic/sub_topic/...}
 # 与 docs/03 原方案的 build\overrides.json 不同：这是人工配置不是产物，进 git（meta/）
 OVERRIDES_FILE = META_DIR / "overrides.json"

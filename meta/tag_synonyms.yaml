@@ -1,0 +1,46 @@
+# 标签同义词表（T21）：别名/缩写/英文 → 规范标签（规范值应出现在 tag_vocab.yaml）
+# key 比对时忽略大小写与首尾空格；规范值原样落库。
+"jvm gc": JVM
+"gc": 垃圾回收
+"垃圾回收器": 垃圾回收
+"garbage collection": 垃圾回收
+"hashmap": 集合
+"集合框架": 集合
+"concurrenthashmap": 并发
+"多线程": 并发
+"线程安全": 并发
+"thread pool": 线程池
+"mysql索引": 索引
+"索引优化": 索引
+"innodb": InnoDB
+"事务隔离": 事务
+"事务隔离级别": 事务
+"mvcc": 事务
+"tcp": TCP
+"三次握手": TCP
+"tcp/ip": TCP
+"udp": UDP
+"http": HTTP
+"https": HTTP
+"dns": DNS
+"进程线程": 进程与线程
+"线程与进程": 进程与线程
+"虚拟内存": 内存管理
+"分页": 内存管理
+"deadlock": 死锁
+"io多路复用": IO模型
+"react": React
+"vue": Vue
+"vue.js": Vue
+"typescript": TypeScript
+"ts": TypeScript
+"transformer": Transformer
+"lora": LoRA
+"rag": RAG
+"检索增强": RAG
+"finetune": 微调
+"fine-tune": 微调
+"rlhf": 强化学习
+"quantization": 量化
+"时间复杂度": 算法复杂度
+"空间复杂度": 算法复杂度

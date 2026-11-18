@@ -57,6 +57,11 @@ def mini_env(tmp_path, monkeypatch):
     kb.executescript((REAL_META / "schema" / "001_init.sql").read_text(encoding="utf-8"))
     kb.executescript((REAL_META / "schema" / "004_questions.sql").read_text(encoding="utf-8"))
     kb.executescript((REAL_META / "schema" / "005_labels_staging.sql").read_text(encoding="utf-8"))
+    # 012（T21）：staging 新维度列（mini 库不走 db.connect，手工补）
+    for col, decl in (("position", "TEXT"), ("quality", "TEXT"), ("canonical_q", "TEXT"),
+                      ("tag_norm_hits", "INTEGER")):
+        if not any(r[1] == col for r in kb.execute("PRAGMA table_info(labels_staging)")):
+            kb.execute(f"ALTER TABLE labels_staging ADD COLUMN {col} {decl}")
     if not any(r[1] == "topic" for r in kb.execute("PRAGMA table_info(questions)")):
         kb.execute("ALTER TABLE questions ADD COLUMN topic TEXT")   # 006 题级 topic（db.py 同款）
     kb.execute("INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, "
@@ -252,6 +257,33 @@ def test_g6_skip_and_pass_and_fail(mini_env):
     assert g3["state"] == "FAIL"
     assert g3["detail"]["ok_rate"] == 0.5          # 1/2 合格 < 0.95
     assert any(f.get("kind") == "schema_ok_rate" for f in g3["fails"])
+
+
+def test_g6_extended_dims_coverage_and_validation(mini_env):
+    """T21：position/quality/canonical_q 有值时校验枚举与长度；覆盖率进 detail，不误伤历史行。"""
+    kb = mini_env["kb"]
+    for qid in range(1, 21):
+        kb.execute(
+            "INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, position, quality, "
+            "canonical_q, tag_norm_hits, provider, model, redacted, latency_ms, tokens, labeled_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (qid, "JVM", "八股", 3, '["类加载"]', '["后端"]', '["重复"]',
+             "JVM 类加载过程是什么", 1 if qid <= 5 else 0, "p", "m", 0, 1, 1, "now"))
+    kb.commit()
+    g = vl.g6_label(kb)
+    assert g["state"] == "PASS"
+    cov = g["detail"]["coverage"]
+    assert cov["canonical_q"] == 1.0 and cov["position"] == 1.0 and cov["quality"] == 1.0
+    assert g["detail"]["tag_norm_hits"] == 5
+
+    # 2/20 违法 → ok_rate 0.9 < 0.95 FAIL，且 bad_fields 标明具体维度
+    kb.execute("UPDATE labels_staging SET position='[\"火星\"]' WHERE qid=1")
+    kb.execute("UPDATE labels_staging SET canonical_q=? WHERE qid=2", ("长" * 70,))
+    kb.commit()
+    g2 = vl.g6_label(kb)
+    assert g2["state"] == "FAIL"
+    fields = {f for row in g2["fails"] if "bad_fields" in row for f in row["bad_fields"]}
+    assert {"position", "canonical_q"} <= fields
 
 
 def test_g6_first_batch_no_drift_warn(mini_env, monkeypatch):
