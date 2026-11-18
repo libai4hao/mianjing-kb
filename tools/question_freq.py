@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import csv
 import hashlib
 import os
@@ -22,6 +23,7 @@ import re
 import sys
 import zipfile
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -77,17 +79,49 @@ def text_of_docx(path: Path) -> str:
 _WORD = None
 
 
+def _word_app():
+    """Word COM 会话（懒建、复用）。用 DispatchEx 起独立实例，不接管用户已打开的 Word。"""
+    global _WORD
+    if _WORD is None:
+        import win32com.client as win32
+        app = win32.DispatchEx("Word.Application")
+        app.Visible = False
+        _WORD = app
+    return _WORD
+
+
+def close_word() -> None:
+    """显式退出 Word COM（幂等）。批量流程结束必须调用——否则 WINWORD.EXE 残留
+    （2026-11-19 审核修复：此前全局单例从不 Quit，extract/cluster 各跑一次留一个宿主进程）。"""
+    global _WORD
+    app, _WORD = _WORD, None
+    if app is None:
+        return
+    try:
+        app.Quit()
+    except Exception:  # noqa: BLE001  已崩溃的 Word 不值得再抛一次
+        pass
+
+
+atexit.register(close_word)     # 兜底：正常退出没显式关也不残留
+
+
+@contextmanager
+def word_app():
+    """with 用法：块内可复用同一实例，退出即 Quit。供 extract / cluster 外层使用。"""
+    try:
+        yield _word_app()
+    finally:
+        close_word()
+
+
 def text_of_doc(path: Path) -> str:
     """老 .doc 只能靠 Word（本机 Office 12.0）。失败返回空串，由上层记 skipped。"""
-    global _WORD
     try:
-        import win32com.client as win32
+        __import__("win32com.client")      # 仅探依赖；实例统一由 _word_app 管理
     except ImportError:
         return ""
-    if _WORD is None:
-        _WORD = win32.Dispatch("Word.Application")
-        _WORD.Visible = False
-    d = _WORD.Documents.Open(str(path), ReadOnly=True)
+    d = _word_app().Documents.Open(str(path), ReadOnly=True)
     try:
         return d.Content.Text
     finally:

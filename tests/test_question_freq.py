@@ -19,7 +19,34 @@ def test_split_keeps_question_drops_answer():
     assert all("这段是答案不是题目" not in q for q in qs)
 
 
-def test_normalize_ignores_layout_noise():
+def test_close_word_quits_com_and_is_idempotent(monkeypatch):
+    """Word COM 全局单例必须显式 Quit——此前从不释放，extract/cluster 各跑一次留一只 WINWORD。"""
+    import question_freq as qf
+
+    class FakeApp:
+        def __init__(self):
+            self.quit_called = 0
+
+        def Quit(self):
+            self.quit_called += 1
+
+    app = FakeApp()
+    monkeypatch.setattr(qf, "_WORD", app)
+    qf.close_word()
+    assert app.quit_called == 1 and qf._WORD is None
+    qf.close_word()                     # 幂等：已关不再重复 Quit
+    assert app.quit_called == 1
+
+
+def test_close_word_noop_without_instance():
+    import question_freq as qf
+
+    qf._WORD = None
+    qf.close_word()                     # 没起过 Word 时是空操作，不抛异常
+    assert qf._WORD is None
+
+
+
     assert normalize("什么 是 JVM ？") == normalize("什么是JVM？")
     assert normalize("1、MySQL 索引：B+树") != normalize("B+树")
 

@@ -25,7 +25,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kb import config, db  # noqa: E402
-from question_freq import extract, normalize, simhash  # noqa: E402
+from question_freq import close_word, extract, normalize, simhash  # noqa: E402
 from chunker import chunk_v2  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
@@ -180,7 +180,7 @@ def main(argv=None) -> int:
     if args.limit:
         pool = pool[:args.limit]
     started = time.perf_counter()
-    n_docs = n_q = n_empty = n_err = n_del = n_reattached = 0
+    n_docs = n_q = n_empty = n_err = n_reattached = 0
     qtype: dict[str, int] = {}
     conf: dict[str, int] = {}
     for i, (doc_hash, p) in enumerate(pool):
@@ -201,6 +201,7 @@ def main(argv=None) -> int:
             n_reattached += store(conn, doc_hash, rows)
         if (i + 1) % 200 == 0:
             print(f"[prog] {i + 1}/{len(pool)} docs, {n_q} questions", file=sys.stderr)
+    close_word()        # Word COM 只在抽取阶段用；批次结束立刻释放，不带着宿主进程进落库/统计
     if not args.dry_run:
         n_purged = purge_orphans(conn, {k for k, _ in pool})
         n_lost = conn.execute("SELECT COUNT(*) FROM label_facts WHERE q_norm_hash NOT IN "

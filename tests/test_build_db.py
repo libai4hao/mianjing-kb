@@ -55,6 +55,46 @@ def test_query_fts_trigram(mini_db):
     assert demo_query(mini_db, "不存在的词", 5) == []
 
 
+def test_build_drops_stale_vec_table(tmp_path, monkeypatch):
+    """直跑 build_db 时旧 vec_questions 必须清掉——否则旧向量按 qid 贴到重建后的题上，
+    新题永远没有向量、检索静默少召回（2026-11-19 审核修复）。"""
+    from tools import build_db as bdb
+    from tools.kb import config, db as kbdb
+    corpus = tmp_path / "corpus"
+    build = corpus / "21-面经数据库" / "build"
+    build.mkdir(parents=True)
+    monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
+    monkeypatch.setattr(config, "BUILD_DIR", build)
+    monkeypatch.setattr(bdb, "MD_ROOT", corpus / "20-题库MD")      # 不存在 → 0 个 md 镜像
+
+    kb = kbdb.connect(build / "kb.sqlite")
+    kb.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+        "dir_path, status, batch_id, first_seen_at, last_seen_at) "
+        "VALUES ('h1', ?, '甲.pdf', '.pdf', 1, 'x/甲.pdf', '02', 'classified', 't', 'now', 'now')",
+        ("h1" + "0" * 48,))
+    kb.execute(
+        "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
+        "q_norm_hash, simhash, span_start, span_end, extracted_at) VALUES "
+        "(1, 'h1', 1, '什么是JVM？', '答案', '八股', 'high', '什么是jvm', 'x', 0, 0, 1, 'now')")
+    kb.commit()
+    kb.close()
+
+    out_db = build / "面经库.db"
+    con = sqlite3.connect(str(out_db))
+    con.execute("CREATE TABLE vec_questions(qid INTEGER PRIMARY KEY, embedding BLOB)")
+    con.execute("INSERT INTO vec_questions VALUES (1, x'00')")
+    con.commit()
+    con.close()
+
+    bdb.build(out_db=out_db)
+    con = sqlite3.connect(str(out_db))
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    con.close()
+    assert "vec_questions" not in tables
+    assert "questions" in tables and "doc_contents" in tables
+
+
 def test_mirror_topic_inheritance(tmp_path, monkeypatch):
     """G3/K12 修复：镜像题（无台账行）topic 落空串 → 继承链 源文档 topic → md_rel 目录段。"""
     from tools import build_db as bdb

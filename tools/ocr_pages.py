@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import queue
 import shutil
@@ -249,7 +250,10 @@ def run_batch(rels: list[str], out_root: Path, log_path: Path, dpi: int,
     t_start = time.perf_counter()
     done = 0
     total_pages_est = 0
-    with PaddleOCRJson() as engine:
+    with contextlib.ExitStack() as stack:
+        # ExitStack 登记：崩溃重启后新引擎同样在退出时被 close——直接用 with 的话，
+        # 块结束调的是"进入时那个对象"的 __exit__，重启出来的新进程会漏掉（2026-11-19 审核修复）
+        engine = stack.enter_context(PaddleOCRJson())
         for rel in rels:
             pdf = config.CORPUS_ROOT / rel
             tp = text_path_for(rel, out_root)
@@ -277,7 +281,7 @@ def run_batch(rels: list[str], out_root: Path, log_path: Path, dpi: int,
                         results = None
                         break
                     engine.__exit__(None, None, None)   # 引擎崩溃 → 重启一次
-                    engine = PaddleOCRJson().__enter__()
+                    engine = stack.enter_context(PaddleOCRJson())
             if results is None:
                 continue
             save_text(rel, results, out_root)

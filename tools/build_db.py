@@ -5,7 +5,9 @@
 - questions：13.5k 题块（q/a/qtype/conf/topic + q_norm_hash 供一题多源聚合）
 - doc_contents + docs_fts：20-题库MD 正文（trigram，中文子串检索免分词）
 - questions_fts：题干 + 答案[:8000]（trigram）
-- 向量列：sqlite-vec / embedding 属 P3（模型未装），本轮不建，表结构留 doc_hash/topic 可回填
+- vec_questions：向量表由 embed_questions 建（sqlite-vec）；本脚本重建时**连带 DROP**，
+  否则旧向量会按 qid 残留在新题表上（新题无向量、已删题留旧向量，检索静默少召回）。
+  直跑本脚本后需要 `python tools/embed_questions.py --reembed`（或直接走 refresh.py）。
 
 用法：
     python tools/build_db.py               # 全量重建（面经库.db，DROP+CREATE）
@@ -52,6 +54,8 @@ PRAGMA journal_mode=WAL;
 DROP TABLE IF EXISTS documents; DROP TABLE IF EXISTS questions;
 DROP TABLE IF EXISTS doc_contents;
 DROP TABLE IF EXISTS questions_fts; DROP TABLE IF EXISTS docs_fts;
+-- 向量表不在本脚本建，但不能留旧表：rowid=qid 与重建后的 questions 会错位（2026-11-19 审核修复）
+DROP TABLE IF EXISTS vec_questions;
 CREATE TABLE documents(
   doc_hash TEXT PRIMARY KEY, file_name TEXT, category TEXT, topic TEXT, sub_topic TEXT,
   collection TEXT, source_trust TEXT, dir_path TEXT,
@@ -75,7 +79,8 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
         "       dir_path, source_count, sources_json, note FROM source_documents "
         "WHERE status='classified'").fetchall()
     out.executemany(
-        "INSERT INTO documents VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO documents(doc_hash, file_name, category, topic, sub_topic, collection, "
+        "  source_trust, dir_path, source_count, sources_json, note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         [tuple(r) for r in docs])
     # ---- doc_contents：20-题库MD 正文（检索原文）——先于 questions 落库 ----
     # G3/K12 修复（docs/15，2026-11-17）：镜像题（doc_hash=sha256("md-mirror:"+rel)[:16]，
@@ -118,18 +123,19 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
         "       COALESCE(q.topic, sd.topic, ''), COALESCE(sd.category, '') "
         "FROM questions q LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash").fetchall()
     out.executemany(
-        "INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?)",
-        [(r[0], r[1], r[2], r[3], r[4][:8000], r[5], r[6], r[7],
+        "INSERT INTO questions(qid, doc_hash, seq, q_text, a_text, qtype, conf, "
+        "  q_norm_hash, topic, category) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        [(r[0], r[1], r[2], r[3], (r[4] or "")[:8000], r[5], r[6], r[7],
           r[8] or mirror_topic.get(r[1], ""), r[9] or mirror_cat.get(r[1], "")) for r in qs])
     out.executemany(
         "INSERT INTO questions_fts(rowid, q_text, a_text) VALUES(?,?,?)",
-        [(r[0], r[3], r[4][:8000]) for r in qs])
+        [(r[0], r[3], (r[4] or "")[:8000]) for r in qs])
     out.commit()
     n_doc = out.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
     n_q = out.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
     elapsed = round(time.perf_counter() - started, 1)
+    out.close()                     # 先关再量体积：WAL 未 checkpoint 时主文件会偏小
     size_mb = round(out_db.stat().st_size / 1e6, 1)
-    out.close()
     src.close()
     return {"documents": n_doc, "questions": n_q, "doc_contents": n_docs_content,
             "size_mb": size_mb, "elapsed_sec": elapsed, "db": str(out_db)}

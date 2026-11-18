@@ -31,6 +31,15 @@ OCR_TEXT = BUILD / "ocr_text"
 SUPERSEDE_PATTERNS = (re.compile(r"^v[12]\.0-JavaGuide"),)  # V1.1 已由上游替代，同系列旧版一并建议退役
 
 
+def dir_of(rel_posix: str) -> str:
+    """posix 相对路径 → 台账口径的 dir_path（posix 分隔符；根级件为空串）。
+
+    不能用 Path(...).parent：Windows 上它返回反斜杠，根级件返回 "."，
+    与台账（intake.dir_of 存 posix、根级空串）永远不相等（2026-11-19 审核修复）。
+    """
+    return rel_posix.rsplit("/", 1)[0] if "/" in rel_posix else ""
+
+
 def decide(row: dict, status: str | None, note: str, has_ocr: bool) -> str:
     if status == "superseded":
         return "superseded"
@@ -59,7 +68,7 @@ def main(argv=None) -> int:
     for r in rows:
         rel_posix = r["rel"].replace("\\", "/")
         name = Path(rel_posix).name
-        dir_path = str(Path(rel_posix).parent)
+        dir_path = dir_of(rel_posix)
         # 被隔离/移动过的源行 dir_path 已改成 99 区路径，gate rel 是旧路径——
         # 按 file_name 取全部行，优先同 dir_path，其次 superseded > classified > rejected
         cands = conn.execute(

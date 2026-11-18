@@ -40,8 +40,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kb import config  # noqa: E402
-from question_freq import (DSU, extract, grams, hamming, jaccard, normalize,  # noqa: E402
-                           simhash, split_questions)
+from question_freq import (DSU, close_word, extract, grams, hamming, jaccard,  # noqa: E402
+                           normalize, simhash, split_questions)
 
 DOC_EXTS = {".pdf", ".docx", ".doc", ".md", ".txt"}
 
@@ -201,6 +201,7 @@ def main(argv=None) -> int:
     print(f"[pool] 库内 {len(pool_paths)} 件，99 区 {len(docs99)} 件", flush=True)
     pool_q = collect_questions(pool_paths, cache, stats, args.limit)
     q99 = collect_questions(docs99, cache, stats, args.limit)
+    close_word()        # 文本抽取阶段结束，Word COM 立即释放（2026-11-19 审核修复）
     cache.save()
 
     items = [(t, h, rel) for (t, q, rel), h in
