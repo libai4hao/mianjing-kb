@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from tools.search import has_vec_table, hybrid_search, keyword_search, rag_contexts, rrf_fuse
+from mianjing_kb.search import has_vec_table, hybrid_search, keyword_search, rag_contexts, rrf_fuse
 
 MIRROR_REL = "题库/综合/手写题.md"
 MIRROR_HASH = __import__("hashlib").sha256(("md-mirror:" + MIRROR_REL).encode()).hexdigest()[:16]

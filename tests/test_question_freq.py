@@ -21,7 +21,7 @@ def test_split_keeps_question_drops_answer():
 
 def test_close_word_quits_com_and_is_idempotent(monkeypatch):
     """Word COM 全局单例必须显式 Quit——此前从不释放，extract/cluster 各跑一次留一只 WINWORD。"""
-    import question_freq as qf
+    from mianjing_kb import question_freq as qf
 
     class FakeApp:
         def __init__(self):
@@ -39,7 +39,7 @@ def test_close_word_quits_com_and_is_idempotent(monkeypatch):
 
 
 def test_close_word_noop_without_instance():
-    import question_freq as qf
+    from mianjing_kb import question_freq as qf
 
     qf._WORD = None
     qf.close_word()                     # 没起过 Word 时是空操作，不抛异常

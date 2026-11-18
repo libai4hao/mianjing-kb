@@ -11,7 +11,7 @@
 
 ```powershell
 python -m pip install -r requirements.txt      # PyYAML / pymupdf / fastembed / sqlite-vec / pywin32(仅 Windows)
-python -m pip install -e .                    # 装出 `kb` 命令入口（等价于 python tools/<step>.py）
+python -m pip install -e .                    # 装出 `kb` 命令入口（等价于 python mianjing_kb/<step>.py）
 ```
 
 Python ≥ 3.11。OCR 不是 pip 包：需另装 [PaddleOCR-json](https://github.com/hiroi-sora/PaddleOCR-json)

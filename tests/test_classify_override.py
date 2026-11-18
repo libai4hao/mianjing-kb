@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from tools.kb import config
-from tools.classify import Rules
+from mianjing_kb.kb import config
+from mianjing_kb.classify import Rules
 
 
 @pytest.fixture()

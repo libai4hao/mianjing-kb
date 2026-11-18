@@ -1,13 +1,8 @@
 # -*- coding: utf-8 -*-
 """llm_client 离线测试：配置路由 / 缺 key 指引 / 重试退避 / JSON 宽松解析 / 脱敏。"""
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from llm_client import (ConfigError, chat, chat_json, redact,  # noqa: E402
+from mianjing_kb.llm_client import (ConfigError, chat, chat_json, redact,  # noqa: E402
                         resolve_config)
 
 
@@ -155,7 +150,7 @@ def _fake_post_factory(script):
 
 
 def test_chat_retries_on_529_then_succeeds(monkeypatch):
-    import llm_client as lc
+    from mianjing_kb import llm_client as lc
     fake, calls = _fake_post_factory([
         (429, {"error": "rate"}),
         (503, {"error": "unavailable"}),
@@ -169,7 +164,7 @@ def test_chat_retries_on_529_then_succeeds(monkeypatch):
 
 def test_chat_returns_split_token_counts(monkeypatch):
     """F5/bug4：chat 返回 prompt/completion 拆分计数（tokens 保留合计，向后兼容）。"""
-    import llm_client as lc
+    from mianjing_kb import llm_client as lc
     fake, _ = _fake_post_factory([
         (200, {"choices": [{"message": {"content": "好"}}],
                "usage": {"prompt_tokens": 420, "completion_tokens": 40}}),
@@ -182,7 +177,7 @@ def test_chat_returns_split_token_counts(monkeypatch):
 
 
 def test_chat_fast_fail_on_401(monkeypatch):
-    import llm_client as lc
+    from mianjing_kb import llm_client as lc
     fake, calls = _fake_post_factory([(401, {"error": "bad key"})])
     monkeypatch.setattr(lc, "_post", fake)
     cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
@@ -192,7 +187,7 @@ def test_chat_fast_fail_on_401(monkeypatch):
 
 
 def test_chat_json_loose_parse_and_retry_hint(monkeypatch):
-    import llm_client as lc
+    from mianjing_kb import llm_client as lc
     fake, calls = _fake_post_factory([
         (200, {"choices": [{"message": {"content": "废话前缀 {\"a\": 1} 尾巴"}}]}),
     ])
@@ -204,7 +199,7 @@ def test_chat_json_loose_parse_and_retry_hint(monkeypatch):
 
 
 def test_chat_json_parse_fail_returns_none(monkeypatch):
-    import llm_client as lc
+    from mianjing_kb import llm_client as lc
     fake, _ = _fake_post_factory([(200, {"choices": [{"message": {"content": "完全不是JSON"}}]})])
     monkeypatch.setattr(lc, "_post", fake)
     cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
@@ -228,7 +223,7 @@ def test_num_ctx_invalid_raises_config_error():
 
 def test_num_ctx_only_passed_for_local(monkeypatch):
     """options 是 Ollama 原生字段：online 端点带上去可能直接 400 → 只对 local 透传。"""
-    import llm_client as lc
+    from mianjing_kb import llm_client as lc
     seen = []
 
     def fake(cfg, payload):
@@ -246,7 +241,7 @@ def test_num_ctx_only_passed_for_local(monkeypatch):
 
 def test_no_sleep_after_final_attempt(monkeypatch):
     """末次失败后不再空等退避：retries=2 只该睡 1 次。"""
-    import llm_client as lc
+    from mianjing_kb import llm_client as lc
     monkeypatch.setattr(lc, "_post", lambda cfg, payload: (0, {"error": "boom"}))
     sleeps: list[float] = []
     monkeypatch.setattr(lc.time, "sleep", lambda s: sleeps.append(s))
@@ -257,7 +252,7 @@ def test_no_sleep_after_final_attempt(monkeypatch):
 
 def test_chat_payload_num_ctx_passthrough(monkeypatch):
     """num_ctx 设置时 payload 带 options.num_ctx；None 时不带 options 键。"""
-    import llm_client as lc
+    from mianjing_kb import llm_client as lc
     seen = []
 
     def fake_post(cfg, payload):

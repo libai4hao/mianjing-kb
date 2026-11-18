@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from tools import extract
-from tools.kb import config
+from mianjing_kb import extract
+from mianjing_kb.kb import config
 
 
 @pytest.fixture()
@@ -19,7 +19,7 @@ def tmp_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
     monkeypatch.setattr(config, "QUESTION_MD_DIR", corpus / "20-题库MD")
     (corpus / "20-题库MD").mkdir()
-    from tools.kb import db as kbdb
+    from mianjing_kb.kb import db as kbdb
     conn = kbdb.connect(build / "kb.sqlite")   # 完整迁移（001-007，与生产 connect 同路径）
     yield corpus, conn
     conn.close()

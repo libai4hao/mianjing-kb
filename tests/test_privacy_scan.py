@@ -1,12 +1,7 @@
 # -*- coding: utf-8 -*-
 """privacy_scan 规则与豁免标注的单元测试。"""
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import privacy_scan as ps  # noqa: E402
+from mianjing_kb import privacy_scan as ps  # noqa: E402
 
 
 def _hits(tmp_path, monkeypatch, rel, text):

@@ -4,8 +4,8 @@ import sqlite3
 
 import pytest
 
-from tools import review_cli
-from tools.kb import config
+from mianjing_kb import review_cli
+from mianjing_kb.kb import config
 
 
 @pytest.fixture()

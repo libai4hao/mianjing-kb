@@ -3,11 +3,8 @@
 
 与 test_*.py 里的大量纯函数用例互补：这里真的起子进程、真的建库、真的跑门禁。
 """
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools import demo  # noqa: E402
+from mianjing_kb import demo  # noqa: E402
 
 
 def test_demo_pipeline_end_to_end(tmp_path):

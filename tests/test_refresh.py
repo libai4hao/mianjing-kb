@@ -3,14 +3,11 @@
 import hashlib
 import os
 import sqlite3
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools import refresh as rf  # noqa: E402
-from tools.kb import config, db as kbdb  # noqa: E402
+from mianjing_kb import refresh as rf  # noqa: E402
+from mianjing_kb.kb import config, db as kbdb  # noqa: E402
 
 REAL_META = config.META_DIR
 H1 = "a" * 16
@@ -281,7 +278,7 @@ def test_refuses_when_kb_lock_held_by_other_writer(mini_env, monkeypatch, capsys
 
     否则 refresh 在切换窗口内别人往线上库写的行会被覆盖掉。
     """
-    from tools.kb import wlock
+    from mianjing_kb.kb import wlock
     monkeypatch.setattr(rf, "KB_LOCK_WAIT_SEC", 0)
     with wlock.write_lock("kb", tool="intake", build_dir=mini_env["build"]):
         assert rf.main([]) == 2

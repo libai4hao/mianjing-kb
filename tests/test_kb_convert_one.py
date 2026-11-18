@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.kb import convert_one as cv
+from mianjing_kb.kb import convert_one as cv
 
 DOC = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -67,7 +67,7 @@ def test_cli_converts_txt_without_corpus_side_tools(tmp_path, monkeypatch):
 
 def test_reconvert_prefers_repo_converter(monkeypatch):
     """reconvert 的 loader 必须解析到仓内版本（语料侧不存在也不影响）。"""
-    import reconvert as rc
+    from mianjing_kb import reconvert as rc
     monkeypatch.setattr(rc.config, "CORPUS_ROOT", Path("<CORPUS_ROOT>"))
     assert rc._load_convert_one() is cv
     assert rc._converter_source(cv) == "repo"

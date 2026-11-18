@@ -2,13 +2,9 @@
 """P2-④ build_db 测试：stem 剥壳 + 查询路由（LIKE 兜底 / FTS trigram）+ 镜像题 topic 继承链。"""
 import hashlib
 import sqlite3
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.build_db import _base_stem, demo_query  # noqa: E402
+from mianjing_kb.build_db import _base_stem, demo_query  # noqa: E402
 
 
 def test_base_stem():
@@ -58,14 +54,14 @@ def test_query_fts_trigram(mini_db):
 def test_build_drops_stale_vec_table(tmp_path, monkeypatch):
     """直跑 build_db 时旧 vec_questions 必须清掉——否则旧向量按 qid 贴到重建后的题上，
     新题永远没有向量、检索静默少召回（2026-11-19 审核修复）。"""
-    from tools import build_db as bdb
-    from tools.kb import config, db as kbdb
+    from mianjing_kb import build_db as bdb
+    from mianjing_kb.kb import config, db as kbdb
     corpus = tmp_path / "corpus"
     build = corpus / "21-面经数据库" / "build"
     build.mkdir(parents=True)
     monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
     monkeypatch.setattr(config, "BUILD_DIR", build)
-    monkeypatch.setattr(bdb, "MD_ROOT", corpus / "20-题库MD")      # 不存在 → 0 个 md 镜像
+    monkeypatch.setattr(config, "CORPUS_ROOT", corpus)      # 不存在 → 0 个 md 镜像
 
     kb = kbdb.connect(build / "kb.sqlite")
     kb.execute(
@@ -97,8 +93,8 @@ def test_build_drops_stale_vec_table(tmp_path, monkeypatch):
 
 def test_mirror_topic_inheritance(tmp_path, monkeypatch):
     """G3/K12 修复：镜像题（无台账行）topic 落空串 → 继承链 源文档 topic → md_rel 目录段。"""
-    from tools import build_db as bdb
-    from tools.kb import config, db as kbdb
+    from mianjing_kb import build_db as bdb
+    from mianjing_kb.kb import config, db as kbdb
     corpus = tmp_path / "corpus"
     build = corpus / "21-面经数据库" / "build"
     md_dir = corpus / "20-题库MD" / "题库" / "JVM"
@@ -106,7 +102,7 @@ def test_mirror_topic_inheritance(tmp_path, monkeypatch):
     md_dir.mkdir(parents=True)
     monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
     monkeypatch.setattr(config, "BUILD_DIR", build)
-    monkeypatch.setattr(bdb, "MD_ROOT", corpus / "20-题库MD")
+    monkeypatch.setattr(config, "CORPUS_ROOT", corpus)
 
     mirror_rel = "题库/JVM/甲.md"
     mirror_h = hashlib.sha256(("md-mirror:" + mirror_rel).encode()).hexdigest()[:16]
@@ -141,8 +137,8 @@ def test_mirror_topic_inheritance(tmp_path, monkeypatch):
 
 def test_two_segment_path_topic_guess_empty(tmp_path, monkeypatch):
     """F10：两段 md 路径（<category>/<stem>.md）没有 topic 段——不得把 category 误当 topic。"""
-    from tools import build_db as bdb
-    from tools.kb import config, db as kbdb
+    from mianjing_kb import build_db as bdb
+    from mianjing_kb.kb import config, db as kbdb
     corpus = tmp_path / "corpus"
     build = corpus / "21-面经数据库" / "build"
     md_dir = corpus / "20-题库MD" / "JVM"        # rel 只有两段：JVM/甲.md
@@ -150,7 +146,7 @@ def test_two_segment_path_topic_guess_empty(tmp_path, monkeypatch):
     md_dir.mkdir(parents=True)
     monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
     monkeypatch.setattr(config, "BUILD_DIR", build)
-    monkeypatch.setattr(bdb, "MD_ROOT", corpus / "20-题库MD")
+    monkeypatch.setattr(config, "CORPUS_ROOT", corpus)
 
     mirror_rel = "JVM/甲.md"
     mirror_h = hashlib.sha256(("md-mirror:" + mirror_rel).encode()).hexdigest()[:16]

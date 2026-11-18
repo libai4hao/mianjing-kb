@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """report（P1-4 频次报告）回归测试：build_clusters 纯函数路径，不碰真实库。"""
 from question_freq import simhash
-from tools.report import build_clusters
+from mianjing_kb.report import build_clusters
 
 
 def _q(norm, doc="d1", qtype="八股"):

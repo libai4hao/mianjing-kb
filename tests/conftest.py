@@ -1,16 +1,9 @@
 # -*- coding: utf-8 -*-
-"""测试夹具：把仓库根加进 sys.path，便于 import tools.* 与 kb.*。"""
-import sys
-from pathlib import Path
+"""测试夹具：仓库根由 `pyproject.toml` 的 `pythonpath = ["."]` 提供，无需再插 sys.path。
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-if str(ROOT / "tools") not in sys.path:
-    sys.path.insert(0, str(ROOT / "tools"))
-
+唯一要做的是把 "kb" 别名绑到 `mianjing_kb.kb`（见该包 __init__.py），
+保证历史上 `from kb import ...` 的写法与 `from mianjing_kb.kb import ...` 是同一实例。
+"""
 import importlib
 
-# 先于任何工具模块加载，把 "kb" 别名绑到 tools.kb（见 kb/__init__.py）；
-# 用 importlib 而非裸 import，避免 pyflakes 把"仅副作用导入"报成未使用。
-importlib.import_module("tools.kb")
+importlib.import_module("mianjing_kb.kb")

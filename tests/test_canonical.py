@@ -1,14 +1,10 @@
 # -*- coding: utf-8 -*-
 """canonical 落库测试：簇→两表映射、topic 多数票、witness、幂等重建、--dry-run。"""
 import sqlite3
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools import canonical as cn  # noqa: E402
-from tools.kb import config  # noqa: E402
+from mianjing_kb import canonical as cn  # noqa: E402
+from mianjing_kb.kb import config  # noqa: E402
 
 REAL_META = config.META_DIR
 

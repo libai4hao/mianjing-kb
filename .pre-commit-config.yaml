@@ -4,13 +4,13 @@ repos:
     hooks:
       - id: privacy-scan
         name: privacy scan (staged)
-        entry: python tools/privacy_scan.py --staged
+        entry: python -m mianjing_kb.privacy_scan --staged
         language: system
         pass_filenames: false
         always_run: true
       - id: ruff
         name: ruff check
-        entry: python -m ruff check tools tests
+        entry: python -m ruff check mianjing_kb tests
         language: system
         pass_filenames: false
         types_or: [python]

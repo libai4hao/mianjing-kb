@@ -14,8 +14,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tools"))
 
 
 # ---------------- backfill_convert ----------------
@@ -33,7 +31,7 @@ def test_backfill_stem_normalization():
 
 
 def test_backfill_target_md_paths():
-    import backfill_convert as bf
+    from mianjing_kb import backfill_convert as bf
     entry = {"title": "Java基础.pdf", "category": "题库", "topic": "综合"}
     p = bf._target_md(entry)
     assert p.parts[-3:] == ("题库", "综合", "Java基础.md")
@@ -77,7 +75,7 @@ def test_reconvert_import_does_not_shadow_repo_tools():
     # 且 build_db 仍解析到本仓库模块（有 build 函数）
     code = (
         "import sys; sys.path.insert(0, r'" + str(ROOT) + r"'); "
-        "sys.path.insert(0, r'" + str(ROOT / 'tools') + r"'); "
+        "sys.path.insert(0, r'" + str(ROOT / 'mianjing_kb') + r"'); "
         "import reconvert; "
         "assert '21-面经数据库\\\\tools' not in sys.path[0], sys.path[0]; "
         "import build_db; assert callable(getattr(build_db, 'build', None)), build_db.__file__"
@@ -87,7 +85,7 @@ def test_reconvert_import_does_not_shadow_repo_tools():
 
 
 def test_reconvert_losers_grouping(tmp_path, monkeypatch):
-    import reconvert as rc
+    from mianjing_kb import reconvert as rc
     log = [
         {"rel": "a/x.pdf", "category": "题库", "topic": "综合", "ok": True},
         {"rel": "b/x.pdf", "category": "题库", "topic": "综合", "ok": True},   # 同 stem 后者胜出
@@ -120,7 +118,7 @@ def test_purge_refuses_apply_without_yes(tmp_path, capsys):
     (victim / "a.pdf").write_bytes(b"x")
 
     db_path = tmp_path / "kb.sqlite"
-    conn = __import__("tools.kb.db", fromlist=["connect"]).connect(db_path)
+    conn = __import__("mianjing_kb.kb.db", fromlist=["connect"]).connect(db_path)
     conn.execute(
         "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path,"
         " dir_path, status, batch_id, first_seen_at, last_seen_at)"

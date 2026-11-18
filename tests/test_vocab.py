@@ -1,13 +1,9 @@
 # -*- coding: utf-8 -*-
 """vocab 封闭词表（批次三 R2）：yaml 三段并集 / 剔除未分类 / 兜底其他 / 缺失降级。"""
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.kb import config  # noqa: E402
-from tools.kb.vocab import OTHER_TOPIC, topic_vocab  # noqa: E402
+from mianjing_kb.kb import config  # noqa: E402
+from mianjing_kb.kb.vocab import OTHER_TOPIC, topic_vocab  # noqa: E402
 
 YAML = """
 version: 1

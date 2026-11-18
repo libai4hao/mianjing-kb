@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from tools import chunker
+from mianjing_kb import chunker
 
 FIX = Path(__file__).parent / "fixtures"
 CASES = sorted(FIX.glob("chunk_*.txt"))

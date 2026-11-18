@@ -9,16 +9,13 @@ from __future__ import annotations
 
 import csv
 import sqlite3
-import sys
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "tools"))
-sys.path.insert(0, str(REPO))
 
-import purge_origin as po           # noqa: E402
+from mianjing_kb import purge_origin as po           # noqa: E402
 from kb import config, db, events, hashing  # noqa: E402
 
 

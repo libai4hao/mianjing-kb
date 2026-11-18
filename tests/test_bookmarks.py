@@ -2,14 +2,11 @@
 """书签扫描（tools/bookmarks.py）：合并版源边界落库的回归用例。"""
 import json
 import sqlite3
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import pymupdf
 
-import bookmarks
+from mianjing_kb import bookmarks
 
 
 def _make_merged(path: Path, titles_pages: list[tuple[str, int]], total_pages: int):

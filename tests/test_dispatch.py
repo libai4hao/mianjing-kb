@@ -4,9 +4,9 @@ import csv
 import json
 import sqlite3
 
-from tools import dispatch
-from tools.dispatch import decide, dir_of
-from tools.kb import config
+from mianjing_kb import dispatch
+from mianjing_kb.dispatch import decide, dir_of
+from mianjing_kb.kb import config
 
 
 def _row(rel="12-综合题库/x.pdf", state="fail"):

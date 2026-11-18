@@ -10,13 +10,8 @@
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-
-import probe_provider as pp  # noqa: E402
+from mianjing_kb import probe_provider as pp  # noqa: E402
 
 
 # ---------- 1. payload 兼容性 ----------

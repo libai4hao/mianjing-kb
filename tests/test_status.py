@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from tools.kb import db, status
+from mianjing_kb.kb import db, status
 
 
 def _cols_sql(tmp_path):

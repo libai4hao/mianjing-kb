@@ -21,10 +21,10 @@ Set-Location -LiteralPath $repo
 ## 1. intake.py —— 登记 + 判重
 
 ```powershell
-& $py tools\intake.py --db $db                 # 全量登记语料根
-& $py tools\intake.py --db $db --dry-run       # 只统计（有库时也报真实重复数）
-& $py tools\intake.py --db $db --root "<DOWNLOAD_DIR>\面试资料"   # 语料树之外的目录
-& $py tools\intake.py --db $db --all-exts      # 连 png/xmind 也登记（默认只登记文档型）
+& $py mianjing_kb\\intake.py --db $db                 # 全量登记语料根
+& $py mianjing_kb\\intake.py --db $db --dry-run       # 只统计（有库时也报真实重复数）
+& $py mianjing_kb\\intake.py --db $db --root "<DOWNLOAD_DIR>\面试资料"   # 语料树之外的目录
+& $py mianjing_kb\\intake.py --db $db --all-exts      # 连 png/xmind 也登记（默认只登记文档型）
 ```
 
 **动作语义**（输出 JSON 的 `actions`）：
@@ -48,11 +48,11 @@ Set-Location -LiteralPath $repo
 ## 2. classify.py —— 先分类
 
 ```powershell
-& $py tools\classify.py --db $db                  # 只判 pending_classify
-& $py tools\classify.py --db $db --redo           # 改规则后重判（跳过 quarantined/absent/superseded）
-& $py tools\classify.py --db $db --stats          # 看分布
-& $py tools\classify.py --db $db --show 40        # 抽查前 40 条
-& $py tools\classify.py --db $db --dry-run        # 不写库，只看会怎么判
+& $py mianjing_kb\\classify.py --db $db                  # 只判 pending_classify
+& $py mianjing_kb\\classify.py --db $db --redo           # 改规则后重判（跳过 quarantined/absent/superseded）
+& $py mianjing_kb\\classify.py --db $db --stats          # 看分布
+& $py mianjing_kb\\classify.py --db $db --show 40        # 抽查前 40 条
+& $py mianjing_kb\\classify.py --db $db --dry-run        # 不写库，只看会怎么判
 ```
 
 判定链（`meta/folder_rules.yaml` + `meta/topic_rules.yaml` + `meta/overrides.json`）：
@@ -71,8 +71,8 @@ Set-Location -LiteralPath $repo
 ## 3. gate.py —— 文本质量门禁
 
 ```powershell
-& $py tools\gate.py --md-dir "<CORPUS_ROOT>\20-题库MD" --db $db --top 12
-& $py tools\gate.py --md-dir ... --no-db --out build\gate_report.json
+& $py mianjing_kb\\gate.py --md-dir "<CORPUS_ROOT>\20-题库MD" --db $db --top 12
+& $py mianjing_kb\\gate.py --md-dir ... --no-db --out build\gate_report.json
 ```
 
 判定顺序（乱码 → CJK → 内容量，因为字体编码损坏会同时拖垮三个指标）：
@@ -93,8 +93,8 @@ Nginx 开发手册 0.092、剑指Offer 0.062、大厂算法合集 0.135、数据
 ## 4. ocr_pages.py —— 页级 OCR
 
 ```powershell
-& $py tools\ocr_pages.py --smoke                                  # 引擎自检（实测 init 0.99 s）
-& $py tools\ocr_pages.py --pdf "x.pdf" --pages 1-3 --dpi 200      # 渲染 + OCR + 打印
+& $py mianjing_kb\\ocr_pages.py --smoke                                  # 引擎自检（实测 init 0.99 s）
+& $py mianjing_kb\\ocr_pages.py --pdf "x.pdf" --pages 1-3 --dpi 200      # 渲染 + OCR + 打印
 ```
 
 **硬约束**（踩过的坑）：
@@ -121,10 +121,10 @@ Nginx 开发手册 0.092、剑指Offer 0.062、大厂算法合集 0.135、数据
 清单字段：`doc_hash, file_name, parent_dir(父目录名), dir_path, ext, size_bytes, category, topic, collection, source_trust`。
 
 ```powershell
-& $py tools\ingest_queue.py --db $db --export "<CORPUS_ROOT>\21-面经数据库\build\ingest_list.csv"
-& $py tools\ingest_queue.py --db $db --stats
-& $py tools\ingest_queue.py --db $db --lookup "3afb55d83ce320e0"      # 按 hash
-& $py tools\ingest_queue.py --db $db --lookup "设计模式"                # 按文件名片段
+& $py mianjing_kb\\ingest_queue.py --db $db --export "<CORPUS_ROOT>\21-面经数据库\build\ingest_list.csv"
+& $py mianjing_kb\\ingest_queue.py --db $db --stats
+& $py mianjing_kb\\ingest_queue.py --db $db --lookup "3afb55d83ce320e0"      # 按 hash
+& $py mianjing_kb\\ingest_queue.py --db $db --lookup "设计模式"                # 按文件名片段
 ```
 
 当前基线：**475 行，hash 唯一 475**；父目录 top：`12-综合题库` 49、`高频面试题-笔记资料01-34` 39、
@@ -140,9 +140,9 @@ Nginx 开发手册 0.092、剑指Offer 0.062、大厂算法合集 0.135、数据
 唯一载体是 PDF TOC 的 L1 书签。删除 `99-重复文件待删` **之前必须先跑本脚本**（ADR D-16 / D-17）。
 
 ```powershell
-& $py tools\bookmarks.py --dry-run    # 先看统计
-& $py tools\bookmarks.py              # 增量：只补 source_count 为空的
-& $py tools\bookmarks.py --force      # 全部重扫（合并版重做过才需要）
+& $py mianjing_kb\\bookmarks.py --dry-run    # 先看统计
+& $py mianjing_kb\\bookmarks.py              # 增量：只补 source_count 为空的
+& $py mianjing_kb\\bookmarks.py --force      # 全部重扫（合并版重做过才需要）
 ```
 
 产出 `source_documents.source_count` 与 `sources_json`：
@@ -160,10 +160,10 @@ Mongo 4 段（p1–6, 7–10, 11–17, 18–23），与审核时的页数校验�
 
 ## 7. pipeline.py —— 批增一条命令
 ```powershell
-& $py tools\pipeline.py              # 处理 31-收件箱：去重登记 → 分类 → 清单
-& $py tools\pipeline.py --check      # 只预览，不写库（先用这个确认重不重）
-& $py tools\pipeline.py --root "<DOWNLOAD_DIR>\新面经"    # 任意目录
-& $py tools\pipeline.py --export "…\build\ingest_list.csv"
+& $py mianjing_kb\\pipeline.py              # 处理 31-收件箱：去重登记 → 分类 → 清单
+& $py mianjing_kb\\pipeline.py --check      # 只预览，不写库（先用这个确认重不重）
+& $py mianjing_kb\\pipeline.py --root "<DOWNLOAD_DIR>\新面经"    # 任意目录
+& $py mianjing_kb\\pipeline.py --export "…\build\ingest_list.csv"
 ```
 
 内部就是串 `intake.py --root <dir>` → `classify.py --status pending_classify` → `ingest_queue.py`。
@@ -195,16 +195,16 @@ root 落在语料根内时（如默认的 `31-收件箱`）仍写全 `31-收件�
 ## 7.5 doc_convert / purge_origin / question_freq —— 收尾三件
 `powershell
 # .doc → .docx（Word COM；拒收位里的 .doc 不转），转完原 .doc 记录标 superseded
-& $py tools\doc_convert.py                 # 先看多少件
-& $py tools\doc_convert.py --apply
-& $py tools\intake.py; & $py tools\classify.py    # 新 .docx 走正常登记+分类
+& $py mianjing_kb\\doc_convert.py                 # 先看多少件
+& $py mianjing_kb\\doc_convert.py --apply
+& $py mianjing_kb\\intake.py; & $py mianjing_kb\\classify.py    # 新 .docx 走正常登记+分类
 
 # 删导入源里的原件：hash 在库 + 状态已入库 + 保留副本存在且在语料根内 + 路径在 --roots 白名单
-& $py tools\purge_origin.py --roots "<RESOURCE_ROOT>\就业资料" "<DOC_ROOT>\待分类"
-& $py tools\purge_origin.py --roots … --apply --rmdirs     # 明细写 build\origin_deleted.csv
+& $py mianjing_kb\\purge_origin.py --roots "<RESOURCE_ROOT>\就业资料" "<DOC_ROOT>\待分类"
+& $py mianjing_kb\\purge_origin.py --roots … --apply --rmdirs     # 明细写 build\origin_deleted.csv
 
 # 同题频次：抽文本 → 按题号切题 → SimHash 候选 + Jaccard 复核 → 按"出现的文档数"排序
-& $py tools\question_freq.py --dirs "31-收件箱\面试题" "31-收件箱\笔试" `
+& $py mianjing_kb\\question_freq.py --dirs "31-收件箱\面试题" "31-收件箱\笔试" `
       --csv "…\build\question_freq.csv" --md "docs\07-题目频次报告.md"
 `
 

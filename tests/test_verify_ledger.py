@@ -7,14 +7,10 @@ G3 空串口径、G4 vec 缺失 WARN / 不一致 FAIL、G5 台账-磁盘、exit 
 import hashlib
 import json
 import sqlite3
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools import verify_ledger as vl  # noqa: E402
-from tools.kb import config, db  # noqa: E402
+from mianjing_kb import verify_ledger as vl  # noqa: E402
+from mianjing_kb.kb import config, db  # noqa: E402
 
 REAL_META = config.META_DIR  # patch 前抓真 schema 路径
 
@@ -322,8 +318,8 @@ def test_g7_docs_warns(tmp_path):
         "- docs/  方案与决策（00 决策记录 ~ 16 复核）\n\n"
         "## 尚未实现\n\n- `verify_ledger.py`（G1-G7 门禁）未落地；\n\n## 下一节\n",
         encoding="utf-8")
-    (tmp_path / "tools").mkdir()
-    (tmp_path / "tools" / "verify_ledger.py").write_text("", encoding="utf-8")
+    (tmp_path / "mianjing_kb").mkdir()
+    (tmp_path / "mianjing_kb" / "verify_ledger.py").write_text("", encoding="utf-8")
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "17-审核.md").write_text("x", encoding="utf-8")
     g = vl.g7_docs(tmp_path, actual_tests=99)
@@ -335,7 +331,7 @@ def test_g7_docs_warns(tmp_path):
 # ---- 批次二 G3：G6b 金标抽检门禁（docs/15 G6 规格"抽检准确率 ≥0.8"自动化）----
 
 def _golden_db(tmp_path):
-    from tools.kb import db as kbdb
+    from mianjing_kb.kb import db as kbdb
     return kbdb.connect(tmp_path / "kb.sqlite")     # 全迁移：labels_staging + golden_labels
 
 
@@ -471,7 +467,7 @@ def test_audit_converted_cli_exit_code_only_counts_real_targets(tmp_path, monkey
     monkeypatch.setattr(config, "BUILD_DIR", tmp_path)
     monkeypatch.setattr(config, "CORPUS_ROOT", tmp_path)
     monkeypatch.setattr(config, "QUESTION_MD_DIR", tmp_path)
-    import verify_ledger as vl
+    from mianjing_kb import verify_ledger as vl
     assert vl.main(["--audit-converted"]) == 1          # b.doc 写了目标却解析不到
     out = _json.loads(capsys.readouterr().out)
     assert out["superseded_rows"] == 2

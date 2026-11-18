@@ -7,13 +7,10 @@
 - none：题干不同/无题 → 保留
 """
 import json
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools import cluster as cl  # noqa: E402
+from mianjing_kb import cluster as cl  # noqa: E402
 
 Q = "HashMap 在 JDK8 里是怎么实现的"
 ANS_SAME = ("数组加链表加红黑树，扩容时按两倍容量迁移，链表长度超过八转红黑树，"

@@ -11,11 +11,9 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "tools"))
-sys.path.insert(0, str(REPO))
 
-import doc_convert as dc  # noqa: E402
-import reconvert as rc    # noqa: E402
+from mianjing_kb import doc_convert as dc  # noqa: E402
+from mianjing_kb import reconvert as rc    # noqa: E402
 from kb import db, events, hashing  # noqa: E402
 
 

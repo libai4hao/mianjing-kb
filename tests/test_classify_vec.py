@@ -1,15 +1,11 @@
 # -*- coding: utf-8 -*-
 """classify --neighbor --vec 测试：语义投票应用/拒绝/落库（embeddings 用假向量离线跑）。"""
 import sqlite3
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import embed_questions  # noqa: E402
-from tools import classify as cl  # noqa: E402
-from tools.kb import config  # noqa: E402
+from mianjing_kb import embed_questions  # noqa: E402
+from mianjing_kb import classify as cl  # noqa: E402
+from mianjing_kb.kb import config  # noqa: E402
 
 REAL_META = config.META_DIR
 

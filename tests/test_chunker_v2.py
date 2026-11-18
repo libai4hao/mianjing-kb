@@ -11,7 +11,7 @@
 ⑦ 致谢/招聘广告短行 → leftovers(致谢/广告)，不产题
 ⑧ span 不越界不重叠，q 必须能在原文 span 首段回指
 """
-from tools import chunker
+from mianjing_kb import chunker
 
 DOC = """# 面试题整理
 

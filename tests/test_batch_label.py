@@ -1,15 +1,11 @@
 # -*- coding: utf-8 -*-
 """batch_label 离线测试：目标筛选 / 打标落 staging / 断点续跑 / 预算停 / 抽查 / G6 merge。"""
 import json
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import batch_label as bl  # noqa: E402
-from tools.kb import config  # noqa: E402
+from mianjing_kb import batch_label as bl  # noqa: E402
+from mianjing_kb.kb import config  # noqa: E402
 
 REAL_META = config.META_DIR
 
@@ -68,7 +64,7 @@ def mini_db(tmp_path, monkeypatch):
     build.mkdir(parents=True)
     monkeypatch.setattr(config, "BUILD_DIR", build)
     monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
-    from tools.kb import db as kbdb
+    from mianjing_kb.kb import db as kbdb
     conn = kbdb.connect(build / "kb.sqlite")      # 完整迁移（005 staging + 006 题级 topic 列）
     for qid, q_text in [(1, "什么是 HashMap？"), (2, "什么是 Redis？"),
                         (3, "手写 LRU？"), (4, "已有主题的题")]:
@@ -278,7 +274,7 @@ def test_merge_next_step_hint(mini_db, monkeypatch, tmp_path):
     monkeypatch.setattr(bl, "label_one", _fake_label())
     bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
     out = bl.merge(mini_db)
-    assert out["ok"] and "refresh.py" in out["next_step"]
+    assert out["ok"] and "mianjing_kb.refresh" in out["next_step"]
 
 
 def test_redact_integration_in_label_one(monkeypatch):

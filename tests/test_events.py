@@ -1,5 +1,5 @@
 """note 结构化事件（T12）：旧 note 解析、事件幂等、读方优先事件、历史回填。"""
-from tools.kb import db, events, status
+from mianjing_kb.kb import db, events, status
 
 DOC = "abc123abc123abcd"
 

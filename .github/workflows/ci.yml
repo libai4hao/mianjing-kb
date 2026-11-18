@@ -33,13 +33,13 @@ jobs:
           python -m pip install -e . --no-deps
 
       - name: ruff
-        run: python -m ruff check tools tests
+        run: python -m ruff check mianjing_kb tests
 
       - name: pytest
         run: python -m pytest tests -q
 
       - name: 隐私门禁（已跟踪文件）
-        run: python tools/privacy_scan.py
+        run: python -m mianjing_kb.privacy_scan
 
       - name: 端到端 demo（合成语料，不碰生产库）
-        run: python tools/demo.py --work "${{ runner.temp }}\kb-demo"
+        run: python -m mianjing_kb.demo --work "${{ runner.temp }}\kb-demo"

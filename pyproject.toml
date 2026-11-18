@@ -21,15 +21,15 @@ dependencies = [
 dev = ["pytest>=8", "pyflakes>=3", "ruff>=0.6"]
 
 [project.scripts]
-kb = "tools.cli:main"
+kb = "mianjing_kb.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["tools*"]
-namespaces = true
+include = ["mianjing_kb*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 110

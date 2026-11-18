@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from tools.kb import wlock
+from mianjing_kb.kb import wlock
 
 
 def test_lock_roundtrip(tmp_path):

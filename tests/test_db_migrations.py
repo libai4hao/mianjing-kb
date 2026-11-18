@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """db.migrate 回归：007 label_facts 打标事实源 + staging/questions 伴随列（B1 修复）。"""
-from tools.kb import db
+from mianjing_kb.kb import db
 
 
 def _cols(conn, table: str) -> set[str]:

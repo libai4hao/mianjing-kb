@@ -10,7 +10,7 @@
 """
 import pytest
 
-from tools import classify
+from mianjing_kb import classify
 
 
 def test_inject_status_rejected():

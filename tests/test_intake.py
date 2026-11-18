@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import intake
+from mianjing_kb import intake
 from intake import main
 from kb import wlock
 
