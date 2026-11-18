@@ -13,3 +13,6 @@ build/
 *.db
 *.log
 *.json.tmp
+
+# SDD 过程台账（本地留挡，不入库）
+.superpowers/
