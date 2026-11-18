@@ -171,7 +171,16 @@ def sample_staging(conn, n: int) -> list[dict]:
 
 
 def merge(conn) -> dict:
-    """G6 门禁复核 → FAIL 拒绝；PASS/WARN 放行（WARN=软门禁，提示人工抽查）。"""
+    """G6 门禁复核 → FAIL 拒绝；PASS/WARN 放行（WARN=软门禁，提示人工抽查）。
+
+    2026-11-19 审核修复（docs/项目审核报告/修复方案-2026-11-19.md）：
+    - F6 孤儿行校验：qid 已失效或题干已变（q_norm_hash 不匹配）的 staging 行拒绝
+      merge——防跨 extract 残留行命中 0 行仍被静默清掉；历史行 q_norm_hash 为
+      NULL 放行（qid 对得上即可，向后兼容）。
+    - F9 四列落库：topic/qtype/difficulty/tags；F3 空 topic/qtype 不覆盖已有值。
+    - F1 打标事实落档 label_facts（同事务，按 q_norm_hash 跨重切存活，007）。
+    - F4 next_step：merge 只写 kb.sqlite，检索库 topic 是 build_db 快照须 refresh。
+    """
     from verify_ledger import g6_label
     g6 = g6_label(conn)
     if g6["state"] == "FAIL":
@@ -179,13 +188,34 @@ def merge(conn) -> dict:
                 "note": "G6 schema 合格率未过，staging 保留未 merge"}
     if g6["state"] == "SKIP":
         return {"ok": False, "gate": "SKIP", "note": "labels_staging 为空，无可 merge"}
+    orphans = conn.execute(
+        "SELECT COUNT(*) FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
+        "WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash)"
+    ).fetchone()[0]
+    if orphans:
+        return {"ok": False, "gate": g6["state"], "orphans": orphans,
+                "note": "staging 存在跨 extract 残留行（qid 已失效/题干已变），拒绝 merge——"
+                        "重跑打标或人工清理 staging"}
     n = conn.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0]
-    conn.execute("UPDATE questions SET topic=(SELECT topic FROM labels_staging "
-                 "WHERE labels_staging.qid=questions.qid) "
-                 "WHERE qid IN (SELECT qid FROM labels_staging)")
+    conn.execute(
+        "UPDATE questions SET "
+        " topic=COALESCE(NULLIF((SELECT s.topic FROM labels_staging s "
+        "                        WHERE s.qid=questions.qid), ''), topic), "
+        " qtype=COALESCE((SELECT s.qtype FROM labels_staging s WHERE s.qid=questions.qid), qtype), "
+        " difficulty=(SELECT s.difficulty FROM labels_staging s WHERE s.qid=questions.qid), "
+        " tags=(SELECT s.tags FROM labels_staging s WHERE s.qid=questions.qid) "
+        "WHERE qid IN (SELECT qid FROM labels_staging)")
+    conn.execute(
+        "INSERT OR REPLACE INTO label_facts "
+        "SELECT q.q_norm_hash, s.topic, s.qtype, s.difficulty, s.tags, ? "
+        "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
+        "WHERE COALESCE(s.topic, '') != ''",
+        (datetime.now().strftime(NOW_FMT),))
     conn.execute("DELETE FROM labels_staging")
     conn.commit()
-    out = {"ok": True, "merged": n, "gate": g6["state"]}
+    out = {"ok": True, "merged": n, "gate": g6["state"],
+           "next_step": "python tools/refresh.py --reembed"
+                        "  # 检索库 topic 是快照，merge 只写 kb.sqlite（B2）"}
     if g6["state"] == "WARN":
         out["note"] = "topic 漂移 WARN（软门禁不阻断）——建议 --sample 50 人工抽查确认"
     return out

@@ -31,6 +31,14 @@ def _fake_label(obj=None, fail_qids=()):
     return fake
 
 
+def _add_question(conn, qid: int, q_text: str, topic: str = ""):
+    conn.execute("INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, "
+                 "q_norm, q_norm_hash, simhash, span_start, span_end, topic, extracted_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (qid, f"h{qid}", qid, q_text, "答案内容" * 20, "八股", "high",
+                  f"norm{qid}", f"hash{qid}", 0, 0, 1, topic, "now"))
+
+
 @pytest.fixture()
 def mini_db(tmp_path, monkeypatch):
     build = tmp_path / "build"
@@ -39,15 +47,9 @@ def mini_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
     from tools.kb import db as kbdb
     conn = kbdb.connect(build / "kb.sqlite")      # 完整迁移（005 staging + 006 题级 topic 列）
-    rows = [(1, "什么是 HashMap？", ""), (2, "什么是 Redis？", ""),
-            (3, "手写 LRU？", ""), (4, "已有主题的题", "")]
-    for qid, q_text, _ in rows:
-        topic = "MySQL" if qid == 4 else ""
-        conn.execute("INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, "
-                     "q_norm, q_norm_hash, simhash, span_start, span_end, topic, extracted_at) "
-                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                     (qid, f"h{qid}", qid, q_text, "答案内容" * 20, "八股", "high",
-                      q_text, "x", 0, 0, 1, topic, "now"))
+    for qid, q_text in [(1, "什么是 HashMap？"), (2, "什么是 Redis？"),
+                        (3, "手写 LRU？"), (4, "已有主题的题")]:
+        _add_question(conn, qid, q_text, "MySQL" if qid == 4 else "")
     conn.commit()
     yield conn
     conn.close()
@@ -133,6 +135,68 @@ def test_staging_carries_q_norm_hash(mini_db, monkeypatch, tmp_path):
         "SELECT s.q_norm_hash AS sh, q.q_norm_hash AS qh FROM labels_staging s "
         "JOIN questions q ON q.qid=s.qid").fetchall()
     assert rows and all(r["sh"] == r["qh"] and r["sh"] for r in rows)
+
+
+def test_merge_writes_four_columns_and_facts(mini_db, monkeypatch, tmp_path):
+    """F9+F1：merge 四列（topic/qtype/difficulty/tags）落库 + label_facts 按 hash 落档。"""
+    monkeypatch.setattr(bl, "label_one", _fake_label(
+        {"topic": "Redis", "qtype": "八股", "difficulty": 4, "tags": ["缓存"]}))
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    out = bl.merge(mini_db)
+    assert out["ok"]
+    row = mini_db.execute("SELECT topic, qtype, difficulty, tags FROM questions WHERE qid=1").fetchone()
+    assert row["topic"] == "Redis" and row["qtype"] == "八股"
+    assert row["difficulty"] == 4 and row["tags"] == '["缓存"]'
+    facts = mini_db.execute("SELECT q_norm_hash, topic, difficulty FROM label_facts").fetchall()
+    assert len(facts) == 3                                  # qid 1-3 各一条（hash 互异）
+    assert {r["topic"] for r in facts} == {"Redis"}
+    assert {r["q_norm_hash"] for r in facts} == {"hash1", "hash2", "hash3"}
+
+
+def test_merge_empty_topic_keeps_existing(mini_db, monkeypatch, tmp_path):
+    """F3：混入的空 topic staging 行不覆盖 questions 已有 topic（≤5% 场景 G6 放行）。"""
+    for qid in range(5, 22):                                # 追加 17 题凑 20 行 staging
+        _add_question(mini_db, qid, f"追加题{qid}")
+    mini_db.commit()
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")   # 19 行（qid4 有主题不打）
+    mini_db.execute("INSERT INTO labels_staging (qid, q_norm_hash, topic, qtype, difficulty, tags, "
+                    "provider, model, redacted, latency_ms, tokens, labeled_at) VALUES "
+                    "(4,'hash4','','八股',3,'[]','p','m',0,1,1,'now')")
+    mini_db.commit()
+    out = bl.merge(mini_db)                                 # ok_rate=19/20=0.95 → PASS
+    assert out["ok"], out
+    assert mini_db.execute("SELECT topic FROM questions WHERE qid=4").fetchone()[0] == "MySQL"
+
+
+def test_merge_refuses_orphan_rows(mini_db, monkeypatch, tmp_path):
+    """F6：qid 已失效或题干已变（hash 不匹配）的 staging 行拒绝 merge 且 staging 保留。"""
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")     # 3 行有效
+    # 孤儿①：qid 不在 questions（跨 extract 残留）
+    mini_db.execute("INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, provider, "
+                    "model, redacted, latency_ms, tokens, labeled_at) VALUES "
+                    "(999,'X','八股',3,'[]','p','m',0,1,1,'now')")
+    out = bl.merge(mini_db)
+    assert not out["ok"] and out["orphans"] == 1
+    assert mini_db.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0] == 4  # 保留未清
+    # 孤儿②：qid 在但 q_norm_hash 不匹配（重切后题干已变）
+    mini_db.execute("DELETE FROM labels_staging WHERE qid=999")
+    mini_db.execute("UPDATE labels_staging SET q_norm_hash='changed' WHERE qid=1")
+    out2 = bl.merge(mini_db)
+    assert not out2["ok"] and out2["orphans"] == 1
+    # 历史 NULL hash 行放行（向后兼容，qid 对得上即可）
+    mini_db.execute("UPDATE labels_staging SET q_norm_hash=NULL WHERE qid=1")
+    out3 = bl.merge(mini_db)
+    assert out3["ok"]
+
+
+def test_merge_next_step_hint(mini_db, monkeypatch, tmp_path):
+    """F4/B2：merge 成功输出 next_step 提示 refresh——检索库 topic 是快照。"""
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    out = bl.merge(mini_db)
+    assert out["ok"] and "refresh.py" in out["next_step"]
 
 
 def test_redact_integration_in_label_one(monkeypatch):
