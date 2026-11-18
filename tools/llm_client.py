@@ -9,6 +9,8 @@
     LLM_CONCURRENCY  local: 1 | online: 8
     LLM_PRICE        输入价,输出价（¥/百万 token；如 "1,4"）
     LLM_JSON_MODE    覆盖 provider 默认的 json_object 支持开关（1/0 true/false yes/no on/off）
+    LLM_NUM_CTX      上下文窗口透传（正整数，如 8192；缺省不透传——docs/13 §5）
+                     keep_alive 是服务端部署项（OLLAMA_KEEP_ALIVE），客户端不实现
 
 降级策略（docs/15 §3.4）：429/5xx/超时 → 指数退避重试 3 次；单题 3 次失败由
 batch_label 落 failed.jsonl 不阻塞整批。JSON 解析失败 → 重试时强化"只输出 JSON"。
@@ -134,6 +136,9 @@ def resolve_config(env: dict | None = None) -> dict:
             "LLM_TIMEOUT", e.get("LLM_TIMEOUT") or str(d["timeout"])),
         "json_mode": json_mode,
         "price": _parse_price(e["LLM_PRICE"]) if e.get("LLM_PRICE") else d.get("price", (0.0, 0.0)),
+        # 批次三 R4：上下文窗口透传（docs/13 §5：批量打标 8192）；缺省 None 不透传
+        "num_ctx": _parse_positive_int("LLM_NUM_CTX", e["LLM_NUM_CTX"])
+        if e.get("LLM_NUM_CTX") else None,
     }
     if provider == "online" and not cfg["key"]:
         raise ConfigError(
@@ -195,6 +200,7 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
          retries: int = 3, sleep: float = 1.0) -> dict:
     """一次对话（含重试退避）。返回 {text, latency_ms, tokens, prompt_tokens,
     completion_tokens}（F5：in/out 拆分，tokens 为两者合计）；重试耗尽抛 RuntimeError。
+    cfg["num_ctx"] 设置时 payload 透传 options.num_ctx（Ollama 上下文窗口，R4）。
 
     降级链：429/5xx/超时/网络 → 指数退避重试；JSON 模式下解析失败也重试
     （第二次起在 system 末尾强化"只输出严格 JSON，不要任何其他文字"）。
@@ -217,6 +223,10 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
         }
         if json_mode and cfg["json_mode"]:
             payload["response_format"] = {"type": "json_object"}
+        # R4：num_ctx 设置时透传（Ollama 上下文窗口）；keep_alive 是服务端部署项
+        # （OLLAMA_KEEP_ALIVE），客户端不实现——docs/13:76
+        if cfg.get("num_ctx"):
+            payload["options"] = {"num_ctx": cfg["num_ctx"]}
         t0 = time.perf_counter()
         st, resp = _post(cfg, payload)
         latency = round((time.perf_counter() - t0) * 1000)

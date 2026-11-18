@@ -211,3 +211,35 @@ def test_chat_json_parse_fail_returns_none(monkeypatch):
     cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
     r = chat_json(cfg, "s", "u", retries=1, sleep=0)
     assert r["obj"] is None and r.get("parse_failed") is True
+
+
+# ---------------- 批次三 R4：num_ctx 透传（docs/13 §5 接口契约） ----------------
+def test_num_ctx_parsed_and_default_none():
+    """LLM_NUM_CTX 正整数透传，缺省 None（不设不透传）。"""
+    assert resolve_config(env={"LLM_NUM_CTX": "8192"})["num_ctx"] == 8192
+    assert resolve_config(env={})["num_ctx"] is None
+
+
+def test_num_ctx_invalid_raises_config_error():
+    """非法 num_ctx（0/负数/非数字）→ ConfigError，不静默。"""
+    for bad in ("0", "-4", "abc"):
+        with pytest.raises(ConfigError):
+            resolve_config(env={"LLM_NUM_CTX": bad})
+
+
+def test_chat_payload_num_ctx_passthrough(monkeypatch):
+    """num_ctx 设置时 payload 带 options.num_ctx；None 时不带 options 键。"""
+    import llm_client as lc
+    seen = []
+
+    def fake_post(cfg, payload):
+        seen.append(payload)
+        return 200, {"choices": [{"message": {"content": "ok"}}],
+                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    monkeypatch.setattr(lc, "_post", fake_post)
+    base = {"base": "http://x", "key": "", "model": "m", "timeout": 5, "json_mode": False}
+    lc.chat({**base, "num_ctx": 8192}, "s", "u", retries=1)
+    assert seen[-1]["options"] == {"num_ctx": 8192}
+    lc.chat({**base, "num_ctx": None}, "s", "u", retries=1)
+    assert "options" not in seen[-1]
