@@ -35,6 +35,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     _ensure_labels_staging(conn)
     _ensure_question_topic(conn)
     _ensure_label_facts(conn)
+    _ensure_golden_labels(conn)
+    _ensure_review_columns(conn)
     conn.commit()
 
 
@@ -109,6 +111,27 @@ def _ensure_label_facts(conn: sqlite3.Connection) -> None:
     for col, decl in (("difficulty", "INTEGER"), ("tags", "TEXT")):
         if not _column_exists(conn, "questions", col):
             conn.execute(f"ALTER TABLE questions ADD COLUMN {col} {decl}")
+
+
+def _ensure_golden_labels(conn: sqlite3.Connection) -> None:
+    """008：golden_labels 金标表（批次二 G1，G6b 门禁依据，2026-11-19）。
+
+    键 = q_norm_hash（与 label_facts 同源，跨 extract 重切存活）；
+    人工抽检经 batch_label --golden-sample/--golden-load 录入。
+    """
+    sql = (SCHEMA_FILE.parent / "008_golden_labels.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+
+
+def _ensure_review_columns(conn: sqlite3.Connection) -> None:
+    """009：labels_staging 加复核三列（批次三 R1，2026-11-19）。
+
+    review_state：NULL=未复核 / 'pending'=词表外待复核 / 'agree' / 'disagree'；
+    disagree 行 merge 不落库（--review-resolve 人工终审）。
+    """
+    if not _column_exists(conn, "labels_staging", "review_state"):
+        sql = (SCHEMA_FILE.parent / "009_review_columns.sql").read_text(encoding="utf-8")
+        conn.executescript(sql)
 
 
 @contextmanager
