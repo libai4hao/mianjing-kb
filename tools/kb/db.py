@@ -103,6 +103,9 @@ def _ensure_label_facts(conn: sqlite3.Connection) -> None:
     conn.executescript(sql)
     if not _column_exists(conn, "labels_staging", "q_norm_hash"):
         conn.execute("ALTER TABLE labels_staging ADD COLUMN q_norm_hash TEXT")
+    for col in ("prompt_tokens", "completion_tokens"):   # F5：in/out 拆分计价（bug4）
+        if not _column_exists(conn, "labels_staging", col):
+            conn.execute(f"ALTER TABLE labels_staging ADD COLUMN {col} INTEGER")
     for col, decl in (("difficulty", "INTEGER"), ("tags", "TEXT")):
         if not _column_exists(conn, "questions", col):
             conn.execute(f"ALTER TABLE questions ADD COLUMN {col} {decl}")

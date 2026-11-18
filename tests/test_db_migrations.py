@@ -16,6 +16,7 @@ def test_007_label_facts_migration(tmp_path):
     assert _cols(conn, "label_facts") >= {
         "q_norm_hash", "topic", "qtype", "difficulty", "tags", "merged_at"}
     assert "q_norm_hash" in _cols(conn, "labels_staging")
+    assert {"prompt_tokens", "completion_tokens"} <= _cols(conn, "labels_staging")
     assert {"difficulty", "tags"} <= _cols(conn, "questions")
     conn.close()
 

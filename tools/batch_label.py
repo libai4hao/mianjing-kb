@@ -73,17 +73,21 @@ def label_one(cfg: dict, q: dict) -> dict:
             "tags": json.dumps(obj.get("tags") or [], ensure_ascii=False),
             "provider": cfg["provider"], "model": cfg["model"],
             "redacted": 1 if hit else 0, "latency_ms": r["latency_ms"],
-            "tokens": r["tokens"], "labeled_at": datetime.now().strftime(NOW_FMT)}
+            "tokens": r["tokens"],
+            "prompt_tokens": r.get("prompt_tokens"),
+            "completion_tokens": r.get("completion_tokens"),
+            "labeled_at": datetime.now().strftime(NOW_FMT)}
 
 
 def write_staging(conn, rows: list[dict]) -> int:
     conn.executemany(
         "INSERT OR REPLACE INTO labels_staging "
         "(qid, q_norm_hash, topic, qtype, difficulty, tags, provider, model, "
-        "redacted, latency_ms, tokens, labeled_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "redacted, latency_ms, tokens, prompt_tokens, completion_tokens, labeled_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [[r[k] for k in ("qid", "q_norm_hash", "topic", "qtype", "difficulty", "tags",
-                         "provider", "model", "redacted", "latency_ms", "tokens", "labeled_at")]
+                         "provider", "model", "redacted", "latency_ms", "tokens",
+                         "prompt_tokens", "completion_tokens", "labeled_at")]
          for r in rows])
     conn.commit()
     return len(rows)
@@ -119,7 +123,7 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
     failed_path = failed_path or (Path(config.BUILD_DIR) / "label_failed.jsonl")
     failed_path.parent.mkdir(parents=True, exist_ok=True)
 
-    done, failed, tokens_total = [], [], 0
+    done, failed, tokens_total, in_total, out_total = [], [], 0, 0, 0
     started = time.perf_counter()
 
     def _worker(q):
@@ -141,9 +145,11 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
                 continue
             done.append(row)
             tokens_total += row["tokens"]
+            in_total += row.get("prompt_tokens") or 0
+            out_total += row.get("completion_tokens") or 0
             if not dry_run and len(done) % 20 == 0:
                 write_staging(conn, done[-20:])          # 每 20 题 flush（断点粒度）
-            cost = tokens_total * sum(cfg["price"]) / 1e6
+            cost = (in_total * cfg["price"][0] + out_total * cfg["price"][1]) / 1e6
             if budget and cost > budget:
                 for f in futs:
                     f.cancel()
@@ -152,7 +158,8 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
         write_staging(conn, done)
     return {"todo": len(todo), "labeled": len(done), "failed": len(failed),
             "tokens": tokens_total,
-            "est_cost_yuan": round(tokens_total * sum(cfg["price"]) / 1e6, 4),
+            "est_cost_yuan": round((in_total * cfg["price"][0]
+                                    + out_total * cfg["price"][1]) / 1e6, 4),
             "dry_run": dry_run, "budget": budget,
             "elapsed_sec": round(time.perf_counter() - started, 1),
             "failed_log": str(failed_path) if failed else None}

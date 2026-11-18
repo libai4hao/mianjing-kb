@@ -227,6 +227,8 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()  # 思考链兜底剥离
             u = resp.get("usage") or {}
             return {"text": text, "latency_ms": latency,
+                    "prompt_tokens": int(u.get("prompt_tokens") or 0),
+                    "completion_tokens": int(u.get("completion_tokens") or 0),
                     "tokens": int(u.get("prompt_tokens") or 0) + int(u.get("completion_tokens") or 0)}
         last_err = f"status={st} {str(resp.get('error') or resp)[:160]}"
         if st and st not in (429, 500, 502, 503, 504) and st != 0:

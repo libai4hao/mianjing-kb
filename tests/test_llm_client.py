@@ -168,6 +168,20 @@ def test_chat_retries_on_529_then_succeeds(monkeypatch):
     assert r["text"] == "好" and r["tokens"] == 3 and len(calls) == 3
 
 
+def test_chat_returns_split_token_counts(monkeypatch):
+    """F5/bug4：chat 返回 prompt/completion 拆分计数（tokens 保留合计，向后兼容）。"""
+    import llm_client as lc
+    fake, _ = _fake_post_factory([
+        (200, {"choices": [{"message": {"content": "好"}}],
+               "usage": {"prompt_tokens": 420, "completion_tokens": 40}}),
+    ])
+    monkeypatch.setattr(lc, "_post", fake)
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
+    r = chat(cfg, "s", "u", retries=1, sleep=0)
+    assert r["prompt_tokens"] == 420 and r["completion_tokens"] == 40
+    assert r["tokens"] == 460
+
+
 def test_chat_fast_fail_on_401(monkeypatch):
     import llm_client as lc
     fake, calls = _fake_post_factory([(401, {"error": "bad key"})])

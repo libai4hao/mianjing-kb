@@ -27,7 +27,8 @@ def _fake_label(obj=None, fail_qids=()):
                 "difficulty": (obj or {}).get("difficulty", 3),
                 "tags": json.dumps((obj or {}).get("tags", ["HashMap"]), ensure_ascii=False),
                 "provider": cfg["provider"], "model": cfg["model"], "redacted": 0,
-                "latency_ms": 10, "tokens": 100, "labeled_at": "now"}
+                "latency_ms": 10, "tokens": 100,
+                "prompt_tokens": 80, "completion_tokens": 20, "labeled_at": "now"}
     return fake
 
 
@@ -83,11 +84,27 @@ def test_run_batch_failed_not_blocking(mini_db, monkeypatch, tmp_path):
 
 
 def test_run_batch_budget_stops(mini_db, monkeypatch, tmp_path):
-    """预算封顶（软上限）：超限后 cancel 未起飞的；飞行中的自然完成，总成本有界。"""
+    """预算封顶（软上限）：超限后 cancel 未起飞的；飞行中的自然完成，总成本有界。
+
+    F5 新口径：单题成本 = (80 in × ¥1 + 20 out × ¥4)/1e6 = 0.00016；
+    budget=0.0003 → 第 2 题完成后 0.00032 超限即停。
+    """
     monkeypatch.setattr(bl, "label_one", _fake_label())
-    out = bl.run_batch(CFG, mini_db, budget=0.0005, failed_path=tmp_path / "f.jsonl")
+    out = bl.run_batch(CFG, mini_db, budget=0.0003, failed_path=tmp_path / "f.jsonl")
     assert out["labeled"] <= 2                      # 并发 2：第 3 题被 cancel
-    assert out["est_cost_yuan"] <= 0.0011            # 总成本有界（2 题 × 0.0005）
+    assert out["est_cost_yuan"] <= 0.0005           # 总成本有界（≤3 题 × 0.00016）
+
+
+def test_run_batch_cost_splits_in_out(mini_db, monkeypatch, tmp_path):
+    """bug4/F5：成本按 in/out 单价分开计（与 health 口径一致），staging 落两列。"""
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    out = bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    assert out["labeled"] == 3
+    # 3 题 × (80 in × ¥1 + 20 out × ¥4) / 1e6 —— 不再 sum(price) 统一计（旧口径高估约 4 倍）
+    assert out["est_cost_yuan"] == round(3 * (80 * 1.0 + 20 * 4.0) / 1e6, 4)
+    row = mini_db.execute(
+        "SELECT prompt_tokens, completion_tokens FROM labels_staging LIMIT 1").fetchone()
+    assert row["prompt_tokens"] == 80 and row["completion_tokens"] == 20
 
 
 def test_dry_run_no_staging(mini_db, monkeypatch, tmp_path):
@@ -206,10 +223,11 @@ def test_redact_integration_in_label_one(monkeypatch):
     def fake_chat_json(cfg, system, user, **kw):
         sent["user"] = user
         return {"obj": {"topic": "HR", "qtype": "HR", "difficulty": 2, "tags": []},
-                "latency_ms": 5, "tokens": 10}
+                "latency_ms": 5, "tokens": 10, "prompt_tokens": 7, "completion_tokens": 3}
 
     monkeypatch.setattr(bl, "chat_json", fake_chat_json)
     row = bl.label_one(CFG, {"qid": 9, "q_text": "自我介绍？电话 13812345678", "a_text": "答"})
     assert row["redacted"] == 1
     assert "13812345678" not in sent["user"]
     assert "[联系方式]" in sent["user"]
+    assert row["prompt_tokens"] == 7 and row["completion_tokens"] == 3   # F5 透传拆分计数
