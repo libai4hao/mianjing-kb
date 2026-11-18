@@ -178,7 +178,7 @@ def sample_staging(conn, n: int) -> list[dict]:
     return [dict(r) for r in random.Random(42).sample(list(rows), k)]
 
 
-def merge(conn) -> dict:
+def merge(conn, drop_orphans: bool = False) -> dict:
     """G6 门禁复核 → FAIL 拒绝；PASS/WARN 放行（WARN=软门禁，提示人工抽查）。
 
     2026-11-19 审核修复（docs/项目审核报告/修复方案-2026-11-19.md）：
@@ -188,6 +188,9 @@ def merge(conn) -> dict:
     - F9 四列落库：topic/qtype/difficulty/tags；F3 空 topic/qtype 不覆盖已有值。
     - F1 打标事实落档 label_facts（同事务，按 q_norm_hash 跨重切存活，007）。
     - F4 next_step：merge 只写 kb.sqlite，检索库 topic 是 build_db 快照须 refresh。
+    - 评审 Important#2（2026-11-19）：孤儿行拒绝时列出 qid（人工清理有抓手）；
+      drop_orphans=True 清掉孤儿行后继续 merge——run_batch 跳过 staging 已有
+      qid，重跑打标清不掉孤儿，没有这个出口主工作流会死锁。
     """
     from verify_ledger import g6_label
     g6 = g6_label(conn)
@@ -201,9 +204,20 @@ def merge(conn) -> dict:
         "WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash)"
     ).fetchone()[0]
     if orphans:
-        return {"ok": False, "gate": g6["state"], "orphans": orphans,
-                "note": "staging 存在跨 extract 残留行（qid 已失效/题干已变），拒绝 merge——"
-                        "重跑打标或人工清理 staging"}
+        orphan_qids = [r[0] for r in conn.execute(
+            "SELECT s.qid FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
+            "WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash) "
+            "ORDER BY s.qid LIMIT 10").fetchall()]
+        if not drop_orphans:
+            return {"ok": False, "gate": g6["state"], "orphans": orphans,
+                    "orphan_qids": orphan_qids,
+                    "note": "staging 存在跨 extract 残留行（qid 已失效/题干已变），拒绝 merge——"
+                            "重跑打标清不掉孤儿（已打 qid 会跳过），用 --merge --drop-orphans "
+                            "清除后合并，或人工核对后手动清理"}
+        conn.execute(
+            "DELETE FROM labels_staging WHERE qid IN ("
+            "  SELECT s.qid FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
+            "  WHERE q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash))")
     n = conn.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0]
     conn.execute(
         "UPDATE questions SET "
@@ -224,6 +238,8 @@ def merge(conn) -> dict:
     out = {"ok": True, "merged": n, "gate": g6["state"],
            "next_step": "python tools/refresh.py --reembed"
                         "  # 检索库 topic 是快照，merge 只写 kb.sqlite（B2）"}
+    if orphans:
+        out["dropped_orphans"] = orphans
     if g6["state"] == "WARN":
         out["note"] = "topic 漂移 WARN（软门禁不阻断）——建议 --sample 50 人工抽查确认"
     return out
@@ -237,6 +253,8 @@ def main(argv=None) -> int:
     ap.add_argument("--budget", type=float, default=10.0, help="预算封顶 ¥（超了自动停，docs/15 §3.5）")
     ap.add_argument("--sample", type=int, default=0, help="从 staging 随机抽 N 条打印（人工抽查）")
     ap.add_argument("--merge", action="store_true", help="G6 复核 + merge 进 questions")
+    ap.add_argument("--drop-orphans", action="store_true",
+                    help="与 --merge 连用：清除 staging 孤儿行（qid 已失效/题干已变）后继续合并")
     # F10（2026-11-19）：docs/15 §3.5 承诺的三旗标——此前 argparse 未声明，
     # 照文档敲命令报 unrecognized arguments。
     ap.add_argument("--provider", choices=("local", "online"),
@@ -272,7 +290,7 @@ def main(argv=None) -> int:
             print(json.dumps({"sampled": len(rows)}, ensure_ascii=False))
             return 0
         if args.merge:
-            out = merge(conn)
+            out = merge(conn, drop_orphans=args.drop_orphans)
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if out["ok"] else 1
         out = run_batch(cfg, conn, limit=args.limit, budget=args.budget, dry_run=args.dry_run)

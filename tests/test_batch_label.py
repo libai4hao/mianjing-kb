@@ -232,6 +232,33 @@ def test_merge_refuses_orphan_rows(mini_db, monkeypatch, tmp_path):
     assert out3["ok"]
 
 
+def test_merge_refusal_lists_orphan_qids(mini_db, monkeypatch, tmp_path):
+    """评审 Important#2：拒绝输出列出孤儿 qid——只有计数时人工清理无从下手。"""
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    mini_db.execute("INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, provider, "
+                    "model, redacted, latency_ms, tokens, labeled_at) VALUES "
+                    "(999,'X','八股',3,'[]','p','m',0,1,1,'now')")
+    mini_db.commit()
+    out = bl.merge(mini_db)
+    assert not out["ok"] and out["orphan_qids"] == [999]
+
+
+def test_merge_drop_orphans_cleans_and_merges(mini_db, monkeypatch, tmp_path):
+    """评审 Important#2：drop_orphans 清掉孤儿行后继续 merge——重跑打标清不掉孤儿
+    （run_batch 跳过 staging 已有 qid），没有这个出口主工作流会死锁。"""
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")     # 3 行有效
+    mini_db.execute("INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, provider, "
+                    "model, redacted, latency_ms, tokens, labeled_at) VALUES "
+                    "(999,'X','八股',3,'[]','p','m',0,1,1,'now')")
+    mini_db.commit()
+    out = bl.merge(mini_db, drop_orphans=True)
+    assert out["ok"] and out["merged"] == 3 and out["dropped_orphans"] == 1
+    assert mini_db.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0] == 0
+    assert mini_db.execute("SELECT topic FROM questions WHERE qid=1").fetchone()[0] == "Java基础"
+
+
 def test_merge_next_step_hint(mini_db, monkeypatch, tmp_path):
     """F4/B2：merge 成功输出 next_step 提示 refresh——检索库 topic 是快照。"""
     monkeypatch.setattr(bl, "label_one", _fake_label())
