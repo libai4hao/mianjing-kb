@@ -97,3 +97,37 @@ def test_mirror_topic_inheritance(tmp_path, monkeypatch):
     con.close()
     assert rows[1] == ("JVM", "题库")      # 源题：走台账 topic（不变）
     assert rows[2] == ("JVM", "题库")      # 镜像题：无台账行 → md_rel 目录段继承，不再空串
+
+
+def test_two_segment_path_topic_guess_empty(tmp_path, monkeypatch):
+    """F10：两段 md 路径（<category>/<stem>.md）没有 topic 段——不得把 category 误当 topic。"""
+    from tools import build_db as bdb
+    from tools.kb import config, db as kbdb
+    corpus = tmp_path / "corpus"
+    build = corpus / "21-面经数据库" / "build"
+    md_dir = corpus / "20-题库MD" / "JVM"        # rel 只有两段：JVM/甲.md
+    build.mkdir(parents=True)
+    md_dir.mkdir(parents=True)
+    monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
+    monkeypatch.setattr(config, "BUILD_DIR", build)
+    monkeypatch.setattr(bdb, "MD_ROOT", corpus / "20-题库MD")
+
+    mirror_rel = "JVM/甲.md"
+    mirror_h = hashlib.sha256(("md-mirror:" + mirror_rel).encode()).hexdigest()[:16]
+    kb = kbdb.connect(build / "kb.sqlite")
+    kb.execute(
+        "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
+        "q_norm_hash, simhash, span_start, span_end, extracted_at) VALUES "
+        "(1, ?, 1, '什么是JVM？', '', '八股', 'high', '什么是jvm', 'x', 0, 0, 1, 'now')",
+        (mirror_h,))
+    kb.commit()
+    kb.close()
+    (md_dir / "甲.md").write_text("# 甲\n\n什么是JVM？", encoding="utf-8")
+
+    out_db = build / "面经库.db"
+    bdb.build(out_db=out_db)
+    con = sqlite3.connect(str(out_db))
+    topic, category = con.execute("SELECT topic, category FROM questions WHERE qid=1").fetchone()
+    con.close()
+    assert topic == ""            # 两段路径无 topic 段，不再误取 parts[-2]==category
+    assert category == "JVM"      # category 仍取 parts[0]，不受影响

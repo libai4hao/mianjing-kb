@@ -16,6 +16,30 @@ from tools.kb import config  # noqa: E402
 REAL_META = config.META_DIR
 
 
+def test_cli_flags_provider_concurrency_resume(tmp_path, monkeypatch, capsys):
+    """F10：--provider/--concurrency/--resume 三旗标 docs/15 有承诺，敲命令不得 unrecognized。
+
+    --provider/--concurrency 写 os.environ 后再 resolve_config；--resume 是 no-op 兼容
+    旗标（续跑本就是默认行为：staging 已有 qid 自动跳过）。
+    """
+    import os
+    seen = {}
+
+    def fake_resolve_config():
+        seen["provider"] = os.environ.get("LLM_PROVIDER")
+        seen["concurrency"] = os.environ.get("LLM_CONCURRENCY")
+        return {"provider": "local", "base": "http://x", "model": "m", "key": "",
+                "concurrency": 2, "timeout": 1, "json_mode": False, "price": (1.0, 4.0)}
+
+    monkeypatch.setattr(os, "environ", dict(os.environ))   # 隔离实现写入的环境变量
+    monkeypatch.setattr(bl, "resolve_config", fake_resolve_config)
+    monkeypatch.setattr(bl, "health", lambda cfg, conn: {"ok": True})
+    rc = bl.main(["--provider", "local", "--concurrency", "2", "--resume",
+                  "--check", "--db", str(tmp_path / "kb.sqlite")])
+    assert rc == 0
+    assert seen == {"provider": "local", "concurrency": "2"}
+
+
 def _fake_label(obj=None, fail_qids=()):
     """返回 label_one 替身：fail_qids 中的题抛异常，其余返回固定打标。"""
     def fake(cfg, q):

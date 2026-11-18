@@ -237,8 +237,9 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
     raise RuntimeError(f"LLM 调用重试 {retries} 次耗尽: {last_err}")
 
 
-def chat_json(cfg: dict, system: str, user: str, **kw) -> dict | None:
-    """JSON 对话：chat + 宽松解析。解析失败返回 None（调用方落 failed 队列）。"""
+def chat_json(cfg: dict, system: str, user: str, **kw) -> dict:
+    """JSON 对话：chat + 宽松解析。解析失败返回 r（parse_failed=True, obj=None），
+    调用方按 r.get("obj") 判（obj=None 即失败，落 failed 队列）。"""
     r = chat(cfg, system, user, json_mode=True, **kw)
     obj = parse_json_loose(r["text"])
     if obj is None:

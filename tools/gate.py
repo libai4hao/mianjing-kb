@@ -49,8 +49,11 @@ from kb import config, db, hashing, textmetrics  # noqa: E402
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
 # 三态阈值（对齐语料侧 gate.py，2026-11-17 审核后统一到本仓库）
+# F10（2026-11-19）口径说明：TH_CJK 与 config.GATE_CJK_MIN 同义，单源引用；
+# TH_BAD/TH_MIN 与 config 的 GATE_GARBLED_MAX/GATE_MIN_VISIBLE 是**不同指标**
+# （三态报告 vs 四态台账，见 docstring 上方"各司其职"），有意不合并数值。
 TH_BAD = 0.02     # 异常字符比上限（>= 判 fail）
-TH_CJK = 0.15      # CJK 比例下限（< 判 review）
+TH_CJK = config.GATE_CJK_MIN   # CJK 比例下限（< 判 review），与 config 单源
 TH_MIN = 100       # 最少字符数（< 判 fail）
 
 CAT_MAP = {"题库": "题库", "真题": "真题", "面经": "面经",

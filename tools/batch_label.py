@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -236,8 +237,21 @@ def main(argv=None) -> int:
     ap.add_argument("--budget", type=float, default=10.0, help="预算封顶 ¥（超了自动停，docs/15 §3.5）")
     ap.add_argument("--sample", type=int, default=0, help="从 staging 随机抽 N 条打印（人工抽查）")
     ap.add_argument("--merge", action="store_true", help="G6 复核 + merge 进 questions")
+    # F10（2026-11-19）：docs/15 §3.5 承诺的三旗标——此前 argparse 未声明，
+    # 照文档敲命令报 unrecognized arguments。
+    ap.add_argument("--provider", choices=("local", "online"),
+                    help="LLM provider（写入 LLM_PROVIDER 后再解析配置）")
+    ap.add_argument("--concurrency", type=int, default=0,
+                    help="并发数（写入 LLM_CONCURRENCY 后再解析配置；0=不覆盖）")
+    ap.add_argument("--resume", action="store_true",
+                    help="兼容旗标：续跑是默认行为（staging 已有 qid 自动跳过），无需显式传")
     ap.add_argument("--db", default=str(config.DB_PATH))
     args = ap.parse_args(argv)
+
+    if args.provider:
+        os.environ["LLM_PROVIDER"] = args.provider
+    if args.concurrency:
+        os.environ["LLM_CONCURRENCY"] = str(args.concurrency)
 
     try:
         cfg = resolve_config()
