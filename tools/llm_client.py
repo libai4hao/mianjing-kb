@@ -193,7 +193,8 @@ def _post(cfg: dict, payload: dict) -> tuple[int, dict]:
 def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
          max_tokens: int = 128, temperature: float = 0.1,
          retries: int = 3, sleep: float = 1.0) -> dict:
-    """一次对话（含重试退避）。返回 {text, latency_ms, tokens}；重试耗尽抛 RuntimeError。
+    """一次对话（含重试退避）。返回 {text, latency_ms, tokens, prompt_tokens,
+    completion_tokens}（F5：in/out 拆分，tokens 为两者合计）；重试耗尽抛 RuntimeError。
 
     降级链：429/5xx/超时/网络 → 指数退避重试；JSON 模式下解析失败也重试
     （第二次起在 system 末尾强化"只输出严格 JSON，不要任何其他文字"）。

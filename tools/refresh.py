@@ -77,7 +77,9 @@ def copy_vec(src_db: Path, dst_db: Path) -> str:
                 "WHERE m.qid IS NULL OR COALESCE(c.q_norm_hash,'')!=COALESCE(m.q_norm_hash,'')"
             ).fetchone()[0]
         except Exception as ex:  # noqa: BLE001
-            return f"error: 向量对齐校验失败（questions 表缺失？）{type(ex).__name__}: {str(ex)[:80]}"
+            # 评审 Minor#4（2026-11-19）：旧库 questions 缺 q_norm_hash 列也走这
+            # handler——提示语补"列缺失"，别让人只盯着表。
+            return f"error: 向量对齐校验失败（questions 表/列缺失？）{type(ex).__name__}: {str(ex)[:80]}"
         if mis:
             return (f"error: 向量对齐校验失败：现行库 {mis} 行 qid/q_norm_hash 与影子库"
                     "不匹配——重切后请 --reembed 重建向量，不要按 rowid 硬拷")
