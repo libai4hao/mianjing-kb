@@ -54,6 +54,16 @@ def _within(child: Path, parent: Path) -> bool:
         return False
 
 
+def _in_quarantine(p: Path, corpus: Path) -> bool:
+    """99-重复文件待删 里的副本绝不能当"保留副本"——它本身就是待删件。"""
+    try:
+        rel = p.resolve().relative_to(corpus.resolve()).as_posix()
+    except (ValueError, OSError):
+        return False
+    q = config.QUARANTINE_PREFIX
+    return rel == q or rel.startswith(q + "/")
+
+
 def _root_refusal(root: Path, corpus: Path) -> str | None:
     """根目录合法性：过宽（盘符根 / 用户主目录）或与语料根重叠一律拒绝。
 
@@ -122,6 +132,8 @@ def main(argv=None) -> int:
                     help="放行 note 里没有 converted_to: 的 superseded 记录（默认拒绝）")
     ap.add_argument("--no-rehash", action="store_true",
                     help="删除前不重算原文 sha256（快一倍，但会把'扫描后内容被换掉'的窗口留开）")
+    ap.add_argument("--no-backup", action="store_true",
+                    help="--apply 前不备份 kb.sqlite（默认备份到 <db>/backups，保留 5 份）")
     args = ap.parse_args(argv)
     refused = False
     if args.apply and not args.yes:
@@ -145,10 +157,22 @@ def main(argv=None) -> int:
     def _onerror(err: OSError) -> None:
         skipped_dirs.append((getattr(err, "filename", "") or "?", "读失败目录"))
 
+    if args.apply and not args.no_backup:
+        backup = db.backup_db(args.db)
+        print(f"[backup] 删除前已备份账本：{backup}", file=sys.stderr)
+
     conn = db.connect(args.db, create=False, readonly=True)
     forbidden = [corpus, Path(config.BUILD_DIR)]
     plan, kept = [], list(skipped_dirs)
     no_repl = 0
+    # 保留副本哈希按路径缓存：大量重复件会指向同一个保留副本，重组一次即可；
+    # 扫描期间不改语料，缓存到本次运行结束（删除前只重算待删件本身）。
+    keep_hashes: dict[Path, str] = {}
+
+    def keep_hash(p: Path) -> str:
+        if p not in keep_hashes:
+            keep_hashes[p] = hashing.sha256_file(p)
+        return keep_hashes[p]
     for root in roots:
         for p in _walk_skip(root, forbidden, _onerror):
             try:
@@ -188,6 +212,9 @@ def main(argv=None) -> int:
                 cand = Path(r["src_path"])
                 if not _within(cand, corpus):
                     continue
+                if _in_quarantine(cand, corpus):
+                    reason = "保留副本落在 99-重复文件待删（拒绝当保留副本）"
+                    continue
                 if not cand.is_file():
                     reason = "保留副本不存在"
                     continue
@@ -201,7 +228,7 @@ def main(argv=None) -> int:
                 except OSError:
                     reason = "保留副本不存在"
                     continue
-                if hashing.sha256_file(cand) != digest:
+                if keep_hash(cand) != digest:
                     reason = "keep copy content mismatch"
                     continue
                 keep = cand

@@ -92,16 +92,39 @@ def test_swap_keeps_rollback_snapshot(mini_env):
 
 
 def test_snapshot_keeps_only_last_n(tmp_path):
-    d = tmp_path
-    online = d / "面经库.db"
-    online.write_bytes(b"db")
+    """快照淘汰按文件名时间戳，不看 mtime（copy/恢复会继承旧 mtime，排序会失真）。"""
+    online = tmp_path / "面经库.db"
+    con = sqlite3.connect(online)
+    con.execute("CREATE TABLE t(x)")
+    con.commit()
+    con.close()
+    d = tmp_path / rf.ROLLBACK_DIR
+    d.mkdir()
     for i in range(5):
-        p = d / rf.ROLLBACK_DIR / f"面经库-2026010{i}-000000.db"
-        p.parent.mkdir(exist_ok=True)
+        p = d / f"面经库-2026010{i}-000000.db"
         p.write_bytes(b"old")
-        os.utime(p, (1000 + i, 1000 + i))       # 让 mtime 有序，稳定断言"只留 3 份"
-    rf._snapshot(online, keep=3)
-    assert len(list((d / rf.ROLLBACK_DIR).glob("面经库-*.db"))) == 3
+        os.utime(p, (1000, 1000))          # 全部同 mtime：只靠名字也能选出最新 3 份
+    rf._snapshot_gc(online, keep=3)
+    left = sorted(p.name for p in d.glob("面经库-*.db"))
+    assert left == ["面经库-20260102-000000.db", "面经库-20260103-000000.db",
+                    "面经库-20260104-000000.db"]
+
+
+def test_snapshot_uses_backup_api_and_sees_wal(tmp_path):
+    """快照必须用 backup API：WAL 里已提交未 checkpoint 的数据也要带上（copy2 会丢）。"""
+    online = tmp_path / "面经库.db"
+    con = sqlite3.connect(online)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA wal_autocheckpoint=0")
+    con.execute("CREATE TABLE questions(qid INTEGER)")
+    con.execute("INSERT INTO questions VALUES (1)")
+    con.commit()                            # 连接保持打开，数据可能还在 -wal 里
+    snap = rf._snapshot(online)
+    con.close()
+    assert snap is not None and snap.exists()
+    s = sqlite3.connect(snap)
+    assert s.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 1
+    s.close()
 
 
 def test_gate_fail_keeps_online(mini_env, monkeypatch, capsys):
@@ -118,7 +141,8 @@ def test_gate_fail_keeps_online(mini_env, monkeypatch, capsys):
 def test_vec_error_aborts(mini_env, monkeypatch, capsys):
     online = mini_env["online"]
     before = hashlib.sha256(online.read_bytes()).hexdigest()
-    monkeypatch.setattr(rf, "copy_vec", lambda src, dst: "error: boom")
+    monkeypatch.setattr(rf, "copy_vec", lambda src, dst: {"ok": False, "kind": "boom",
+                                                          "detail": "boom"})
     assert rf.main([]) == 1
     out = capsys.readouterr().out
     assert '"verdict": "ABORT"' in out
@@ -149,7 +173,7 @@ def test_copy_vec_aborts_on_misaligned_qids(tmp_path):
     """F2/B3：向量按 rowid=qid 拷，现行库题行与影子 qid 对不上（hash 不匹配）→ 拒拷。"""
     src, dst = _mk_vec_pair(tmp_path, src_hash="x", dst_hash="changed")
     out = rf.copy_vec(src, dst)
-    assert out.startswith("error") and "对齐" in out
+    assert out["ok"] is False and out["kind"] == "misaligned" and "不匹配" in out["detail"]
 
 
 def test_copy_vec_qid_missing_in_shadow_aborts(tmp_path):
@@ -160,11 +184,93 @@ def test_copy_vec_qid_missing_in_shadow_aborts(tmp_path):
     d.commit()
     d.close()
     out = rf.copy_vec(src, dst)
-    assert out.startswith("error") and "对齐" in out
+    assert out["ok"] is False and out["kind"] == "misaligned"
 
 
-def test_copy_vec_aligned_proceeds(tmp_path):
-    """对齐通过后不卡在校验（后续成败取决于 sqlite_vec/表结构，与本断言无关）。"""
+def test_copy_vec_rejects_both_null_q_norm_hash(tmp_path):
+    """两侧 q_norm_hash 全为空时，COALESCE 对齐校验会假通过——必须显式拒绝。"""
+    src, dst = _mk_vec_pair(tmp_path, src_hash="", dst_hash="")
+    out = rf.copy_vec(src, dst)
+    assert out["ok"] is False and out["kind"] == "null_hash"
+
+
+def test_copy_vec_rejects_orphan_vectors(tmp_path):
+    src, dst = _mk_vec_pair(tmp_path, src_hash="x", dst_hash="x")
+    s = sqlite3.connect(src)
+    s.execute("INSERT INTO vec_questions VALUES (99, x'00' * 4)")   # rowid 99 无对应题
+    s.commit()
+    s.close()
+    out = rf.copy_vec(src, dst)
+    assert out["ok"] is False and out["kind"] == "orphan_vectors"
+
+
+def test_copy_vec_aligned_not_misaligned(tmp_path):
+    """对齐通过后不卡在对齐校验（后续成败取决于 sqlite_vec/表结构）。"""
     src, dst = _mk_vec_pair(tmp_path, src_hash="x", dst_hash="x")
     out = rf.copy_vec(src, dst)
-    assert "对齐" not in out
+    assert out["ok"] is False and out["kind"] in ("no_sqlite_vec", "error")
+    assert "对齐" not in out.get("detail", "")
+
+
+def _all_pass(_shadow):
+    return [{"id": gid, "name": gid, "level": "硬", "state": "PASS",
+             "fails": [], "detail": {}, "sql": ""} for gid in rf.REQUIRED_GATES]
+
+
+def test_unknown_gate_state_fails(mini_env, monkeypatch, capsys):
+    """门禁不是黑名单：G2 返回 'ERROR' 这种未知状态必须判失败，不能放行。"""
+    online = mini_env["online"]
+    before = hashlib.sha256(online.read_bytes()).hexdigest()
+    gates = _all_pass(None)
+    gates[1]["state"] = "ERROR"
+
+    monkeypatch.setattr(rf, "run_gates", lambda _s: gates)
+    assert rf.main([]) == 1
+    out = capsys.readouterr().out
+    assert '"verdict": "FAIL"' in out and "未知状态" in out
+    assert hashlib.sha256(online.read_bytes()).hexdigest() == before
+
+
+def test_missing_gate_fails(mini_env, monkeypatch):
+    monkeypatch.setattr(rf, "run_gates", lambda _s: _all_pass(None)[:3])
+    assert rf.main([]) == 1
+
+
+def test_refresh_lock_refuses_concurrent_run(mini_env, capsys):
+    (mini_env["build"] / rf.LOCK_NAME).write_text("99999", encoding="utf-8")
+    assert rf.main([]) == 2
+    assert "refresh.lock" in capsys.readouterr().out
+
+
+def test_swap_failure_keeps_shadow_for_retry(mini_env, monkeypatch, capsys):
+    monkeypatch.setattr(rf, "run_gates", _all_pass)
+    monkeypatch.setattr(rf.os, "replace", lambda *a, **k: (_ for _ in ()).throw(
+        PermissionError("in use")))
+    assert rf.main([]) == 1
+    out = capsys.readouterr().out
+    assert "--swap-only" in out and "未动" in out
+    assert (mini_env["build"] / rf.SHADOW_NAME).exists()      # 影子留着，重试不用重建
+    assert not (mini_env["build"] / rf.LOCK_NAME).exists()    # 锁已释放
+
+
+def test_swap_only_reuses_shadow(mini_env, monkeypatch):
+    import shutil
+    shutil.copy2(mini_env["online"], mini_env["build"] / rf.SHADOW_NAME)
+    assert rf.main(["--swap-only"]) == 0
+    assert not (mini_env["build"] / rf.SHADOW_NAME).exists()
+
+
+def test_sidecar_cleanup_failure_is_warning_not_abort(mini_env, monkeypatch, capsys):
+    """os.replace 已成功但 -wal 删不掉时，必须报"已切换"，不能谎报"线上未动"。"""
+    monkeypatch.setattr(rf, "run_gates", _all_pass)
+    real_unlink = Path.unlink
+
+    def fake(self, *a, **k):
+        if str(self).endswith("面经库.db-wal"):
+            raise PermissionError("locked sidecar")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", fake)
+    assert rf.main([]) == 0
+    out = capsys.readouterr().out
+    assert '"swapped": true' in out and "warnings" in out and "locked sidecar" in out

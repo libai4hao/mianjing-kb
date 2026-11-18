@@ -363,3 +363,92 @@ def test_content_only_in_quarantine_is_revived_not_duplicate(corpus, tmp_path, c
     assert again["actions"].get("revived", 0) == 0
     assert [r["status"] for r in rows(db_path)
             if r["file_name"] == "旧件副本.pdf"] == ["pending_classify"]
+
+
+def test_absent_file_in_quarantine_stays_quarantined(corpus, tmp_path, capsys):
+    """评审 2026-11-19 高风险#1：absent 记录的文件重新出现在 99 区，不能洗成 classified。"""
+    db_path = tmp_path / "kb.sqlite"
+    main(["--root", str(corpus), "--db", str(db_path)])
+    capsys.readouterr()
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE source_documents SET status='absent' WHERE file_name='旧件.pdf'")
+    conn.commit()
+    conn.close()
+
+    assert main(["--root", str(corpus), "--db", str(db_path)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["actions"]["to_quarantine"] == 1
+    row = [r for r in rows(db_path) if r["file_name"] == "旧件.pdf"][0]
+    assert row["status"] == "quarantined"
+    assert row["dir_path"] == "99-重复文件待删"
+
+
+def test_moved_copy_survives_original_path_overwrite(tmp_path, capsys):
+    """评审 2026-11-19 高风险#2：先挪走、再在原路径放新版本，旧记录必须跟到新路径，
+    不能被退役成 superseded 而从所有清单里消失。"""
+    root = tmp_path / "corpus"
+    a = root / "02-JVM" / "x.pdf"
+    b = root / "12-综合题库" / "x.pdf"
+    a.parent.mkdir(parents=True)
+    b.parent.mkdir(parents=True)
+    a.write_bytes(b"%PDF-1.4 version 1")
+    db_path = tmp_path / "kb.sqlite"
+    main(["--root", str(root), "--db", str(db_path)])
+    capsys.readouterr()
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE source_documents SET status='classified'")
+    conn.commit()
+    conn.close()
+
+    a.rename(b)                              # 旧内容挪到另一目录
+    a.write_bytes(b"%PDF-1.4 version 2")     # 原路径放新版本
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["actions"].get("ghost_retired", 0) == 0
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    data = conn.execute("SELECT status, src_path, sha256 FROM source_documents").fetchall()
+    conn.close()
+    old = [r for r in data if r["sha256"] == __import__("kb.hashing").hashing.sha256_file(b)]
+    assert old and old[0]["status"] == "classified" and old[0]["src_path"].endswith("12-综合题库\\x.pdf")
+
+
+def test_dry_run_duplicate_count_matches_real_run(tmp_path, capsys):
+    """评审 2026-11-19 中风险：同批内含重复时，dry-run 与真实运行的 duplicate 数一致。"""
+    root = tmp_path / "corpus"
+    (root / "02-JVM").mkdir(parents=True)
+    (root / "02-JVM" / "a.pdf").write_bytes(b"same bytes")
+    (root / "02-JVM" / "b.pdf").write_bytes(b"same bytes")
+    db_path = tmp_path / "kb.sqlite"
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    capsys.readouterr()
+
+    assert main(["--root", str(root), "--db", str(db_path), "--dry-run"]) == 0
+    dry = json.loads(capsys.readouterr().out)["actions"]
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    real = json.loads(capsys.readouterr().out)["actions"]
+    assert dry.get("duplicate", 0) == real.get("duplicate", 0) == 2
+
+
+def test_junction_inside_corpus_is_not_walked(tmp_path, capsys):
+    """评审 2026-11-19 中风险：指向语料内部的 junction 不能让同一文件重复注册。"""
+    import subprocess
+    import sys
+    if sys.platform != "win32":
+        pytest.skip("junction 仅 Windows")
+    root = tmp_path / "corpus"
+    d = root / "02-JVM"
+    d.mkdir(parents=True)
+    f = d / "a.pdf"
+    f.write_bytes(b"junction target content")
+    link = root / "02-JVM-link"
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(d)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        pytest.skip(f"无法创建 junction: {r.stderr}")
+    db_path = tmp_path / "kb.sqlite"
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["actions"]["added"] == 1
+    assert len(rows(db_path)) == 1

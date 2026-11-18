@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import secrets
 import json
 import os
 import sqlite3
@@ -79,10 +80,25 @@ def scan_base(root: Path) -> Path:
         return root
 
 
+def _is_reparse_dir(path: str) -> bool:
+    """Windows 目录重解析点（junction/符号链接）：os.walk 会进入 junction，
+    同一份文件会在两条路径下重复登记。3.12 才有 isjunction，低版本看属性位。"""
+    if sys.platform != "win32":
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    flag = getattr(st, "st_file_attributes", 0)
+    return bool(flag & getattr(os, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
 def iter_files(root: Path, all_exts: bool):
     """遍历所有文件，产出 (path, rel, ext, size|None, quarantined)。"""
     base = scan_base(root)
     for dirpath, dirnames, filenames in os.walk(root):
+        # 不跟随 junction/重解析点目录，避免同内容在两条路径重复注册
+        dirnames[:] = [d for d in dirnames if not _is_reparse_dir(os.path.join(dirpath, d))]
         rel_dir = rel_posix(Path(dirpath), base)
         if is_excluded(rel_dir):
             dirnames[:] = []
@@ -101,7 +117,21 @@ def iter_files(root: Path, all_exts: bool):
             yield p, rel_posix(p, base), ext, size, quarantined
 
 
-def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False) -> tuple[str, str]:
+def _src_is_original(row, rel: str | None = None) -> bool:
+    """登记路径上的文件现在是否仍是这条记录的内容（按完整 sha256，不只看存在）。"""
+    sp = row["src_path"]
+    if not sp:
+        return False
+    if rel and sp.replace("\\", "/").endswith("/" + rel.replace("\\", "/")):
+        return True          # 就是当前扫到的这份，hash 已匹配，无需重读
+    try:
+        return Path(sp).is_file() and hashing.sha256_file(sp) == row["sha256"]
+    except OSError:
+        return False
+
+
+def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False,
+           sha256: str | None = None) -> tuple[str, str]:
     """返回 (action, status_after)。
 
     关键约束：移动 / 改名**不能**改变已有状态（否则 processed 会被降级成 moved，
@@ -113,16 +143,21 @@ def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False) 
     row = db.get_by_hash(conn, doc_hash)
     if row is None:
         return "added", "pending_classify"
+    # 16 位短指纹撞车时绝不覆盖已有行：完整 sha256 不同就按异常处理
+    if sha256 and row["sha256"] and row["sha256"] != sha256:
+        return "hash_collision", row["status"]
     prev = row["status"]
     if prev == "absent":
-        # 先判"曾删除又回来"：这类文件必须复用原结果，不能被当成普通重复件
+        # 先判隔离：99 区里的文件永远不能借"恢复上线"洗成正式语料
+        if quarantined:
+            return "to_quarantine", "quarantined"
+        # 曾删除又回到正式区：复用原结果，不能被当成普通重复件
         return "resurrected", ("classified" if row["category"] else "pending_classify")
     full_rel = f"{row['dir_path']}/{row['file_name']}" if row["dir_path"] else row["file_name"]
-    src = row["src_path"]
     if quarantined:
         if full_rel == rel:
             return "duplicate", prev
-        if src and Path(src).exists():
+        if _src_is_original(row, rel):
             return "duplicate", prev          # 原件还在正式区 → 99 里的只是散副本，不能夺主
         # 原件已被移进隔离区（过时件清理走这条路）：改路径并把状态转 quarantined
         return "to_quarantine", "quarantined"
@@ -133,8 +168,8 @@ def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False) 
         return "revived", "pending_classify"
     if full_rel == rel:
         return "duplicate", prev
-    if src and Path(src).exists():
-        return "duplicate", prev              # 原件还在 → 这次见到的是副本
+    if _src_is_original(row, rel):
+        return "duplicate", prev              # 登记路径上的内容还在 → 这次见到的是副本
     new_dir = dir_of(rel)
     old_dir = row["dir_path"] or ""
     if row["file_name"] != name:
@@ -142,22 +177,45 @@ def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False) 
     return "moved", prev
 
 
-def retire_path_ghost(conn, dir_path: str, file_name: str, new_hash: str) -> int:
-    """F7（2026-11-19）：同路径换内容时退役旧行（幽灵行）。
+def ghost_candidates(conn, dir_path: str, file_name: str, new_hash: str,
+                     new_path: Path) -> list[str]:
+    """收集"同路径换内容"的待退役旧行 hash；真正退役推迟到扫描结束。
 
-    intake 只按 hash 判重：同路径新内容判 added 落新行后，旧行（不同 hash）仍
-    classified——doc_pool 会同路径双份抽题，G5 只查 src 存在拦不住。旧行转
-    superseded + note replaced_by:<new_hash>，不再进任何清单（doc_pool/ingest_queue
-    都只取 classified）。返回退役行数。
+    延迟是必要的：扫描到被覆盖的 A/x.pdf 时，旧内容可能还没在 B/x.pdf 被扫到，
+    立刻退役会把仍在别处有效的记录打成 superseded（评审 2026-11-19 高风险#2）。
+    只收集"旧路径文件已不存在 / 正被当前新文件覆盖"的行；若旧记录内容还完整
+    存在于另一条路径，说明只是复制/迁移，不能退役。
     """
-    cur = conn.execute(
-        # 评审 Minor#2（2026-11-19）：拼接保留旧行 note 留痕（needs_convert 等），
-        # 不整段覆盖——' | ' || NULL = NULL，旧行无 note 时 COALESCE 兜空串。
-        "UPDATE source_documents SET status='superseded', "
-        "note='replaced_by:' || ? || COALESCE(' | ' || note, '') "
+    rows = conn.execute(
+        "SELECT doc_hash, sha256, src_path FROM source_documents "
         "WHERE dir_path=? AND file_name=? AND doc_hash != ? "
         "AND status NOT IN ('absent','superseded')",
-        (new_hash, dir_path, file_name, new_hash))
+        (dir_path, file_name, new_hash),
+    ).fetchall()
+    out = []
+    for r in rows:
+        sp = r["src_path"]
+        if sp:
+            try:
+                if os.path.samefile(sp, new_path):
+                    pass                   # 同一路径原地覆盖：正是要退役的幽灵
+                elif Path(sp).exists():
+                    if hashing.sha256_file(sp) == r["sha256"]:
+                        continue           # 别处字节未变 → 有效副本，交给 moved/duplicate
+            except OSError:
+                pass                       # 读不到/不存在 → 允许退役
+        out.append(r["doc_hash"])
+    return out
+
+
+def retire_hash(conn, old_hash: str, new_hash: str) -> int:
+    """把单条旧行转 superseded，保留原 note 留痕。"""
+    cur = conn.execute(
+        "UPDATE source_documents SET status='superseded', "
+        "note='replaced_by:' || ? || COALESCE(' | ' || note, '') "
+        "WHERE doc_hash=? AND status NOT IN ('absent','superseded')",
+        (new_hash, old_hash),
+    )
     return cur.rowcount
 
 
@@ -175,7 +233,8 @@ def main(argv=None) -> int:
         print(f"[fatal] 根目录不存在: {root}", file=sys.stderr)
         return 2
 
-    batch = args.batch or datetime.now().strftime("%Y%m%d-%H%M") + "-intake"
+    batch = args.batch or (datetime.now().strftime("%Y%m%d-%H%M%S") + "-"
+                           + secrets.token_hex(3) + "-intake")
     write_conn = None
     read_conn = None
     if args.dry_run:
@@ -185,13 +244,18 @@ def main(argv=None) -> int:
             read_conn.row_factory = sqlite3.Row
         conn = read_conn
     else:
+        db_existed = Path(args.db).exists()
         write_conn = db.connect(args.db)
         conn = write_conn
+        if db_existed:
+            db.backup_db(args.db)   # 写库前先热备份事实源（账本/金标不可重建）
 
     actions = Counter()
     by_ext = Counter()
     added = 0
     started = time.perf_counter()
+    seen_hashes: dict[str, str] = {}   # 本次扫描内存判重：dry-run 与真实运行的重复数对齐
+    pending_ghosts: list[tuple[str, str]] = []   # (旧 hash, 新 hash)，扫完再退役
 
     try:
         for p, rel, ext, size, quarantined in iter_files(root, args.all_exts):
@@ -200,7 +264,7 @@ def main(argv=None) -> int:
                 by_ext[ext] += 1
                 continue
             try:
-                sha = hashing.sha256_file(p)
+                sha, size = hashing.sha256_file_sized(p)   # size 取自同一遍读取，避免 stat/hash 竞态
             except OSError as ex:
                 print(f"[warn] 读取失败 {rel}: {ex}", file=sys.stderr)
                 actions["error"] += 1
@@ -209,7 +273,16 @@ def main(argv=None) -> int:
             if conn is None:
                 actions["candidate"] += 1
                 continue
-            action, status_after = decide(conn, doc_hash, rel, p.name, quarantined)
+            if doc_hash in seen_hashes:
+                # 同一批内重复：dry-run 不会写库，必须靠内存 seen 才能给出真实重复数
+                actions["duplicate"] += 1
+                continue
+            seen_hashes[doc_hash] = rel
+            action, status_after = decide(conn, doc_hash, rel, p.name, quarantined, sha256=sha)
+            if action == "hash_collision":
+                print(f"[warn] {rel}: 16 位短指纹撞上不同内容，跳过（需人工核对）", file=sys.stderr)
+                actions["hash_collision"] += 1
+                continue
             if quarantined and action == "added":
                 action, status_after = "quarantined", "quarantined"
             actions[action] += 1
@@ -217,9 +290,9 @@ def main(argv=None) -> int:
                 continue
 
             if action in ("added", "quarantined"):
-                n_ghost = retire_path_ghost(conn, dir_of(rel), p.name, doc_hash)
-                if n_ghost:
-                    actions["ghost_retired"] += n_ghost
+                pending_ghosts.extend(
+                    (h, doc_hash) for h in ghost_candidates(
+                        conn, dir_of(rel), p.name, doc_hash, p))
                 row = {
                     "doc_hash": doc_hash,
                     "sha256": sha,
@@ -254,9 +327,10 @@ def main(argv=None) -> int:
                     # F7 补遗（评审 Important#1，2026-11-19）：行被（重）指到新路径时，
                     # 该路径上不同 hash 的占用行同样要退役——移动/复制覆盖与原地改
                     # 内容是同一故障模式（doc_pool 同路径双份抽题 + hash 绑错内容）。
-                    n_ghost = retire_path_ghost(conn, dir_of(rel), p.name, doc_hash)
-                    if n_ghost:
-                        actions["ghost_retired"] += n_ghost
+                    # 同样延迟到扫描结束：占用行的有效副本可能还没被扫到。
+                    pending_ghosts.extend(
+                        (h, doc_hash) for h in ghost_candidates(
+                            conn, dir_of(rel), p.name, doc_hash, p))
                 else:
                     # duplicate：只更新"最后见到"，绝不改路径。
                     # 否则隔离区/别处的重名件会把库内记录的位置改走（曾踩过）。
@@ -267,6 +341,12 @@ def main(argv=None) -> int:
                     write_conn.execute("UPDATE source_documents SET status=? WHERE doc_hash=?", (status_after, doc_hash))
 
         if write_conn is not None:
+            # 扫描结束才退役：旧内容若在本批另一条路径被见到，它的记录已走 moved 更新，
+            # 不能再打成 superseded（否则有效内容从所有清单里静默消失）。
+            for old_hash, new_hash in pending_ghosts:
+                if old_hash in seen_hashes:
+                    continue
+                actions["ghost_retired"] += retire_hash(conn, old_hash, new_hash)
             db.record_batch(
                 write_conn,
                 batch_id=batch,

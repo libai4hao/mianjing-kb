@@ -18,6 +18,9 @@ from . import config
 
 SCHEMA_FILE = Path(config.META_DIR) / "schema" / "001_init.sql"
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
+BACKUP_KEEP = 5
+COUNT_FIELDS = {"status", "category", "collection", "source_trust", "topic",
+                "sub_topic", "ext", "parent_dir", "batch_id", "gate_result"}
 
 
 def connect(db_path: Path | str | None = None, *, create: bool = True,
@@ -26,20 +29,27 @@ def connect(db_path: Path | str | None = None, *, create: bool = True,
 
     readonly=True 以 `mode=ro` 打开（不建库、不迁移、不写 WAL）：只读工具（如 purge_origin）
     用它在"只查询、绝不改库"的场景下工作。
+    create=False 且文件不存在时直接报错——sqlite3.connect 默认会新建空库，
+    参数写错就会悄悄生成一个空文件，直到"表不存在"才暴露。
     """
     path = Path(db_path or config.DB_PATH)
+    if not path.exists() and not create:
+        raise FileNotFoundError(f"数据库不存在：{path}")
     if readonly:
         if not path.exists():
             raise FileNotFoundError(f"数据库不存在：{path}")
         conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 10000")
         return conn
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA synchronous = FULL")   # kb.sqlite 是事实源，断电不丢已提交事务
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 10000")
     if create:
         migrate(conn)
     return conn
@@ -60,7 +70,7 @@ def _ensure_parent_dir(conn: sqlite3.Connection) -> None:
     if not _column_exists(conn, "source_documents", "parent_dir"):
         conn.execute("ALTER TABLE source_documents ADD COLUMN parent_dir TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sd_parent ON source_documents(parent_dir)")
-    # 视图必须可重建：清单口径会演进（如"隔离区永不出现在清单里"），IF NOT EXISTS 改不动旧定义
+    # 注意：本迁移已上线，视图定义不得再改；口径要演进必须新增 010 迁移。
     conn.execute("DROP VIEW IF EXISTS ingest_queue")
     conn.execute(
         """
@@ -136,12 +146,12 @@ def _ensure_golden_labels(conn: sqlite3.Connection) -> None:
 def _ensure_review_columns(conn: sqlite3.Connection) -> None:
     """009：labels_staging 加复核三列（批次三 R1，2026-11-19）。
 
-    review_state：NULL=未复核 / 'pending'=词表外待复核 / 'agree' / 'disagree'；
-    disagree 行 merge 不落库（--review-resolve 人工终审）。
+    逐列判存在：旧实现整脚本跳过一次后，中途失败会留下"只加了一列"的库，
+    下次启动看到 review_state 就跳过，另外两列永久缺失。
     """
-    if not _column_exists(conn, "labels_staging", "review_state"):
-        sql = (SCHEMA_FILE.parent / "009_review_columns.sql").read_text(encoding="utf-8")
-        conn.executescript(sql)
+    for col in ("review_state", "review_model", "review_note"):
+        if not _column_exists(conn, "labels_staging", col):
+            conn.execute(f"ALTER TABLE labels_staging ADD COLUMN {col} TEXT")
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
@@ -175,6 +185,31 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
                      (version, datetime.now().strftime(NOW_FMT)))
     conn.commit()
+    _validate_schema(conn)
+
+
+REQUIRED = {
+    "source_documents": ("doc_hash", "sha256", "src_path", "dir_path", "status",
+                         "parent_dir", "source_count", "sources_json"),
+    "questions": ("qid", "doc_hash", "topic", "difficulty", "tags"),
+    "labels_staging": ("q_norm_hash", "prompt_tokens", "completion_tokens",
+                       "review_state", "review_model", "review_note"),
+    "label_facts": ("q_norm_hash", "topic"),
+    "golden_labels": ("q_norm_hash",),
+}
+
+
+def _validate_schema(conn: sqlite3.Connection) -> None:
+    """迁移收尾自检：预期表/列缺一就抛错，不让半完成迁移进入正常使用。"""
+    for table, cols in REQUIRED.items():
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not exists:
+            raise RuntimeError(f"迁移后缺表：{table}")
+        for col in cols:
+            if not _column_exists(conn, table, col):
+                raise RuntimeError(f"迁移后缺列：{table}.{col}")
 
 
 def applied_versions(conn: sqlite3.Connection) -> list[str]:
@@ -198,28 +233,68 @@ def get_by_hash(conn: sqlite3.Connection, doc_hash: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM source_documents WHERE doc_hash = ?", (doc_hash,)).fetchone()
 
 
-def upsert_document(conn: sqlite3.Connection, row: dict) -> None:
-    """按 doc_hash 插入或更新一条原文档记录。"""
+def upsert_document(conn: sqlite3.Connection, row: dict, *, overwrite: bool = False) -> str:
+    """按 doc_hash 插入一条原文档记录；默认冲突时 DO NOTHING。
+
+    旧实现无脑覆盖全部字段：调用方若拿一条已存在的 hash 再登记，会把 classified /
+    superseded 重置成 pending_classify、丢掉 first_seen_at。需要改记录必须显式
+    overwrite=True（如 intake 的路径迁移走单独的 UPDATE，不用本函数）。
+    返回 'inserted' / 'exists'。
+    """
     cols = list(row.keys())
     placeholders = ",".join("?" for _ in cols)
-    sql = (
-        f"INSERT INTO source_documents ({','.join(cols)}) VALUES ({placeholders}) "
-        f"ON CONFLICT(doc_hash) DO UPDATE SET "
-        + ",".join(f"{c}=excluded.{c}" for c in cols if c != "doc_hash")
-    )
-    conn.execute(sql, [row[c] for c in cols])
+    action = "DO NOTHING"
+    if overwrite:
+        action = ("DO UPDATE SET "
+                  + ",".join(f"{c}=excluded.{c}" for c in cols if c != "doc_hash"))
+    sql = (f"INSERT INTO source_documents ({','.join(cols)}) VALUES ({placeholders}) "
+           f"ON CONFLICT(doc_hash) {action}")
+    cur = conn.execute(sql, [row[c] for c in cols])
+    return "inserted" if cur.rowcount else "exists"
 
 
 def record_batch(conn: sqlite3.Connection, **kw) -> None:
+    """写批次摘要：普通 INSERT，batch_id 冲突直接报错，不静默覆盖上一批统计。"""
     cols = list(kw.keys())
     conn.execute(
-        f"INSERT OR REPLACE INTO batches ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+        f"INSERT INTO batches ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
         [kw[c] for c in cols],
     )
 
 
 def count_by(conn: sqlite3.Connection, field: str) -> dict[str, int]:
+    if field not in COUNT_FIELDS:
+        raise ValueError(f"不支持的统计字段：{field}")
     rows = conn.execute(
         f"SELECT COALESCE({field},'<null>') AS k, COUNT(*) AS n FROM source_documents GROUP BY 1 ORDER BY n DESC"
     ).fetchall()
     return {r["k"]: r["n"] for r in rows}
+
+
+def backup_db(db_path: Path | str, backup_dir: Path | str | None = None,
+              keep: int = BACKUP_KEEP) -> Path:
+    """用 SQLite backup API 给事实源做热备份（含 WAL 里已提交未 checkpoint 的数据）。
+
+    kb.sqlite 存账本、label_facts、golden_labels 与 purge 依赖的元数据，不可重建；
+    purge --apply / batch_label --merge / intake 写库前都应先调一次。
+    `shutil.copy2` 只拷主文件，会漏 -wal，不能用于备份。
+    """
+    src_path = Path(db_path)
+    if not src_path.exists():
+        raise FileNotFoundError(f"数据库不存在：{src_path}")
+    bdir = Path(backup_dir) if backup_dir else src_path.parent / "backups"
+    bdir.mkdir(parents=True, exist_ok=True)
+    dst = bdir / f"{src_path.stem}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.db"
+    src = sqlite3.connect(f"file:{src_path.as_posix()}?mode=ro", uri=True)
+    try:
+        out = sqlite3.connect(str(dst))
+        try:
+            src.backup(out)
+            out.execute("PRAGMA quick_check")
+        finally:
+            out.close()
+    finally:
+        src.close()
+    for old in sorted(bdir.glob(f"{src_path.stem}-*.db"))[:-keep] if keep > 0 else []:
+        old.unlink(missing_ok=True)
+    return dst

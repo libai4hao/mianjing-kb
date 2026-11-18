@@ -267,3 +267,17 @@ def test_db_is_opened_readonly(env):
     with pytest.raises(sqlite3.OperationalError):
         conn.execute("DELETE FROM source_documents")
     conn.close()
+
+
+def test_keep_copy_in_quarantine_is_refused(env):
+    """评审 2026-11-19：99-重复文件待删 里的副本不能当保留副本（它本身就是待删件）。"""
+    qdir = env["corpus"] / "99-重复文件待删"
+    qdir.mkdir(parents=True)
+    keep = qdir / "a.pdf"
+    keep.write_bytes(b"victim-bytes")
+    victim = _victim(env)
+    _add(env, victim, status="classified", src=keep)
+
+    rc = _run(env, victim.parent, "--apply", "--yes", "--no-backup")
+    assert rc == 0                 # 计划 0 件、实删 0 件：一致
+    assert victim.exists()

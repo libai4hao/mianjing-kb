@@ -719,6 +719,8 @@ def main(argv=None) -> int:
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if not out["unknown"] else 1
         if args.merge:
+            # merge 会写 questions/label_facts，属于不可重建的事实源 → 先热备份
+            db.backup_db(args.db)
             out = merge(conn, drop_orphans=args.drop_orphans)
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if out["ok"] else 1
