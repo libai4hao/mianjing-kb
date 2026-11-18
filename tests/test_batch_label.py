@@ -282,3 +282,73 @@ def test_redact_integration_in_label_one(monkeypatch):
     assert "13812345678" not in sent["user"]
     assert "[联系方式]" in sent["user"]
     assert row["prompt_tokens"] == 7 and row["completion_tokens"] == 3   # F5 透传拆分计数
+
+
+# ---- 批次二 G2：金标抽样/录入（docs/项目审核报告/修复方案-2026-11-19.md §八）----
+
+def _stage(conn, qid: int, topic: str = "JVM", q_norm_hash: str | None = "X"):
+    """往 staging 塞一行（q_norm_hash=None 显式造 NULL 历史行）。"""
+    conn.execute("INSERT OR REPLACE INTO labels_staging "
+                 "(qid, q_norm_hash, topic, qtype, difficulty, tags, provider, model, "
+                 "redacted, latency_ms, tokens, prompt_tokens, completion_tokens, labeled_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (qid, f"hash{qid}" if q_norm_hash == "X" else q_norm_hash,
+                  topic, "八股", 3, '["tag"]', "local", "m", 0, 1, 10, 8, 2, "now"))
+
+
+def test_golden_sample_stratified_writes_todo(mini_db):
+    """G2 --golden-sample：按 topic 分层轮转抽样（小主题不被淹没），写 build/golden_todo.json。"""
+    for qid, topic in [(1, "JVM"), (2, "MySQL"), (3, "MySQL"), (4, "Redis")]:
+        _stage(mini_db, qid, topic)
+    out = bl.golden_sample(mini_db, 3)
+    assert out["sampled"] == 3 and out["strata"] == 3
+    data = json.loads((config.BUILD_DIR / "golden_todo.json").read_text(encoding="utf-8"))
+    items = data["items"]
+    assert len(items) == 3
+    assert {it["current"]["topic"] for it in items} == {"JVM", "MySQL", "Redis"}  # 层覆盖
+    it = items[0]
+    assert {"qid", "q_norm_hash", "q_text", "a_text", "current",
+            "topic_gold", "qtype_gold", "difficulty_gold"} <= set(it)
+    assert it["topic_gold"] == "" and it["qtype_gold"] == "" and it["difficulty_gold"] is None
+
+
+def test_golden_sample_skips_legacy_rows_without_hash(mini_db):
+    """G2：staging 无 q_norm_hash 的历史行不进金标（金标以 hash 为键，跨重切存活）。"""
+    _stage(mini_db, 1, "JVM")
+    _stage(mini_db, 2, "MySQL", q_norm_hash=None)
+    out = bl.golden_sample(mini_db, 5)
+    assert out["sampled"] == 1
+    assert out["items"][0]["q_norm_hash"] == "hash1"
+
+
+def test_golden_load_validates_and_inserts(mini_db, tmp_path):
+    """G2 --golden-load：填好的 todo 回灌 golden_labels；重复载入 REPLACE 幂等。"""
+    _stage(mini_db, 1, "JVM")
+    todo = {"items": [{"qid": 1, "q_norm_hash": "hash1", "q_text": "什么是 HashMap？",
+                       "a_text": "…", "topic_gold": "Java基础", "qtype_gold": "八股",
+                       "difficulty_gold": 3}]}
+    p = tmp_path / "golden_todo.json"
+    p.write_text(json.dumps(todo, ensure_ascii=False), encoding="utf-8")
+    out = bl.golden_load(mini_db, p, annotator="张三")
+    assert out["ok"] and out["loaded"] == 1
+    r = mini_db.execute("SELECT topic_gold, qtype_gold, difficulty_gold, annotator "
+                        "FROM golden_labels WHERE q_norm_hash='hash1'").fetchone()
+    assert tuple(r) == ("Java基础", "八股", 3, "张三")
+    out2 = bl.golden_load(mini_db, p)                  # 默认 annotator=human
+    assert out2["ok"] and out2["total"] == 1           # REPLACE：不重复累积
+    assert mini_db.execute("SELECT annotator FROM golden_labels").fetchone()[0] == "human"
+
+
+def test_golden_load_rejects_invalid_whole_batch(mini_db, tmp_path):
+    """G2：topic_gold 空 / qtype_gold 越界 / difficulty_gold 越界 → 整批拒绝不落表。"""
+    todo = {"items": [
+        {"q_norm_hash": "hash1", "topic_gold": "JVM"},                     # 合法（gold 类型可空）
+        {"q_norm_hash": "hash2", "topic_gold": ""},
+        {"q_norm_hash": "hash3", "topic_gold": "JVM", "qtype_gold": "玄学"},
+        {"q_norm_hash": "hash4", "topic_gold": "JVM", "difficulty_gold": 9},
+    ]}
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(todo, ensure_ascii=False), encoding="utf-8")
+    out = bl.golden_load(mini_db, p)
+    assert not out["ok"] and out["rejected"] == 3 and len(out["errors"]) <= 10
+    assert mini_db.execute("SELECT COUNT(*) FROM golden_labels").fetchone()[0] == 0

@@ -178,6 +178,82 @@ def sample_staging(conn, n: int) -> list[dict]:
     return [dict(r) for r in random.Random(42).sample(list(rows), k)]
 
 
+def golden_sample(conn, n: int) -> dict:
+    """批次二 G2：从 staging 按 topic 分层轮转抽样 → build/golden_todo.json。
+
+    分层（每层轮转抽取）保证小主题不被大主题淹没——金标要能暴露弱项主题；
+    无 q_norm_hash 的历史行跳过（金标以 hash 为键，跨 extract 重切存活）。
+    人工把 items[].topic_gold/qtype_gold/difficulty_gold 填好后 --golden-load 回灌。
+    """
+    rows = conn.execute(
+        "SELECT s.qid, s.q_norm_hash, s.topic, s.qtype, s.difficulty, s.tags, "
+        "       q.q_text, q.a_text "
+        "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
+        "WHERE s.q_norm_hash IS NOT NULL AND s.q_norm_hash != ''").fetchall()
+    strata: dict[str, list[dict]] = {}
+    for r in rows:
+        strata.setdefault(r["topic"] or "", []).append(dict(r))
+    rng = random.Random(42)
+    keys = list(strata)
+    rng.shuffle(keys)
+    for k in keys:
+        rng.shuffle(strata[k])
+    picked: list[dict] = []
+    i = 0
+    while len(picked) < n and any(strata[k] for k in keys):
+        k = keys[i % len(keys)]
+        if strata[k]:
+            picked.append(strata[k].pop())
+        i += 1
+    items = [{"qid": it["qid"], "q_norm_hash": it["q_norm_hash"],
+              "q_text": (it["q_text"] or "")[:300], "a_text": (it["a_text"] or "")[:300],
+              "current": {"topic": it["topic"], "qtype": it["qtype"],
+                          "difficulty": it["difficulty"], "tags": it["tags"]},
+              "topic_gold": "", "qtype_gold": "", "difficulty_gold": None}
+             for it in picked]
+    path = Path(config.BUILD_DIR) / "golden_todo.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"sampled": len(items), "items": items},
+                               ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"sampled": len(items), "strata": len(strata), "path": str(path), "items": items}
+
+
+def golden_load(conn, path, annotator: str = "human") -> dict:
+    """批次二 G2：读回填好的 golden_todo.json → golden_labels（非法整批拒绝）。
+
+    校验：q_norm_hash/topic_gold 非空、qtype_gold ∈ QTYPES 或空、
+    difficulty_gold ∈ 1-5 或空；任何非法项整批拒绝（全部通过才写入）。
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    items = data.get("items") if isinstance(data, dict) else data
+    errs: list[str] = []
+    for i, it in enumerate(items):
+        if not (it.get("q_norm_hash") or "").strip():
+            errs.append(f"items[{i}]: q_norm_hash 为空")
+        if not (it.get("topic_gold") or "").strip():
+            errs.append(f"items[{i}]: topic_gold 为空")
+        qg = (it.get("qtype_gold") or "").strip()
+        if qg and qg not in QTYPES:
+            errs.append(f"items[{i}]: qtype_gold 非法 {qg!r}（允许 {','.join(QTYPES)}）")
+        dg = it.get("difficulty_gold")
+        if dg is not None and dg not in (1, 2, 3, 4, 5):
+            errs.append(f"items[{i}]: difficulty_gold 非法 {dg!r}（允许 1-5）")
+    if errs:
+        return {"ok": False, "errors": errs[:10], "rejected": len(errs),
+                "note": "非法项整批拒绝（全部通过才写入）——修正后重跑"}
+    now = datetime.now().strftime(NOW_FMT)
+    conn.executemany(
+        "INSERT OR REPLACE INTO golden_labels "
+        "(q_norm_hash, q_text, topic_gold, qtype_gold, difficulty_gold, annotator, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        [[it["q_norm_hash"].strip(), (it.get("q_text") or "")[:300],
+          it["topic_gold"].strip(), (it.get("qtype_gold") or "").strip() or None,
+          it.get("difficulty_gold"), annotator, now] for it in items])
+    conn.commit()
+    total = conn.execute("SELECT COUNT(*) FROM golden_labels").fetchone()[0]
+    return {"ok": True, "loaded": len(items), "total": total}
+
+
 def merge(conn, drop_orphans: bool = False) -> dict:
     """G6 门禁复核 → FAIL 拒绝；PASS/WARN 放行（WARN=软门禁，提示人工抽查）。
 
@@ -255,6 +331,12 @@ def main(argv=None) -> int:
     ap.add_argument("--merge", action="store_true", help="G6 复核 + merge 进 questions")
     ap.add_argument("--drop-orphans", action="store_true",
                     help="与 --merge 连用：清除 staging 孤儿行（qid 已失效/题干已变）后继续合并")
+    # 批次二 G2（2026-11-19）：金标层——分层抽样出待人工标注清单 + 回灌落库
+    ap.add_argument("--golden-sample", type=int, default=0,
+                    help="从 staging 按 topic 分层抽 N 条 → build/golden_todo.json（人工填 gold）")
+    ap.add_argument("--golden-load", default="",
+                    help="回灌填好的 golden_todo.json → golden_labels（非法项整批拒绝）")
+    ap.add_argument("--annotator", default="human", help="金标标注人（--golden-load 用）")
     # F10（2026-11-19）：docs/15 §3.5 承诺的三旗标——此前 argparse 未声明，
     # 照文档敲命令报 unrecognized arguments。
     ap.add_argument("--provider", choices=("local", "online"),
@@ -289,6 +371,15 @@ def main(argv=None) -> int:
                       f"diff={r['difficulty']} redact={r['redacted']} | {r['q_text'][:50]}")
             print(json.dumps({"sampled": len(rows)}, ensure_ascii=False))
             return 0
+        if args.golden_sample:
+            out = golden_sample(conn, args.golden_sample)
+            out.pop("items")                 # 清单在文件里，控制台只报摘要
+            print(json.dumps(out, ensure_ascii=False, indent=1))
+            return 0
+        if args.golden_load:
+            out = golden_load(conn, Path(args.golden_load), annotator=args.annotator)
+            print(json.dumps(out, ensure_ascii=False, indent=1))
+            return 0 if out["ok"] else 1
         if args.merge:
             out = merge(conn, drop_orphans=args.drop_orphans)
             print(json.dumps(out, ensure_ascii=False, indent=1))
