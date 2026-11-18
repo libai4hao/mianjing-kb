@@ -3,8 +3,9 @@
 面经 / 题库知识库管线：**接入 → 分类 → 切题 → 建库 → 混合检索**，附质量门禁与人工复核链路。
 
 仓库只放可版本化的代码、规则与文档；语料原文、SQLite 库留在本机语料根（已被 `.gitignore` 排除）。
-核心管线（intake / classify / chunker / build_db / search）跨平台可用；`.doc` 转换与 OCR
-依赖 Word COM、PaddleOCR-json，仅 Windows。
+
+**平台现状：仅在 Windows 上实测。** 核心管线（intake / classify / chunker / build_db / search）
+的跨平台支持仍属**计划中**，没有 CI 验证；`.doc` 转换与 OCR 依赖 Word COM、PaddleOCR-json，仅 Windows 可用。
 
 ## 安装
 

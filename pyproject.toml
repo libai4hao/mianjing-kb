@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mianjing-kb"
 version = "0.1.0"
-description = "面经/题库知识库管线：接入 → 分类 → 切题 → 检索（Windows 优先，核心链路跨平台）"
+description = "面经/题库知识库管线：接入 → 分类 → 切题 → 检索（当前仅 Windows 实测，跨平台支持计划中）"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
