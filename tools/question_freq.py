@@ -199,6 +199,11 @@ def _clean_question(b: str) -> str | None:
     return b
 
 
+def clean_question(b: str) -> str | None:
+    """题干块 → 像问题的短句；不像题返回 None（split_questions 的对外口径）。"""
+    return _clean_question(b)
+
+
 def split_questions(text: str) -> list[str]:
     """返回题目块列表（未归一化）。"""
     out = []

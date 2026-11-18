@@ -85,6 +85,27 @@ def _walk_skip(root: Path, forbidden: list[Path], on_error):
             yield Path(dirpath) / fn
 
 
+LOG_HEADER = ["deleted_at", "origin_path", "size_bytes", "doc_hash", "kept_copy", "status"]
+
+
+def _log_path(log: Path) -> Path:
+    """老日志是 5 列（没有 status），直接追加 6 列行会把 CSV 撑成锯齿状。
+
+    表头不一致时改写到同目录的 `<stem>_v2<suffix>`，原日志一个字节都不动。
+    """
+    if not log.exists():
+        return log
+    try:
+        first = log.read_text(encoding="utf-8-sig").splitlines()[:1]
+    except OSError:
+        first = []
+    if first and [c.strip() for c in first[0].split(",")] == LOG_HEADER:
+        return log
+    alt = log.with_name(f"{log.stem}_v2{log.suffix}")
+    print(f"[warn] {log.name} 是旧表头，本次明细改写 {alt.name}（旧文件保持原样）", file=sys.stderr)
+    return alt
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="删除已收入语料的原件")
     ap.add_argument("--roots", nargs="+", required=True, help="导入源目录白名单")
@@ -94,11 +115,11 @@ def main(argv=None) -> int:
     ap.add_argument("--yes", action="store_true",
                     help="与 --apply 同时给才执行（高危：物理删除原件，缺 --yes 只打印计划）")
     ap.add_argument("--rmdirs", action="store_true", help="清掉本次删除后才变空的目录")
-    ap.add_argument("--max-delete", type=int, default=0, help="计划删除数超过 N 件时拒绝 --apply")
+    ap.add_argument("--max-delete", type=int, default=0,
+                    help="计划删除数超过 N 件时拒绝 --apply（0 = 不设上限）")
     ap.add_argument("--allow-superseded-no-replacement", action="store_true",
                     help="放行 note 里没有 converted_to: 的 superseded 记录（默认拒绝）")
     args = ap.parse_args(argv)
-
     refused = False
     if args.apply and not args.yes:
         print("[refuse] --apply 必须配 --yes：这是物理删除，缺一步就只打印计划", file=sys.stderr)
@@ -208,7 +229,7 @@ def main(argv=None) -> int:
         conn.close()
         return 2
 
-    log = Path(args.log)
+    log = _log_path(Path(args.log))
     log.parent.mkdir(parents=True, exist_ok=True)
     new_log = not log.exists()
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -217,7 +238,7 @@ def main(argv=None) -> int:
     with log.open("a", encoding="utf-8-sig", newline="") as fh:
         w = csv.writer(fh)
         if new_log:
-            w.writerow(["deleted_at", "origin_path", "size_bytes", "doc_hash", "kept_copy", "status"])
+            w.writerow(LOG_HEADER)
 
         def row(status: str, p: Path, size: int, digest: str, keep: Path) -> None:
             w.writerow([now, str(p), size, digest, str(keep), status])

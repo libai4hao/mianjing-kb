@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""`kb` 命令入口：把 31 个脚本收成一个入口，省掉 `python tools\\x.py` 的路径细节。
+"""`kb` 命令入口：把全部脚本收成一个入口，省掉 `python tools\\x.py` 的路径细节。
 
 设计：本模块只做分发，不改变各脚本的行为——每个子命令都转调对应模块的 main(argv)，
 子模块仍按既有方式自己 bootstrap sys.path，因此直接 `python tools\\intake.py` 依旧可用。

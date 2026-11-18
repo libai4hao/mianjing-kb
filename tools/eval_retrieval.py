@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""检索评测：给定查询集与期望命中，算 recall@k，为分块策略 / 向量模型改动提供对比基线。
+"""检索评测：给定查询集与期望片段，算命中率@k，为分块策略 / 向量模型改动提供对比基线。
+
+注意口径：这里的 `hit_at_k` 是"前 k 条里是否出现期望片段"，属于 hit@k；
+真正的 recall@k 需要为每条查询标注**全部**相关文档，当前用 expect_any 近似。
+所以它能抓"检索完全召回不到"的退化，抓不到"相关项还在但排名下滑"。
 
 用法：
     python tools/eval_retrieval.py --queries eval/demo_queries.yaml --db <面经库.db> --k 5
@@ -10,7 +14,8 @@
       - q: "HashMap 扩容"
         expect_any: ["扩容"]          # 命中判定：任一返回行的 q_text/a_text/source 含该子串
         topic: "Java"                 # 可选过滤
-退出码：recall@k 低于 --min-recall 时返回 1（可直接挂 CI）。
+        expect_ids: ["<doc_hash>"]    # 可选：给全相关项后可算严格 recall@k
+退出码：hit@k 低于 --min-recall 时返回 1（可直接挂 CI）。
 """
 from __future__ import annotations
 
@@ -43,17 +48,31 @@ def hit(row: dict, expects: list[str]) -> bool:
 def evaluate(db: Path, queries: list[dict], k: int, mode: str) -> dict:
     con = S._con(db)
     fn = {"kw": S.keyword_search, "vec": S.vector_search, "hybrid": S.hybrid_search}[mode]
-    details, hits = [], 0
+    details, hits, strict_hits = [], 0, 0
     for item in queries:
         q = item["q"]
         expects = item.get("expect_any") or []
+        ids = item.get("expect_ids") or []
         rows = fn(con, q, limit=k, topic=item.get("topic"))
-        ok = any(hit(r, expects) for r in rows) if expects else bool(rows)
+        if expects:
+            ok = any(hit(r, expects) for r in rows)
+        elif ids:
+            got = {str(r.get("doc_hash") or "") for r in rows}
+            ok = any(i in got for i in ids)
+        else:
+            ok = bool(rows)     # 没给期望时只记"有没有返回"，用于冒烟，不代表质量
         hits += 1 if ok else 0
+        if ids:
+            strict_hits += 1 if any(i in {str(r.get("doc_hash") or "") for r in rows} for i in ids) else 0
         details.append({"q": q, "ok": ok, "top": (rows[0]["q_text"] if rows else None)})
     con.close()
-    return {"queries": len(queries), "k": k, "mode": mode,
-            "recall_at_k": round(hits / len(queries), 4), "details": details}
+    out = {"queries": len(queries), "k": k, "mode": mode,
+           "hit_at_k": round(hits / len(queries), 4), "details": details}
+    out["recall_at_k"] = out["hit_at_k"]      # 兼容旧字段名；只有给全相关项时才是严格 recall
+    if any(item.get("expect_ids") for item in queries):
+        n = sum(1 for item in queries if item.get("expect_ids"))
+        out["strict_recall_at_k"] = round(strict_hits / n, 4)
+    return out
 
 
 def main(argv=None) -> int:
@@ -72,7 +91,7 @@ def main(argv=None) -> int:
         return 2
     res = evaluate(db, load_queries(Path(args.queries)), args.k, args.mode)
     print(json.dumps(res, ensure_ascii=False, indent=1))
-    return 0 if res["recall_at_k"] >= args.min_recall else 1
+    return 0 if res["hit_at_k"] >= args.min_recall else 1
 
 
 if __name__ == "__main__":

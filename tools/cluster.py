@@ -40,8 +40,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kb import config  # noqa: E402
-from question_freq import (DSU, close_word, extract, grams, hamming, jaccard,  # noqa: E402
-                           normalize, simhash, split_qa)
+from question_freq import (DSU, clean_question, close_word, extract, grams, hamming,  # noqa: E402
+                           jaccard, normalize, simhash, split_qa)
 
 ANSWER_AGREE = 0.45      # 答案块 Jaccard 低于此值 → 视为"同题不同答"，不许自动删
 
@@ -133,6 +133,12 @@ def collect_questions(paths, cache: TextCache, stats: defaultdict, limit: int = 
         stats["questions"] += len(qs)
         for item in qs:
             q, a = (item, "") if isinstance(item, str) else (item[0], item[1] if len(item) > 1 else "")
+            # 与 split_questions 同口径：非"像问题"的块（长段正文/陈述句）不进聚类，
+            # 否则答案正文会被当成题干互相强并，制造假重复
+            q = clean_question(q) or ""
+            if not q:
+                stats["not_question"] += 1
+                continue
             nq = normalize(q)
             if len(nq) < 6:
                 stats["too_short"] += 1
@@ -155,6 +161,8 @@ def build_clusters(items, auto: float, manual: float, answers=None):
     强并条件：精确同文 或 (LSH 候选 & 汉明<=24 & Jaccard>=auto)。
     0.85<=J<0.92 只记 pending，不 union。
     conflicts：被强并但**答案不同**的对（不撤销并簇，只在 99 区判定时降级为 manual）。
+    局限：答案块靠"答案：/解析：/答："这类标记切分，标记缺失时答案为空，冲突检查不生效；
+    结果里的 answer_coverage 就是这条判据的覆盖率，低于 30% 会告警，此时 strong 需人工复核。
     """
     hashes = [simhash(t) for t, _, _ in items]
     gsets = [grams(t) for t, _, _ in items]
@@ -235,8 +243,14 @@ def main(argv=None) -> int:
     all_q = pool_q + q99
     items = [(t, simhash(t), rel) for (t, _q, rel, _a) in all_q]
     answers = [a for (_t, _q, _r, a) in all_q]
+    # 答案覆盖率：没有答案块的题对无法做"同题异答"判定，覆盖率过低时 strong 结论要打折扣
+    answer_coverage = round(sum(1 for a in answers if a) / len(answers), 4) if answers else 0.0
     n_pool = len(pool_q)
-    print(f"[items] 库内题 {n_pool}，99 区题 {len(q99)}，共 {len(items)}", flush=True)
+    print(f"[items] 库内题 {n_pool}，99 区题 {len(q99)}，共 {len(items)}，"
+          f"答案覆盖 {answer_coverage:.0%}", flush=True)
+    if items and answer_coverage < 0.3:
+        print("[warn] 答案块覆盖不足 30%：同题异答判定基本失效，99 区 strong 结论需人工复核",
+              file=sys.stderr)
 
     dsu, pending, strong, conflicts = build_clusters(items, args.auto, args.manual, answers)
 
@@ -328,6 +342,7 @@ def main(argv=None) -> int:
         "thresholds": {"auto": args.auto, "manual": args.manual},
         "stats": {**stats, "pool_questions": n_pool, "q99_questions": len(q99),
                   "clusters_ge2_with_pool": len(clusters_out),
+                  "answer_coverage": answer_coverage,
                   "strong_pairs": len(strong), "pending_pairs": len(pending),
                   "answer_conflicts": len(answer_conflicts)},
         "verdict99": dict(cnt),
@@ -365,6 +380,7 @@ def main(argv=None) -> int:
     print(json.dumps({
         "docs": stats["docs"], "questions": stats["questions"],
         "clusters_ge2_with_pool": len(clusters_out),
+        "answer_coverage": answer_coverage,
         "strong_pairs": len(strong), "pending_pairs": len(pending),
         "answer_conflicts": len(answer_conflicts),
         "verdict99": dict(cnt),

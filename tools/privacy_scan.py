@@ -3,6 +3,7 @@
 
 扫描对象是 **git 已跟踪文件**（默认）或 **暂存区**（--staged，供 pre-commit 调用），
 不扫未跟踪文件——工作区的临时产物不该挡住提交。
+覆盖边界：只看**当前文件内容**；历史提交里的泄露需另用 gitleaks / trufflehog 扫 git log。
 
 规则（命中即失败）：
   abs_path      Windows 绝对路径（C:\\ / D:\\），仓库文档只允许 `<CORPUS_ROOT>` 这类占位符

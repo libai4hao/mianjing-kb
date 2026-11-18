@@ -7,9 +7,9 @@
 - 合成语料在 examples/demo_corpus（5 个源文件 + 5 个 md 镜像 + 1 份重复件），无任何真实面经内容。
 
 用法：
-    python tools/demo.py                 # 临时目录跑完即走（打印统计）
-    python tools/demo.py --keep          # 保留目录，打印路径供手工检查
-    python tools/demo.py --work D:\\tmp\\kb-demo
+    python tools/demo.py                 # 临时目录跑完即删（只打印统计）
+    python tools/demo.py --keep          # 保留临时目录，打印路径供手工检查
+    python tools/demo.py --work <dir>    # 指定工作目录（总是保留）
 """
 from __future__ import annotations
 
@@ -50,7 +50,10 @@ def prepare(work: Path) -> Path:
     if corpus.exists():
         shutil.rmtree(corpus)
     shutil.copytree(DEMO_SRC, corpus)
-    (work / "build").mkdir(parents=True, exist_ok=True)
+    build = work / "build"
+    if build.exists():                       # 复用 --work 时清掉上次的库与日志，保证结果可重复
+        shutil.rmtree(build)
+    build.mkdir(parents=True)
     return corpus
 
 
@@ -117,16 +120,17 @@ def _counts(db_path: Path, out_db: Path) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="用合成语料跑通全链路（不碰生产库）")
     ap.add_argument("--work", default=None, help="工作目录（默认临时目录）")
-    ap.add_argument("--keep", action="store_true", help="保留工作目录（默认临时目录跑完保留，--no-keep 才删）")
-    ap.add_argument("--no-keep", action="store_true", help="跑完删除临时目录")
+    ap.add_argument("--keep", action="store_true", help="保留临时工作目录（默认跑完删除；--work 指定的目录总是保留）")
+    ap.add_argument("--no-keep", action="store_true", help="兼容旧参数：与默认行为一致，跑完删除临时目录")
     args = ap.parse_args(argv)
 
+    temp = not args.work
     work = Path(args.work) if args.work else Path(tempfile.mkdtemp(prefix="kb-demo-"))
     work.mkdir(parents=True, exist_ok=True)
     res = run(work)
     print(json.dumps({"ok": res["ok"], "gates": res.get("gates", {}),
                       "work": res["work"], "db": res["db"]}, ensure_ascii=False, indent=1))
-    if not args.work and args.no_keep:
+    if temp and not args.keep:
         shutil.rmtree(work, ignore_errors=True)
     return 0 if res["ok"] else 1
 

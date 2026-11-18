@@ -30,3 +30,12 @@ def test_demo_does_not_touch_real_corpus(tmp_path, monkeypatch):
     res = demo.run(tmp_path / "demo2", quiet=True)
     assert Path(res["corpus"]).parts[-2:] == ("demo2", "corpus")
     assert Path(res["db"]) == tmp_path / "demo2" / "build" / "kb.sqlite"
+
+
+def test_demo_is_repeatable_in_same_work_dir(tmp_path):
+    """复用 --work 时必须清掉上次的 build，否则计数会累加、门禁读到旧库。"""
+    work = tmp_path / "demo3"
+    a = demo.run(work, quiet=True)
+    b = demo.run(work, quiet=True)
+    assert b["ok"]
+    assert a["counts"] == b["counts"]

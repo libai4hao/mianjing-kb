@@ -201,6 +201,19 @@ def test_rmdirs_only_removes_dirs_emptied_by_this_run(env):
     assert not target.exists()                     # 本次删空 → 清掉
 
 
+def test_legacy_log_header_is_rotated(env):
+    """老日志是 5 列，直接追加 6 列行会撑坏 CSV：表头不符时改写 _v2，旧文件一个字节不动。"""
+    p = _victim(env)
+    _add(env, p, src=_keep(env))
+    legacy = env["build"] / "del.csv"
+    legacy.write_text("deleted_at,origin_path,size_bytes,doc_hash,kept_copy\n", encoding="utf-8")
+    before = legacy.read_bytes()
+    assert _run(env, p.parent, "--apply", "--yes") == 0
+    assert legacy.read_bytes() == before
+    rows = list(csv.DictReader((env["build"] / "del_v2.csv").open(encoding="utf-8-sig")))
+    assert [r["status"] for r in rows] == ["planned", "deleted"]
+
+
 def test_db_is_opened_readonly(env):
     p = _victim(env)
     _add(env, p, src=_keep(env))
