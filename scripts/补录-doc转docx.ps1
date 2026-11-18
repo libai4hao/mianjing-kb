@@ -1,4 +1,4 @@
-﻿<#
+<#
 ! DEPRECATED（2026-11-17, P1-5）：本脚本已废弃，勿再使用。
 ! 功能与 tools\doc_convert.py 重叠且后者已成为生产链路（.doc→.docx 就地转换 + convert_log
 ! + DB 台账 + 门禁，47 件已全部转换完结）；本脚本与 docs/03 的"30-补录 镜像树"方案
@@ -21,7 +21,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$SourceRoot = '<CORPUS_ROOT>',
+    [string]$SourceRoot = $env:KB_CORPUS_ROOT,
     [string]$StageName  = '30-补录',
     [string]$BuildRel   = '21-面经数据库\build',
     [switch]$EmitOverrides,
@@ -29,6 +29,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $SourceRoot) {
+    throw '请用 -SourceRoot 或环境变量 KB_CORPUS_ROOT 指定语料根（本脚本已废弃，优先用 tools\doc_convert.py）'
+}
 
 $srcRoot   = (Get-Item -LiteralPath $SourceRoot).FullName
 $stageRoot = Join-Path $srcRoot $StageName

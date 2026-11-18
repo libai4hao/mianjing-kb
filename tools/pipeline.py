@@ -9,7 +9,7 @@
 用法：
     python tools/pipeline.py --check                       # 只预览：不写库，只报会新增/重复多少
     python tools/pipeline.py                               # 处理 31-收件箱
-    python tools/pipeline.py --root "<DOWNLOAD_DIR>\\新增"     # 处理任意目录后入库
+    python tools/pipeline.py --root "<DOWNLOAD_DIR>\\新增"     # 处理任意目录后入库（示例路径，按本机实际替换）
 """
 from __future__ import annotations
 

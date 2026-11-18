@@ -13,7 +13,7 @@
 是有意为之（转换后的 .docx 可能已被 reconvert 改名），只统计不拦截。
 
 用法：
-    python tools/purge_origin.py --roots "<RESOURCE_ROOT>\\就业资料" "<DOC_ROOT>\\待分类"
+    python tools/purge_origin.py --roots "%RESOURCE_ROOT%\\就业资料" "%DOC_ROOT%\\待分类"
     python tools/purge_origin.py --roots ... --apply
 """
 from __future__ import annotations

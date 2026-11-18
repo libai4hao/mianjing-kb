@@ -2,7 +2,7 @@
 """全局配置：路径、扩展名白名单、门禁阈值。
 
 所有路径都可以用环境变量覆盖，便于换机器 / 换语料根：
-    KB_CORPUS_ROOT   语料根，默认 <CORPUS_ROOT>
+    KB_CORPUS_ROOT   语料根（**必填**；未设时保留占位 <CORPUS_ROOT>，工具打开即报路径不存在）
     KB_BUILD_DIR     台账与数据库目录，默认 <corpus>\\21-面经数据库\\build
     KB_DB            数据库文件，默认 <build>\\kb.sqlite
 """

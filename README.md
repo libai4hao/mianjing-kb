@@ -19,6 +19,7 @@ meta/
   folder_rules.yaml       目录结构位 → category / source_trust；包装词；顶层主题目录；reject_patterns
   overrides.json          人工分类覆盖表（P1-5，最高优先级）
   exclusions.json         出题池排除表（P2-⑤：保留检索、不抽题）
+  skip_log.example.json   语料清单模板（真实 `skip_log.json` 含来源文件名，已 .gitignore 排除）
 tools/
   kb/                     公共库：config / db / hashing / textmetrics
   ── 入库管线 ──
@@ -71,13 +72,30 @@ tests/                    253 个用例（pytest 全绿；textmetrics/intake/cla
 OCR 不是 pip 包：走外置引擎 PaddleOCR-json v1.4.1（`KB_OCR_ENGINE_EXE` 指定）；
 `.doc` 读文本与 `.docx` 转换需要本机装 Office（Word COM，仅 Windows）。
 
+## 配置：环境变量与占位符
+
+本仓库所有路径都不写死本机位置，文档里的占位符与代码里的环境变量一一对应：
+
+| 占位符 | 环境变量 | 含义 |
+|---|---|---|
+| `<CORPUS_ROOT>` | `KB_CORPUS_ROOT` | 语料根（必填；工具找不到会直接报路径不存在） |
+| `<RESOURCE_ROOT>` / `<SOURCE_ROOT>` / `<SOURCE_DIR>` | — | 语料之外的资料目录（示例，按本机实际替换） |
+| `<REPO_ROOT>` | — | 本仓库根（就地 `Set-Location` 即可） |
+| `<WORKSPACE_ROOT>` / `<REPO_BASE>` / `<DOC_ROOT>` | — | 共用工作区根 / 统一仓库根 / 文档目录（同上，仅叙述用） |
+| `<PYTHON_HOME>` / `python` | — | 解释器（Python ≥ 3.11，装好依赖后直接用 `python`） |
+| `<DOWNLOAD_DIR>` / `<HOME>` | — | 下载目录 / 用户主目录（示例路径） |
+| `<OCR_ENGINE_DIR>` | `KB_OCR_ENGINE_DIR` | PaddleOCR-json 引擎目录（缺省占位，用前必设） |
+| `<LLM_ROOT>` / `<MODELS_DIR>` / `<LLAMA_DIR>` / `<TOOLS_DIR>` | `OLLAMA_MODELS` 等 | 本地模型与工具目录（示例，按本机实际替换） |
+
+其余可覆盖的变量：`KB_BUILD_DIR`（台账/库目录）、`KB_DB`（库文件）、`KB_META_DIR`（规则目录）。
+
 ## 快速开始
 
 ```powershell
 $py = "python"
-$repo = "<REPO_ROOT>"
-$db = "<CORPUS_ROOT>\21-面经数据库\build\kb.sqlite"
-Set-Location -LiteralPath $repo
+$corpus = $env:KB_CORPUS_ROOT          # 先设好语料根
+$repo = (Get-Location).Path            # 在仓库根执行
+$db = Join-Path $corpus "21-面经数据库\build\kb.sqlite"
 
 # 1. 登记（建表 + hash 判重；写库）
 & $py tools\intake.py --db $db
@@ -88,7 +106,7 @@ Set-Location -LiteralPath $repo
 & $py tools\classify.py --db $db --redo     # 改规则后重判（不动 quarantined / processed）
 
 # 3. 门禁（检查 md 产物的文本质量）
-& $py tools\gate.py --md-dir "<CORPUS_ROOT>\20-题库MD" --db $db --top 12
+& $py tools\gate.py --md-dir (Join-Path $corpus "20-题库MD") --db $db --top 12
 
 # 4. OCR（本地引擎，零 API 成本）
 & $py tools\ocr_pages.py --smoke
@@ -196,3 +214,10 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
   131 篇有 md 未入库 → 重建并入，5,192 topic 空串 → 继承链归零；终检 G1-G5 全 PASS。
 
 详见 `docs/04-工具链SOP.md` 与 `docs/15-检验门禁与线上打标方案-2026-11-17.md`。
+
+## 许可
+
+源码与文档按 MIT 授权，见 `LICENSE`。仓库**不包含**任何面经/题库原文及其派生数据：
+语料、SQLite 库、`meta/skip_log.json`（语料清单）都在本机，已被 `.gitignore` 排除。
+文档中出现的书名、题目版权归原作者，仅作工程说明，不构成转载。
+

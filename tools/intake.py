@@ -10,7 +10,7 @@
 用法：
     python tools/intake.py --dry-run                 # 只看统计（有库时也报重复数），不写库
     python tools/intake.py                           # 登记语料根
-    python tools/intake.py --root "<DOWNLOAD_DIR>\\面试资料"   # 登记语料树之外的目录
+    python tools/intake.py --root "<DOWNLOAD_DIR>\\面试资料"   # 登记语料树之外的目录（示例路径，按本机实际替换）
     python tools/intake.py --all-exts                # 连图片/xmind 也登记（默认只登记文档型）
 """
 from __future__ import annotations

@@ -23,16 +23,39 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
+
+from kb import config, db  # noqa: E402
+
 # 审核修复（2026-11-18）：原 insert(0) 会把语料侧 tools 顶到最前，遮蔽本仓库同名模块
 # （同进程后续 from build_db import build 会解析到语料侧旧模块）；改为 append 放到末尾。
-sys.path.append(str(Path(r"<CORPUS_ROOT>\21-面经数据库\tools")))
+# 公开仓脱敏（2026-11-19）：语料侧 tools 路径不再硬编码，由 config.CORPUS_ROOT 推导；
+# 路径不存在时模块仍可导入（换机器/未设 KB_CORPUS_ROOT 不至于连 import 都炸），调用时才报错。
+def _load_convert_one():
+    tools_dir = config.CORPUS_ROOT / "21-面经数据库" / "tools"
+    if tools_dir.is_dir() and str(tools_dir) not in sys.path:
+        sys.path.append(str(tools_dir))
+    import convert_one  # 存量转换器（pdf_to_md / docx_to_md / safe_name / cjk_ratio）
+    return convert_one
 
-import convert_one  # noqa: E402  存量转换器（pdf_to_md / docx_to_md / safe_name / cjk_ratio）
-from kb import config, db  # noqa: E402
+
+try:
+    convert_one = _load_convert_one()
+except ModuleNotFoundError:   # 未配语料根或该机没有语料侧工具
+    convert_one = None
 
 BUILD = Path(config.BUILD_DIR)             # P1-3 修复（2026-11-17 审核）：路径统一走 config
 MD_ROOT = Path(config.QUESTION_MD_DIR)     # KB_* 环境变量可覆盖，换机器不再失效
 CAT_MAP = {"题库": "题库", "真题": "真题", "面经": "面经", "个人面经": "个人面经", "专题笔记": "专题笔记"}
+
+
+def _require_convert_one():
+    """取存量转换器；拿不到就给一句能照做的错误，而不是 ModuleNotFoundError 栈。"""
+    if convert_one is not None:
+        return convert_one
+    raise RuntimeError(
+        "找不到语料侧 convert_one 模块：请设置 KB_CORPUS_ROOT 指向语料根"
+        "（其中应含 21-面经数据库/tools/convert_one.py）")
+
 
 
 def losers_from_log() -> list[dict]:
@@ -58,10 +81,11 @@ def convert_one_entry(rel: str, category: str, topic: str, dry_run: bool) -> dic
     if not src.exists():
         out.update(ok=False, err="源件不存在（已删/隔离）")
         return out
+    cv = _require_convert_one()
     doc_hash = sha16(src)
     out["doc_hash"] = doc_hash
-    stem = convert_one.safe_name(Path(rel).stem)
-    out_dir = MD_ROOT / CAT_MAP.get(category, category) / (convert_one.safe_name(topic) or "综合")
+    stem = cv.safe_name(Path(rel).stem)
+    out_dir = MD_ROOT / CAT_MAP.get(category, category) / (cv.safe_name(topic) or "综合")
     md_path = out_dir / f"{stem}_{doc_hash[:8]}.md"
     out["md"] = str(md_path.relative_to(MD_ROOT).as_posix())
     if dry_run:
@@ -70,19 +94,19 @@ def convert_one_entry(rel: str, category: str, topic: str, dry_run: bool) -> dic
     try:
         ext = src.suffix.lower()
         if ext == ".pdf":
-            md, pages, kept, skipped = convert_one.pdf_to_md(
+            md, pages, kept, skipped = cv.pdf_to_md(
                 str(src), str(out_dir / "images"), stem + f"_{doc_hash[:8]}", "pymupdf4llm")
-            ratio = convert_one.cjk_ratio(md)
+            ratio = cv.cjk_ratio(md)
             if ratio < 0.05:
                 out.update(ok=False, err=f"低CJK({ratio:.1%})")
                 return out
         elif ext == ".docx":
-            md = convert_one.docx_to_md(str(src))
-            pages, kept, skipped, ratio = 1, 0, 0, convert_one.cjk_ratio(md)
+            md = cv.docx_to_md(str(src))
+            pages, kept, skipped, ratio = 1, 0, 0, cv.cjk_ratio(md)
         elif ext == ".md":
             # md 源的"转换"就是拷贝（原转换器不支持 .md，这 2 条当时也是直接落 md）
             md = src.read_text(encoding="utf-8", errors="replace")
-            pages, kept, skipped, ratio = 1, 0, 0, convert_one.cjk_ratio(md)
+            pages, kept, skipped, ratio = 1, 0, 0, cv.cjk_ratio(md)
         else:
             out.update(ok=False, err=f"暂不支持 {ext}")
             return out

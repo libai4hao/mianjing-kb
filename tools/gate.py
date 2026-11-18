@@ -26,7 +26,7 @@ gate_results 台账（--md-dir 模式，--no-db 跳过）仍用 textmetrics 四�
 
 用法：
     python tools/gate.py --audit                          # 生产：产 BUILD/gate_report.json
-    python tools/gate.py --md-dir "<CORPUS_ROOT>\\20-题库MD" --top 20
+    python tools/gate.py --md-dir "%CORPUS_ROOT%\\20-题库MD" --top 20
     python tools/gate.py --md-dir ... --no-db --out report.json
     python tools/gate.py --sentinel                       # 哨兵回归集：判定不退化校验（语料侧移植）
 """
