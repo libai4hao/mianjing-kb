@@ -355,9 +355,16 @@ def g6_label(kb_conn) -> dict:
     # 软指标：新 topic 占比（现有 questions 未出现过的主题）
     known = {r[0] for r in kb_conn.execute(
         "SELECT DISTINCT topic FROM questions WHERE topic IS NOT NULL AND topic != ''")}
-    new_topics = {r["topic"] for r in rows if (r["topic"] or "").strip()} - known
-    n_new = sum(1 for r in rows if (r["topic"] or "").strip() in new_topics)
-    drift = n_new / n
+    if known:
+        new_topics = {r["topic"] for r in rows if (r["topic"] or "").strip()} - known
+        n_new = sum(1 for r in rows if (r["topic"] or "").strip() in new_topics)
+        drift = n_new / n
+        drift_baseline = "questions"
+    else:
+        # F8/bug1（2026-11-19）：首批打标时 questions 的 topic 必然全空（无基线），
+        # 漂移指标无意义——原实现此时 drift=1.0 必 WARN，属误报。跳过并留痕。
+        drift = 0.0
+        drift_baseline = "none(首批)"
 
     fails = []
     state = "PASS"
@@ -373,7 +380,8 @@ def g6_label(kb_conn) -> dict:
                       "note": "新主题占比偏高——--sample 50 人工抽查后再 merge"})
     return _gate("G6", "打标质量", "软→硬", state, fails,
                  {"staged": n, "ok_rate": round(ok_rate, 4),
-                  "new_topic_ratio": round(drift, 4)}, sql)
+                  "new_topic_ratio": round(drift, 4),
+                  "drift_baseline": drift_baseline}, sql)
 
 
 # ---------------- G7 文档一致性（软） ----------------

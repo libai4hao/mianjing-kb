@@ -252,6 +252,26 @@ def test_g6_skip_and_pass_and_fail(mini_env):
     assert any(f.get("kind") == "schema_ok_rate" for f in g3["fails"])
 
 
+def test_g6_first_batch_no_drift_warn(mini_env):
+    """F8/bug1：首批打标（questions 现有 topic 全空=无基线）不得因 drift 误报 WARN。
+
+    原实现 drift 基线=questions 现有非空 topic，首批打标前必空 → 所有 topic 都算
+    "新主题" → drift=1.0 必 WARN。无基线时漂移指标无意义，应跳过并留痕。
+    """
+    kb = mini_env["kb"]
+    kb.execute("INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
+               "q_norm_hash, simhash, span_start, span_end, topic, extracted_at) VALUES "
+               "(1,'h1',1,'什么是JVM？','','八股','high','x','y',0,0,1,'','now')")
+    kb.execute("INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, provider, "
+               "model, redacted, latency_ms, tokens, labeled_at) VALUES "
+               "(1,'JVM','八股',3,'[\"类加载\"]','p','m',0,1,1,'now')")
+    kb.commit()
+    g = vl.g6_label(kb)
+    assert g["state"] == "PASS"
+    assert g["detail"]["new_topic_ratio"] == 0.0
+    assert g["detail"].get("drift_baseline") == "none(首批)"
+
+
 # ---------------- main / exit code ----------------
 def test_main_exit_codes(mini_env, capsys):
     assert vl.main([]) == 0                       # 干净环境（G4 WARN 不阻断）
