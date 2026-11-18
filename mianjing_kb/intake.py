@@ -364,9 +364,13 @@ def main(argv=None) -> int:
                 added_n = 0
                 now = datetime.now().strftime(NOW_FMT)
                 if action in ("moved", "renamed", "resurrected", "to_quarantine", "revived"):
-                    old_src = db.get_by_hash(conn, doc_hash)["src_path"] if action == "revived" else None
+                    row = db.get_by_hash(conn, doc_hash)
+                    # *_from 记**旧**路径（改前），否则"从哪来"记成"到哪去"，复核时读反
+                    old_rel = (f"{row['dir_path']}/{row['file_name']}" if row["dir_path"]
+                               else row["file_name"]) if row else rel
+                    old_src = row["src_path"] if action == "revived" else None
                     note = (f"revived_from:{old_src}" if action == "revived"
-                            else f"{action}_from:{rel}")
+                            else f"{action}_from:{old_rel}")
                     write_conn.execute(
                         "UPDATE source_documents SET dir_path=?, parent_dir=?, file_name=?, src_path=?, "
                         "last_seen_at=?, note=CASE WHEN note IS NULL OR note='' THEN ? "
@@ -374,7 +378,7 @@ def main(argv=None) -> int:
                         (dir_of(rel), parent_of(rel), p.name, str(p), now, note, note, doc_hash),
                     )
                     events.append(conn, doc_hash, f"{action}_from",
-                                  {"rel": old_src if action == "revived" else rel})
+                                  {"rel": old_src if action == "revived" else old_rel})
                     # F7 补遗（评审 Important#1，2026-11-19）：行被（重）指到新路径时，
                     # 该路径上不同 hash 的占用行同样要退役——移动/复制覆盖与原地改
                     # 内容是同一故障模式（doc_pool 同路径双份抽题 + hash 绑错内容）。

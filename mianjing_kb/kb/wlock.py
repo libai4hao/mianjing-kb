@@ -13,8 +13,8 @@ doc_convert --apply / review_cli 之间仍可能同时写 kb.sqlite。`busy_time
 语义：
   - 拿到锁 = 创建锁文件（O_CREAT|O_EXCL，原子）；
   - 锁文件存在且 PID 还活着 → `LockHeld`，调用方打印"谁在跑"并退出；
-  - 锁文件存在但 PID 已死（崩溃残留）→ 视为陈旧锁，改名归档后接管（打印一行告警）；
-  - 释放 = 删除锁文件；进程被杀时靠陈旧检测兜底，不需要手工删。
+  - 锁文件存在但 PID 已死（崩溃残留）→ 视为陈旧锁，改名归档（保留 `<name>.lock.stale-<pid>`）后接管；
+  - 释放只删**自己**建的锁：若锁已被后人接管（pid 变了）就不删，否则会放跑两个写者。
 """
 from __future__ import annotations
 
@@ -98,6 +98,30 @@ def _read_holder(p: Path) -> dict | None:
         return {"raw": raw}
 
 
+def _take_over(p: Path, holder: dict | None) -> bool:
+    """把陈旧锁改名归档；只有一个进程能改名成功。"""
+    stale = p.with_name(f"{p.name}{STALE_SUFFIX}-{os.getpid()}")
+    try:
+        os.replace(p, stale)
+    except OSError:
+        return False
+    print(f"[warn] 接管陈旧锁 {p.name}（持有者 {(holder or {}).get('pid', '?')} 已不在）："
+          f"{holder}；归档保留在 {stale.name}（排查后可手工删）", file=sys.stderr)
+    return True
+
+
+def _release_owned(p: Path) -> None:
+    """只删自己建的锁：若锁已被别人接管（pid 变了），删了会放跑两个写者。"""
+    holder = _read_holder(p) or {}
+    if isinstance(holder.get("pid"), int) and holder["pid"] != os.getpid():
+        print(f"[warn] 锁 {p.name} 已被 pid={holder['pid']} 接管，本次不删除", file=sys.stderr)
+        return
+    try:
+        p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 @contextmanager
 def write_lock(name: str = "kb", tool: str = "?", *, build_dir: Path | str | None = None,
                wait_sec: float = 0.0):
@@ -124,6 +148,7 @@ def write_lock(name: str = "kb", tool: str = "?", *, build_dir: Path | str | Non
         return True
 
     deadline = time.monotonic() + max(0.0, wait_sec)
+    unreadable_until = 0.0
     while True:
         holder = _read_holder(p) if p.exists() else None
         if p.exists() and holder is not None:
@@ -134,13 +159,15 @@ def write_lock(name: str = "kb", tool: str = "?", *, build_dir: Path | str | Non
                     continue
                 raise LockHeld(p, holder)
             # 陈旧锁：改名归档（只有一个进程能改名成功），再抢建
-            stale = p.with_name(f"{p.name}{STALE_SUFFIX}-{os.getpid()}")
-            try:
-                os.replace(p, stale)
-                print(f"[warn] 接管陈旧锁 {p.name}（pid={pid} 已不在）：{holder}", file=sys.stderr)
-                stale.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _take_over(p, holder)
+            continue
+        if p.exists():                     # 文件在但内容读不出：创建者可能正在写，给 1 秒宽限
+            if not unreadable_until:
+                unreadable_until = time.monotonic() + 1.0
+            if time.monotonic() < unreadable_until:
+                time.sleep(0.05)
+                continue
+            _take_over(p, None)
             continue
         if _try_acquire():
             break
@@ -150,7 +177,4 @@ def write_lock(name: str = "kb", tool: str = "?", *, build_dir: Path | str | Non
     try:
         yield p
     finally:
-        try:
-            p.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _release_owned(p)

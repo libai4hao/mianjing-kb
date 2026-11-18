@@ -243,14 +243,14 @@ def _apply(files, args) -> int:
             )
             # 事件与 note 双写：G5 / purge 读事件，人工仍看 note（T12）
             events.append(conn, doc_hash, events.KIND_CONVERTED_TO, target, at=now)
+            conn.commit()          # 逐件提交：后面某件失败不连累前面已落盘的 docx 丢了账
             superseded += 1
-        conn.commit()
     finally:
         conn.close()
 
     print(json.dumps({"stats": stats, "superseded_rows": superseded, "root": str(args.root)},
                      ensure_ascii=False, indent=2))
-    print("[next] 接着跑：python tools\\intake.py && python tools\\classify.py")
+    print("[next] 接着跑：python -m mianjing_kb.intake && python -m mianjing_kb.classify")
     return 0
 
 

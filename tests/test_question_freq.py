@@ -1,6 +1,6 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """问题切分：题干要吃进来、答案要砍掉，近重复要能合并。"""
-from question_freq import grams, hamming, jaccard, normalize, simhash, split_questions
+from mianjing_kb.question_freq import grams, hamming, jaccard, normalize, simhash, split_questions
 
 
 def test_split_keeps_question_drops_answer():

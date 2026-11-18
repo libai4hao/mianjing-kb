@@ -266,50 +266,67 @@ def g4_index(out_conn) -> dict:
 MAX_CHAIN = 3
 
 
-def _successor_row(kb_conn, target: dict):
-    """converted_to 目标 → 台账里对应的后继行（找不到返回 None）。
+def _successor_rows(kb_conn, target: dict) -> tuple[str, list]:
+    """converted_to 目标 → (解析方式, 候选行列表)。候选多于 1 条即无法判定。"""
+    digest = target.get("hash")
+    if digest:
+        row = kb_conn.execute(
+            "SELECT doc_hash, status, note, file_name FROM source_documents WHERE doc_hash=?",
+            (digest,)).fetchone()
+        return "hash", ([row] if row else [])
+    name = target.get("name")
+    if not name:
+        return "none", []
+    if target.get("dir") is not None:
+        return "dir", kb_conn.execute(
+            "SELECT doc_hash, status, note, file_name FROM source_documents "
+            "WHERE file_name=? AND dir_path=?", (name, target["dir"])).fetchall()
+    return "name", kb_conn.execute(
+        "SELECT doc_hash, status, note, file_name FROM source_documents "
+        "WHERE file_name=?", (name,)).fetchall()
+
+
+def _successor_row(kb_conn, target: dict) -> tuple[dict | None, str]:
+    """converted_to 目标 → (台账后继行, 失败原因)。
 
     新格式带 hash：`<dir>/<name>#<docx_hash>`，hash 就是 docx 记录的 doc_hash，
     直接按 doc_hash 命中，比"文件名 + 目录"更硬（同名不同目录不会被误认）。
-    旧格式裸 `<name>`（T19）：只能按文件名找，找不到才算缺失。
+    旧格式裸 `<name>`（T19）：只能按文件名找；同名多条时**不能**随便挑一条，
+    否则 G5 会因为别的目录里同名文件合格而假过——按 `ambiguous` 判无法解析。
     """
-    digest = target.get("hash")
-    if digest:
-        return kb_conn.execute(
-            "SELECT doc_hash, status, note, file_name FROM source_documents WHERE doc_hash=?",
-            (digest,)).fetchone()
-    name = target.get("name")
-    if not name:
-        return None
-    dir_path = target.get("dir")
-    if dir_path is not None:
-        rows = kb_conn.execute(
-            "SELECT doc_hash, status, note, file_name FROM source_documents "
-            "WHERE file_name=? AND dir_path=?", (name, dir_path)).fetchall()
-    else:
-        rows = kb_conn.execute(
-            "SELECT doc_hash, status, note, file_name FROM source_documents "
-            "WHERE file_name=?", (name,)).fetchall()
+    how, rows = _successor_rows(kb_conn, target)
+    if how == "none":
+        return None, "no_target_name"
     if not rows:
-        return None
+        return None, "missing"
+    if len(rows) > 1:
+        return None, "ambiguous"          # 裸格式同名多份，无法确认是哪一条后继
     good = [r for r in rows if r["status"] in status.SUCCESSOR_OK]
     if good:
-        return good[0]
+        return good[0], ""
     # 只有被退役的候选——可能是一条接替链（.doc → .docx → .pdf），继续往下追
-    return rows[0]
+    return rows[0], ""
+
+
+def converted_target_reason(kb_conn, target: dict, depth: int = 0) -> str:
+    """后继能解析到有效态返回空串，否则返回失败原因（供 G5 明细用）。"""
+    row, why = _successor_row(kb_conn, target)
+    if row is None:
+        return why
+    if row["status"] in status.SUCCESSOR_OK:
+        return ""
+    if row["status"] not in (status.SUPERSEDED,) or depth >= MAX_CHAIN:
+        return f"chain_unsolved:{row['status']}"
+    nxt = events.converted_targets(kb_conn, row["doc_hash"], row["note"])
+    if not nxt:
+        return "chain_no_target"
+    reasons = [converted_target_reason(kb_conn, t, depth + 1) for t in nxt]
+    return "" if any(not r for r in reasons) else reasons[0]
 
 
 def converted_target_ok(kb_conn, target: dict, depth: int = 0) -> bool:
     """后继记录存在且最终落在有效态（允许有限跳数的接替链）。"""
-    row = _successor_row(kb_conn, target)
-    if row is None:
-        return False
-    if row["status"] in status.SUCCESSOR_OK:
-        return True
-    if row["status"] not in (status.SUPERSEDED,) or depth >= MAX_CHAIN:
-        return False
-    nxt = events.converted_targets(kb_conn, row["doc_hash"], row["note"])
-    return any(converted_target_ok(kb_conn, t, depth + 1) for t in nxt)
+    return not converted_target_reason(kb_conn, target, depth)
 
 
 def audit_converted(kb_conn) -> list[dict]:
@@ -370,9 +387,10 @@ def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
             else:
                 legacy = True
                 legacy_checked += 1
-            if not converted_target_ok(kb_conn, t):
+            why = converted_target_reason(kb_conn, t)
+            if why:
                 fails.append({"kind": "converted_target_missing", "rel": r["file_name"],
-                              "target": t, "legacy": legacy})
+                              "target": t, "legacy": legacy, "why": why})
         if src.exists():
             in_99 = (r["dir_path"] or "").startswith(config.QUARANTINE_PREFIX) \
                     or config.QUARANTINE_PREFIX in str(src)

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """高风险工具纯函数回归测试（2026-11-18 审核 P3）。
 
 背景：backfill_convert / ocr_pages / reconvert / purge_origin 曾无直接测试，
@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # ---------------- backfill_convert ----------------
 def test_backfill_stem_normalization():
-    from backfill_convert import _stem
+    from mianjing_kb.backfill_convert import _stem
     # 双下划线 hash 后缀（backfill 落盘口径）
     assert _stem("面试题__a1b2c3d4.md") == "面试题"
     # 单下划线 hash 后缀（reconvert 口径）
@@ -44,14 +44,14 @@ def test_backfill_target_md_paths():
 
 
 def test_backfill_hash_suffix():
-    from backfill_convert import _hash_suffix
+    from mianjing_kb.backfill_convert import _hash_suffix
     assert _hash_suffix({"doc_hash": "abcdef0123456789"}) == "abcdef01"
     assert _hash_suffix({}) == "nohash"
 
 
 # ---------------- ocr_pages ----------------
 def test_ocr_parse_range():
-    from ocr_pages import parse_range
+    from mianjing_kb.ocr_pages import parse_range
     assert parse_range("1-3,7", 10) == [1, 2, 3, 7]
     assert parse_range("2,2", 10) == [2, 2]          # 重复不去重（逐页渲染口径）
     assert parse_range("9-12", 10) == [9, 10]        # 越界页钳制
@@ -60,7 +60,7 @@ def test_ocr_parse_range():
 
 
 def test_ocr_text_path_for_rel():
-    from ocr_pages import text_path_for
+    from mianjing_kb.ocr_pages import text_path_for
     p = text_path_for("01-Java基础\\甲.pdf", Path(r"D:\build\ocr_text"))
     assert p.name == "甲.pdf.txt" and "01-Java基础" in p.parts
     assert str(p).endswith(".pdf.txt")              # 相对 rel + .txt 后缀
@@ -101,14 +101,14 @@ def test_reconvert_losers_grouping(tmp_path, monkeypatch):
 
 # ---------------- purge_origin ----------------
 def test_purge_ok_status_whitelist():
-    from purge_origin import OK_STATUS
+    from mianjing_kb.purge_origin import OK_STATUS
     assert "classified" in OK_STATUS and "superseded" in OK_STATUS
     assert "quarantined" not in OK_STATUS and "rejected" not in OK_STATUS
 
 
 def test_purge_refuses_apply_without_yes(tmp_path, capsys):
     """高危：物理删除必须 --apply + --yes 两个开关，缺一个就只打印计划并返回 2。"""
-    from purge_origin import main as purge_main
+    from mianjing_kb.purge_origin import main as purge_main
     src = tmp_path / "corpus"
     keep_dir = src / "keep"
     keep_dir.mkdir(parents=True)
@@ -137,7 +137,7 @@ def test_purge_refuses_apply_without_yes(tmp_path, capsys):
 
 def test_purge_decision_guard():
     """四重判据的纯逻辑：状态白名单 + 保留副本在语料根内且存在。"""
-    from purge_origin import OK_STATUS
+    from mianjing_kb.purge_origin import OK_STATUS
 
     corpus = Path(r"D:\corpus").resolve()
 

@@ -397,6 +397,32 @@ def test_g6b_pass_and_fail(tmp_path):
     conn.close()
 
 
+def test_g5_legacy_bare_same_name_multiple_candidates_is_ambiguous(mini_env):
+    """裸 converted_to:同名.docx 若在库里有多条同名记录，不能挑一条合格的就算 PASS。"""
+    kb = mini_env["kb"]
+    for d, st in (("08-前端", "classified"), ("09-其他", "classified")):
+        (mini_env["corpus"] / d).mkdir(parents=True, exist_ok=True)
+        (mini_env["corpus"] / d / "同名.docx").write_bytes(b"x")
+        kb.execute(
+            "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+            "dir_path, status, batch_id, first_seen_at, last_seen_at, note) VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"dup{d[:2]}".ljust(16, "0"), "0" * 64, "同名.docx", ".docx", 1,
+             str(mini_env["corpus"] / d / "同名.docx"), d, st, "t", "now", "now", None))
+    kb.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+        "dir_path, status, batch_id, first_seen_at, last_seen_at, note) VALUES "
+        "(?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("eeeeeeeeeeeeeeee", "0" * 64, "己.doc", ".doc", 4,
+         str(mini_env["corpus"] / "03" / "己.doc"), "03-数据库", "superseded", "t", "now", "now",
+         "converted_to:同名.docx"))
+    kb.commit()
+    g = vl.g5_disk(kb, mini_env["corpus"], mini_env["build"])
+    fails = [f for f in g["fails"] if f["kind"] == "converted_target_missing"]
+    assert g["state"] == "FAIL"
+    assert any(f.get("why") == "ambiguous" for f in fails)
+
+
 def test_g5_new_converted_note_requires_target_record(mini_env):
     """新格式 converted_to:<dir>/<name>#<hash> 必须能解析到一条未退役的后继记录。"""
     kb = mini_env["kb"]

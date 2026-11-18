@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from classify import main as classify_main
-from intake import main as intake_main
+from mianjing_kb.classify import main as classify_main
+from mianjing_kb.intake import main as intake_main
 
 
 @pytest.fixture()
@@ -109,7 +109,7 @@ def test_reject_pattern_not_in_queue(seeded):
 def test_queue_export(seeded, tmp_path):
     """可入库清单：只导 status='classified'，字段齐全，rejected 不进清单。"""
     import csv
-    from ingest_queue import main as queue_main
+    from mianjing_kb.ingest_queue import main as queue_main
     out = tmp_path / "ingest_list.csv"
     assert queue_main(["--db", str(seeded), "--export", str(out)]) == 0
     data = list(csv.DictReader(out.open(encoding="utf-8-sig", newline="")))

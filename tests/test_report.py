@@ -1,6 +1,6 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """report（P1-4 频次报告）回归测试：build_clusters 纯函数路径，不碰真实库。"""
-from question_freq import simhash
+from mianjing_kb.question_freq import simhash
 from mianjing_kb.report import build_clusters
 
 

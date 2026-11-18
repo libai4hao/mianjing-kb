@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from mianjing_kb import intake
-from intake import main
+from mianjing_kb.intake import main
 from kb import wlock
 
 
@@ -71,6 +71,13 @@ def test_rename_is_moved_not_new(corpus, tmp_path, capsys):
     renamed = [r for r in rows(db_path) if r["file_name"].endswith("改名.pdf")]
     # 改名只更新路径与文件名，不能把状态降级（否则已入库成果会被"回滚"）
     assert renamed and renamed[0]["status"] == "pending_classify"
+    # renamed_from 记的是**旧**路径：记新路径会让"从哪来"读反（评审 Important#2）
+    assert "renamed_from:02-JVM/JVM面试题.pdf" in renamed[0]["note"]
+    conn = sqlite3.connect(str(db_path))
+    ev = conn.execute("SELECT payload FROM document_events WHERE doc_hash=? AND kind='renamed_from'",
+                      (renamed[0]["doc_hash"],)).fetchone()
+    conn.close()
+    assert ev and json.loads(ev[0])["rel"] == "02-JVM/JVM面试题.pdf"
 
 
 def test_deleted_then_returned_is_resurrected(corpus, tmp_path, capsys):

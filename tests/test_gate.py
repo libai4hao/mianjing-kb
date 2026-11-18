@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """gate 的端到端行为：健康 md 通过，坏字体 md 判 fail(乱码)，短文判 fail(过短)。
 
 P0-2 适配（2026-11-17 审核）：gate.py 改三态（pass/review/fail）+ rows 结构后，
@@ -6,7 +6,7 @@ P0-2 适配（2026-11-17 审核）：gate.py 改三态（pass/review/fail）+ ro
 """
 import json
 
-from gate import main
+from mianjing_kb.gate import main
 
 
 def write(p, text):
@@ -48,7 +48,7 @@ def test_gate_report_rows(tmp_path, capsys):
 
 def test_sentinel_data_shape():
     """哨兵回归集数据形状（离线校验；判定行为本身由 --sentinel 对生产语料跑）。"""
-    from gate import CASES, PAIRS
+    from mianjing_kb.gate import CASES, PAIRS
     assert len(CASES) == 13 and len(PAIRS) == 2
     assert len({rel for rel, _ in CASES}) == 13                      # 无重复
     assert all(w in ("pass", "review", "fail") for _, w in CASES)

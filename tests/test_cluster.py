@@ -1,10 +1,10 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """cluster 测试：三档阈值行为 + 端到端（临时语料）+ 99 区判定。"""
 import json
 
 import pytest
 from mianjing_kb import cluster as cl  # noqa: E402
-from question_freq import normalize, simhash  # noqa: E402
+from mianjing_kb.question_freq import normalize, simhash  # noqa: E402
 
 Q_A = "HashMap 和 Hashtable 的区别是什么"
 Q_A2 = "HashMap 和 Hashtable 的区别是什么？"          # 仅标点差 → 归一后同文
