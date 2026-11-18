@@ -100,3 +100,47 @@ def test_vec_error_aborts(mini_env, monkeypatch, capsys):
     assert '"verdict": "ABORT"' in out
     assert hashlib.sha256(online.read_bytes()).hexdigest() == before
     assert not (mini_env["build"] / "面经库_shadow.db").exists()
+
+
+def _mk_vec_pair(tmp_path, src_hash: str, dst_hash: str):
+    """构造 (现行库, 影子库)：现行带 vec_questions（普通表过存在性检查），两边各一题。"""
+    src = tmp_path / "old.db"
+    dst = tmp_path / "shadow.db"
+    s = sqlite3.connect(src)
+    s.executescript("CREATE TABLE questions(qid INTEGER PRIMARY KEY, q_norm_hash TEXT);"
+                    "CREATE TABLE vec_questions(rowid INTEGER PRIMARY KEY, embedding BLOB);")
+    s.execute("INSERT INTO questions VALUES (1, ?)", (src_hash,))
+    s.execute("INSERT INTO vec_questions VALUES (1, x'00' * 4)")
+    s.commit()
+    s.close()
+    d = sqlite3.connect(dst)
+    d.executescript("CREATE TABLE questions(qid INTEGER PRIMARY KEY, q_norm_hash TEXT);")
+    d.execute("INSERT INTO questions VALUES (1, ?)", (dst_hash,))
+    d.commit()
+    d.close()
+    return src, dst
+
+
+def test_copy_vec_aborts_on_misaligned_qids(tmp_path):
+    """F2/B3：向量按 rowid=qid 拷，现行库题行与影子 qid 对不上（hash 不匹配）→ 拒拷。"""
+    src, dst = _mk_vec_pair(tmp_path, src_hash="x", dst_hash="changed")
+    out = rf.copy_vec(src, dst)
+    assert out.startswith("error") and "对齐" in out
+
+
+def test_copy_vec_qid_missing_in_shadow_aborts(tmp_path):
+    """F2/B3：现行库 qid 在影子里不存在（存量库重切续号场景）→ 拒拷。"""
+    src, dst = _mk_vec_pair(tmp_path, src_hash="x", dst_hash="x")
+    d = sqlite3.connect(dst)
+    d.execute("DELETE FROM questions")
+    d.commit()
+    d.close()
+    out = rf.copy_vec(src, dst)
+    assert out.startswith("error") and "对齐" in out
+
+
+def test_copy_vec_aligned_proceeds(tmp_path):
+    """对齐通过后不卡在校验（后续成败取决于 sqlite_vec/表结构，与本断言无关）。"""
+    src, dst = _mk_vec_pair(tmp_path, src_hash="x", dst_hash="x")
+    out = rf.copy_vec(src, dst)
+    assert "对齐" not in out
