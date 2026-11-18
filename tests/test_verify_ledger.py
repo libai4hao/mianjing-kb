@@ -352,14 +352,27 @@ def test_g6b_skip_no_golden(tmp_path):
     conn.close()
 
 
-def test_g6b_skip_small_sample(tmp_path):
-    """matched < 20 → SKIP（样本不足不判准确率，不挡 merge）。"""
+def test_g6b_warn_small_sample(tmp_path):
+    """matched < 20 → WARN（样本不足，未判；不挡 merge，但不再静默 SKIP）。"""
     conn = _golden_db(tmp_path)
     for i in range(5):
         _pair(conn, i)
     conn.commit()
     g = vl.g6b_golden(conn)
-    assert g["state"] == "SKIP" and g["detail"]["matched"] == 5
+    assert g["state"] == "WARN" and g["detail"]["matched"] == 5
+    assert "样本不足" in g["detail"]["note"]
+    conn.close()
+
+
+def test_g6b_warn_no_overlap(tmp_path):
+    """金标与 staging 零交集也是 WARN，不能读成"通过"。"""
+    conn = _golden_db(tmp_path)
+    for i in range(25):
+        conn.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                     "VALUES (?,?,?, 'now')", (f"only{i}", f"题{i}", "JVM"))
+    conn.commit()
+    g = vl.g6b_golden(conn)
+    assert g["state"] == "WARN" and g["detail"]["matched"] == 0
     conn.close()
 
 

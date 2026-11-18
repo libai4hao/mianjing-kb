@@ -22,6 +22,7 @@ LLM_PRICE/LLM_JSON_MODE——后两者可覆盖 provider 默认的价格与 json
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import random
@@ -137,6 +138,40 @@ def health(cfg: dict, conn) -> dict:
     return out
 
 
+FAILED_CSV_HEADER = ["qid", "err_type", "attempts", "last_at", "model", "err"]
+
+
+def write_failed_csv(failed_path: Path) -> tuple[Path, int]:
+    """label_failed.jsonl → label_failed.csv：一题一行的人工待办清单。
+
+    jsonl 只追加、是明细；csv 每次重跑重建，按 qid 聚合出错误类型、累计失败次数、最后模型。
+    """
+    path = failed_path.with_suffix(".csv")
+    agg: dict[str, dict] = {}
+    if failed_path.exists():
+        for line in failed_path.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            qid = str(rec.get("qid"))
+            a = agg.setdefault(qid, {"qid": qid, "attempts": 0, "err_type": "-",
+                                     "last_at": "-", "model": "-", "err": ""})
+            a["attempts"] += 1
+            a["last_at"] = rec.get("at") or a["last_at"]
+            a["model"] = rec.get("model") or a["model"]
+            a["err_type"] = rec.get("err_type") or a["err_type"]
+            a["err"] = (rec.get("err") or a["err"])[:200]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=FAILED_CSV_HEADER)
+        w.writeheader()
+        key = lambda r: (0, int(r["qid"])) if r["qid"].isdigit() else (1, r["qid"])
+        for row in sorted(agg.values(), key=key):
+            w.writerow({k: row[k] for k in FAILED_CSV_HEADER})
+    return path, len(agg)
+
+
 def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
               dry_run: bool = False, failed_path: Path | None = None) -> dict:
     """并发打标 → staging。resume：staging 已有 qid 跳过；budget：估算成本超限即停。"""
@@ -160,8 +195,9 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
         for fut in as_completed(futs):
             q, row, exc = fut.result()
             if exc is not None:
-                failed.append({"qid": q["qid"],
+                failed.append({"qid": q["qid"], "err_type": type(exc).__name__,
                                "err": f"{type(exc).__name__}: {str(exc)[:160]}",
+                               "model": cfg["model"],
                                "at": datetime.now().strftime(NOW_FMT)})
                 with failed_path.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(failed[-1], ensure_ascii=False) + "\n")
@@ -179,13 +215,16 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
                 break                                    # 预算封顶，已完成的保留
     if done and not dry_run:
         write_staging(conn, done)
+    failed_csv, failed_qids = (write_failed_csv(failed_path) if failed else (None, 0))
     return {"todo": len(todo), "labeled": len(done), "failed": len(failed),
             "tokens": tokens_total,
             "est_cost_yuan": round((in_total * cfg["price"][0]
                                     + out_total * cfg["price"][1]) / 1e6, 4),
             "dry_run": dry_run, "budget": budget,
             "elapsed_sec": round(time.perf_counter() - started, 1),
-            "failed_log": str(failed_path) if failed else None}
+            "failed_log": str(failed_path) if failed else None,
+            "failed_csv": str(failed_csv) if failed else None,
+            "failed_qids": failed_qids}
 
 
 def sample_staging(conn, n: int) -> list[dict]:
@@ -584,6 +623,8 @@ def merge(conn, drop_orphans: bool = False) -> dict:
                         "  # 检索库 topic 是快照，merge 只写 kb.sqlite（B2）"}
     if orphans:
         out["dropped_orphans"] = orphans
+    if g6b.get("state") == "WARN":
+        out["g6b_warn"] = g6b["detail"].get("note", "金标样本不足，未判")
     if g6["state"] == "WARN":
         out["note"] = "topic 漂移 WARN（软门禁不阻断）——建议 --sample 50 人工抽查确认"
     return out

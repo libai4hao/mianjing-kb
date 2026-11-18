@@ -105,6 +105,22 @@ def test_run_batch_failed_not_blocking(mini_db, monkeypatch, tmp_path):
     assert "qid" in fp.read_text(encoding="utf-8")
 
 
+def test_failed_csv_is_human_todo(mini_db, monkeypatch, tmp_path):
+    """失败件要有人工入口：jsonl 是明细，csv 按 qid 聚合出错误类型/尝试次数/模型。"""
+    def boom(cfg, q):
+        raise RuntimeError("JSON 解析失败")
+
+    monkeypatch.setattr(bl, "label_one", boom)
+    fp = tmp_path / "f.jsonl"
+    out = bl.run_batch(CFG, mini_db, failed_path=fp)
+    assert out["failed"] == 3 and out["failed_csv"]
+    bl.run_batch(CFG, mini_db, failed_path=fp)          # 第二次仍失败 → attempts 累加
+    rows = list(bl.csv.DictReader(Path(out["failed_csv"]).open(encoding="utf-8-sig")))
+    assert {r["qid"] for r in rows} == {"1", "2", "3"}
+    assert all(int(r["attempts"]) == 2 for r in rows)
+    assert all(r["err_type"] == "RuntimeError" and r["model"] == CFG["model"] for r in rows)
+
+
 def test_run_batch_budget_stops(mini_db, monkeypatch, tmp_path):
     """预算封顶（软上限）：超限后 cancel 未起飞的；飞行中的自然完成，总成本有界。
 

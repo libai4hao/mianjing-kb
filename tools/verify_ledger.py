@@ -394,8 +394,9 @@ def g6b_golden(kb_conn) -> dict:
     """G6b 金标抽检（批次二 G3，2026-11-19——docs/15 G6 规格"抽检 50 题准确率 ≥0.8"
     从人工环节变自动门禁）。
 
-    golden_labels 无表/无行 → SKIP（金标未启用）；与 staging 按 q_norm_hash 求交集，
-    matched < 20 → SKIP（样本不足不判，不挡 merge）；topic_acc < 0.8 → FAIL（阻断 merge）。
+    golden_labels 无表 → SKIP（金标未启用）；无行 → SKIP（还没做金标）。
+    与 staging 按 q_norm_hash 求交集后 **matched==0 或 matched<20 → WARN**（样本不足，
+    未判，不挡 merge，但必须显式可见——SKIP 会被读成"通过"）；topic_acc < 0.8 → FAIL（阻断 merge）。
     qtype/difficulty 准确率只记录不设阈（docs/13 L6 旧口径 ≥70% 仅供参考）。
     detail 带 weak_topics（acc<0.8 的金标主题，批次三 --review 的复核目标）与
     混淆矩阵 matrix[gold][pred]。"""
@@ -405,23 +406,25 @@ def g6b_golden(kb_conn) -> dict:
     try:
         n_gold = kb_conn.execute("SELECT COUNT(*) FROM golden_labels").fetchone()[0]
     except sqlite3.OperationalError:
-        return _gate("G6b", "金标抽检", "软→硬", "SKIP", [],
+        return _gate("G6b", "金标抽检", "硬", "SKIP", [],
                      {"note": "golden_labels 表不存在（008 迁移未应用）"}, sql)
     if n_gold == 0:
-        return _gate("G6b", "金标抽检", "软→硬", "SKIP", [],
+        return _gate("G6b", "金标抽检", "硬", "SKIP", [],
                      {"golden": 0, "note": "golden_labels 无行——先 --golden-sample/--golden-load"}, sql)
     rows = kb_conn.execute(
         "SELECT g.topic_gold, g.qtype_gold, g.difficulty_gold, s.topic, s.qtype, s.difficulty "
         "FROM golden_labels g JOIN labels_staging s ON s.q_norm_hash=g.q_norm_hash").fetchall()
     n = len(rows)
     if n == 0:
-        return _gate("G6b", "金标抽检", "软→硬", "SKIP", [],
+        return _gate("G6b", "金标抽检", "硬", "WARN", [],
                      {"golden": n_gold, "matched": 0,
-                      "note": "金标与 staging 无交集（staging 已 merge 或非同批）"}, sql)
+                      "note": "金标与 staging 无交集（staging 已 merge 或非同批）——样本不足，未判"},
+                     sql)
     if n < 20:
-        return _gate("G6b", "金标抽检", "软→硬", "SKIP", [],
+        return _gate("G6b", "金标抽检", "硬", "WARN", [],
                      {"golden": n_gold, "matched": n,
-                      "note": f"样本 {n} < 20 不足以判准确率（docs/15 抽检 50 题口径）"}, sql)
+                      "note": f"样本 {n} < 20 不足以判准确率——样本不足，未判（不等于通过）"},
+                     sql)
     topic_acc = sum(1 for r in rows if r["topic"] == r["topic_gold"]) / n
     qt = [r for r in rows if r["qtype_gold"]]
     qtype_acc = (sum(1 for r in qt if r["qtype"] == r["qtype_gold"]) / len(qt)) if qt else None
@@ -439,7 +442,7 @@ def g6b_golden(kb_conn) -> dict:
         state = "FAIL"
         fails.append({"kind": "golden_topic_acc", "topic_acc": round(topic_acc, 4),
                       "threshold": 0.8, "weak_topics": weak})
-    return _gate("G6b", "金标抽检", "软→硬", state, fails,
+    return _gate("G6b", "金标抽检", "硬", state, fails,
                  {"golden": n_gold, "matched": n, "topic_acc": round(topic_acc, 4),
                   "qtype_acc": round(qtype_acc, 4) if qtype_acc is not None else None,
                   "difficulty_acc": round(diff_acc, 4) if diff_acc is not None else None,
@@ -596,3 +599,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
