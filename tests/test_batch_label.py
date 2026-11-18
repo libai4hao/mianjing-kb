@@ -496,3 +496,26 @@ def test_review_resolve_keep_suggest_drop(mini_db):
     r2 = mini_db.execute("SELECT topic, qtype, difficulty, review_state FROM labels_staging WHERE qid=2").fetchone()
     assert tuple(r2) == ("Redis", "八股", 2, "agree")
     assert mini_db.execute("SELECT COUNT(*) FROM labels_staging WHERE qid=3").fetchone()[0] == 0
+
+
+# ---- 批次三 R5：COALESCE 守卫（评审 Minor#1）+ 待打标口径单源（bug5）----
+
+def test_merge_coalesce_guards_difficulty_tags(mini_db, monkeypatch, tmp_path):
+    """Minor#1：staging tags 为空数组（LLM 没给）时 merge 不覆盖已有 tags；
+    difficulty NULL 同守卫（G6 现拦 NULL，防御性保留）。"""
+    mini_db.execute('UPDATE questions SET difficulty=4, tags=\'["旧"]\' WHERE qid=1')
+    mini_db.commit()
+    monkeypatch.setattr(bl, "label_one", _fake_label(obj={"tags": []}))  # difficulty 默认 3 合规
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    assert bl.merge(mini_db)["ok"]
+    r = mini_db.execute("SELECT difficulty, tags FROM questions WHERE qid=1").fetchone()
+    assert r[0] == 3 and json.loads(r[1]) == ["旧"]   # difficulty 正常覆盖；tags 保留旧值
+
+
+def test_todo_predicate_single_source(mini_db, monkeypatch):
+    """bug5：待打标口径单源 TODO_PREDICATE——pick_targets 与 health 同含"未分类"。"""
+    _add_question(mini_db, 9, "题九", topic="未分类")
+    mini_db.commit()
+    assert 9 in {r["qid"] for r in bl.pick_targets(mini_db)}   # 修复前 pick_targets 跳过未分类
+    monkeypatch.setattr(bl, "chat", lambda *a, **k: {"text": "好", "latency_ms": 1})
+    assert bl.health(CFG, mini_db)["todo"] == 4                # 1/2/3 空 + 9 未分类

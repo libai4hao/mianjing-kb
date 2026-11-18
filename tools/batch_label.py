@@ -48,17 +48,21 @@ VOCAB_SYSTEM = ("你是面试题标注器。阅读题目与答案片段，只输
                 '{{"topic": <主题，必须从词表中选恰好一个：{vocab}；拿不准选其他>, '
                 '"qtype": <从 八股/算法/HR/场景/项目 中选恰好一个>, '
                 '"difficulty": <1-5整数>, "tags": [<关键词>, ...]}}')
+# 批次三 R5（bug5）：待打标口径单源——pick_targets 与 health 共用同一谓词，
+# 防"未分类算不算待打标"两处漂移（审核报告 bug5）。
+TODO_PREDICATE = (f"(q.topic IS NULL OR q.topic = '' "
+                  f"OR q.topic = '{config.UNCLASSIFIED}')")
 
 
 def pick_targets(conn, limit: int = 0) -> list[dict]:
-    """待打标：题级 topic 为空的题（qid, 题干, 答案前 300 字——docs/15 §3.5 裁切口径）。
+    """待打标：题级 topic 为空/未分类的题（口径=TODO_PREDICATE，docs/15 §3.5 裁切口径）。
 
     优先级：文档级主题弱（空/综合/未分类）的题先打——价值最高（docs/15 §3.5 的
     "先做 4,011 综合级"精神）；文档级主题强的靠后（题级打标是锦上添花）。
     """
     sql = ("SELECT q.qid, q.q_text, q.a_text, q.q_norm_hash FROM questions q "
            "LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash "
-           "WHERE q.topic IS NULL OR q.topic='' "
+           f"WHERE {TODO_PREDICATE} "
            "ORDER BY (sd.topic IS NULL OR sd.topic='' OR sd.topic='综合' OR sd.topic='未分类') DESC, "
            "q.qid")
     if limit:
@@ -123,8 +127,7 @@ def health(cfg: dict, conn) -> dict:
     except Exception as ex:  # noqa: BLE001
         out["reachable"] = False
         out["error"] = f"{type(ex).__name__}: {str(ex)[:140]}"
-    n = conn.execute("SELECT COUNT(*) FROM questions "
-                     "WHERE topic IS NULL OR topic='' OR topic='未分类'").fetchone()[0]
+    n = conn.execute(f"SELECT COUNT(*) FROM questions q WHERE {TODO_PREDICATE}").fetchone()[0]
     staged = conn.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0]
     out["todo"] = n
     out["staged"] = staged
@@ -477,6 +480,9 @@ def merge(conn, drop_orphans: bool = False) -> dict:
     - F4 next_step：merge 只写 kb.sqlite，检索库 topic 是 build_db 快照须 refresh。
     - 批次三 R3：review_state='disagree' 的分歧行不落库、不落 facts、不删——
       人工 --review-resolve 终审后（agree）下次 merge 自然放行。
+    - 批次三 R5（评审 Minor#1）：tags 空值守卫——staging tags '[]'（LLM 没给）
+      不覆盖 questions 已有 tags，防第二轮抹第一轮；difficulty NULL 同守卫
+      （G6 现拦 NULL，防御性保留）。
     - 评审 Important#2（2026-11-19）：孤儿行拒绝时列出 qid（人工清理有抓手）；
       drop_orphans=True 清掉孤儿行后继续 merge——run_batch 跳过 staging 已有
       qid，重跑打标清不掉孤儿，没有这个出口主工作流会死锁。
@@ -520,8 +526,10 @@ def merge(conn, drop_orphans: bool = False) -> dict:
         " topic=COALESCE(NULLIF((SELECT s.topic FROM labels_staging s "
         "                        WHERE s.qid=questions.qid), ''), topic), "
         " qtype=COALESCE((SELECT s.qtype FROM labels_staging s WHERE s.qid=questions.qid), qtype), "
-        " difficulty=(SELECT s.difficulty FROM labels_staging s WHERE s.qid=questions.qid), "
-        " tags=(SELECT s.tags FROM labels_staging s WHERE s.qid=questions.qid) "
+        " difficulty=COALESCE((SELECT s.difficulty FROM labels_staging s WHERE s.qid=questions.qid), "
+        "difficulty), "
+        " tags=COALESCE(NULLIF((SELECT s.tags FROM labels_staging s WHERE s.qid=questions.qid), "
+        "'[]'), tags) "
         "WHERE qid IN (SELECT qid FROM labels_staging WHERE review_state IS NOT 'disagree')")
     conn.execute(
         "INSERT OR REPLACE INTO label_facts "
