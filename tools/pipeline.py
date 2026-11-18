@@ -21,7 +21,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kb import config  # noqa: E402
+from kb import config, status  # noqa: E402
 
 TOOLS = Path(__file__).resolve().parent
 
@@ -69,7 +69,7 @@ def main(argv=None) -> int:
         return 0
 
     print("\n=== 2/3 分类 ===")
-    print(json.dumps(run([str(TOOLS / "classify.py"), "--db", args.db, "--status", "pending_classify"]),
+    print(json.dumps(run([str(TOOLS / "classify.py"), "--db", args.db, "--status", status.PENDING]),
                      ensure_ascii=False))
 
     print("\n=== 3/3 可入库清单 ===")

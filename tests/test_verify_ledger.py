@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools import verify_ledger as vl  # noqa: E402
-from tools.kb import config  # noqa: E402
+from tools.kb import config, db  # noqa: E402
 
 REAL_META = config.META_DIR  # patch 前抓真 schema 路径
 
@@ -79,6 +79,12 @@ def mini_env(tmp_path, monkeypatch):
                (_h(b"gone"), _h(b"gone") + "0" * 48, "丙.pdf", ".pdf", 4,
                 str(corpus / "03" / "丙.pdf"), "03-数据库", "superseded", "t", "now", "now",
                 "converted_to:丙.docx"))                       # 已删 + 留痕 → G5 过
+    # 历史裸格式的接替件（T19）：converted_to 只写文件名，按名字解析到这条 rejected 记录
+    kb.execute("INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, "
+               "src_path, dir_path, status, batch_id, first_seen_at, last_seen_at, note) VALUES "
+               "(?,?,?,?,?,?,?,?,?,?,?,?)",
+               (_h(b"bing-docx"), _h(b"bing-docx") + "0" * 48, "丙.docx", ".docx", 5,
+                str(corpus / "03" / "丙.docx"), "03-数据库", "rejected", "t", "now", "now", None))
     kb.execute("INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, "
                "src_path, dir_path, status, batch_id, first_seen_at, last_seen_at, note) VALUES "
                "(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -409,3 +415,72 @@ def test_g5_new_converted_note_requires_target_record(mini_env):
     g = vl.g5_disk(kb, mini_env["corpus"], mini_env["build"])
     assert g["state"] == "FAIL"
     assert any(f["kind"] == "converted_target_missing" for f in g["fails"])
+
+
+
+# ---------------- T19：历史裸 converted_to ----------------
+def test_g5_legacy_bare_converted_to_without_target_fails(mini_env):
+    """历史裸格式 converted_to:丙.docx 不再被跳过：找不到后继记录必须 FAIL。"""
+    kb = mini_env["kb"]
+    kb.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+        "dir_path, status, batch_id, first_seen_at, last_seen_at, note) VALUES "
+        "(?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("feedfacefeedface", "0" * 64, "戊.doc", ".doc", 4,
+         str(mini_env["corpus"] / "03" / "戊.doc"), "03-数据库", "superseded", "t", "now", "now",
+         "converted_to:根本没有这个.docx"))
+    kb.commit()
+    g = vl.g5_disk(kb, mini_env["corpus"], mini_env["build"])
+    fails = [f for f in g["fails"] if f["kind"] == "converted_target_missing"]
+    assert g["state"] == "FAIL"
+    assert fails and fails[0]["legacy"] is True
+    assert fails[0]["target"]["name"] == "根本没有这个.docx"
+    assert g["detail"]["legacy_converted_checked"] >= 2      # 夹具里的丙 + 本测试的戊
+
+
+def test_audit_converted_reports_unresolved_and_legacy(mini_env):
+    """`--audit-converted` 的底层盘点：逐行给出 targets / resolved / legacy。"""
+    kb = mini_env["kb"]
+    kb.execute(
+        "UPDATE source_documents SET note='converted_to:也没有这个.docx' "
+        "WHERE file_name='丙.pdf' AND status='superseded'")
+    kb.commit()
+    rows = vl.audit_converted(kb)
+    bad = [r for r in rows if not r["resolved"]]
+    assert bad and bad[0]["rel"] == "03-数据库/丙.pdf"
+    assert bad[0]["legacy"] is True and bad[0]["no_target"] is False
+
+
+def test_audit_converted_cli_exit_code_only_counts_real_targets(tmp_path, monkeypatch, capsys):
+    """99 区里"从未写过 converted_to"的 superseded 行不该让审计退 1（它们本来就没后继）；
+    只有"写了目标却解析不到"才是真问题。"""
+    import json as _json
+    db_path = tmp_path / "kb.sqlite"
+    conn = db.connect(db_path)
+    for h, name, status_, note in (("aa" * 8, "a.pdf", "superseded", "duplicate"),
+                                   ("bb" * 8, "b.doc", "superseded", "converted_to:没有.docx")):
+        conn.execute(
+            "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path,"
+            " dir_path, status, batch_id, first_seen_at, last_seen_at, note) VALUES"
+            " (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (h, "0" * 64, name, ".pdf", 1, str(tmp_path / name), "99-重复文件待删", status_,
+             "t", "now", "now", note))
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "BUILD_DIR", tmp_path)
+    monkeypatch.setattr(config, "CORPUS_ROOT", tmp_path)
+    monkeypatch.setattr(config, "QUESTION_MD_DIR", tmp_path)
+    import verify_ledger as vl
+    assert vl.main(["--audit-converted"]) == 1          # b.doc 写了目标却解析不到
+    out = _json.loads(capsys.readouterr().out)
+    assert out["superseded_rows"] == 2
+    assert out["unresolved_with_target"] == 1 and out["no_target_rows"] == 1
+
+    conn = db.connect(db_path, create=False)            # 把 b.doc 也改成无目标，应放行
+    conn.execute("UPDATE source_documents SET note='duplicate' WHERE doc_hash=?", ("bb" * 8,))
+    conn.commit()
+    conn.close()
+    assert vl.main(["--audit-converted"]) == 0
+    out = _json.loads(capsys.readouterr().out)
+    assert out["unresolved_with_target"] == 0 and out["no_target_rows"] == 2

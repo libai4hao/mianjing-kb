@@ -7,6 +7,14 @@
   - 命中已有记录时区分动作：duplicate / moved / renamed / resurrected；
   - 99-重复文件待删 里的文件照样登记，但状态直接 quarantined，永不参与处理。
 
+2026-11-19 二审（T11/T12/T15）：
+  - 分块提交：每 500 件 commit 一次（`CHUNK_SIZE`），30 分钟扫描中途崩溃不再整批丢失；
+    批次行先写 `state=running`，正常结束写 completed，异常写 failed，重扫即可续（判重幂等）；
+  - 跨进程写锁：整趟扫描持有 `<build>/locks/kb.lock`，第二个写库工具直接拒绝，
+    而不是等 10 秒 busy_timeout 后吐一句 `database is locked`；
+  - note 双写事件：`replaced_by:` / `moved_from:` 等继续写 note 留痕，同时落
+    `document_events`，读方（purge / verify G5）不再依赖子串。
+
 用法：
     python tools/intake.py --dry-run                 # 只看统计（有库时也报重复数），不写库
     python tools/intake.py                           # 登记语料根
@@ -16,21 +24,23 @@
 from __future__ import annotations
 
 import argparse
-import secrets
 import json
 import os
+import secrets
 import sqlite3
 import sys
 import time
 from collections import Counter
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kb import config, db, hashing  # noqa: E402
+from kb import config, db, events, hashing, status, wlock  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
+CHUNK_SIZE = 500          # 每 N 件提交一次：崩溃损失上限 + 写锁持有粒度
 
 
 def rel_posix(path: Path, root: Path) -> str:
@@ -142,17 +152,17 @@ def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False,
     """
     row = db.get_by_hash(conn, doc_hash)
     if row is None:
-        return "added", "pending_classify"
+        return "added", status.PENDING
     # 16 位短指纹撞车时绝不覆盖已有行：完整 sha256 不同就按异常处理
     if sha256 and row["sha256"] and row["sha256"] != sha256:
         return "hash_collision", row["status"]
     prev = row["status"]
-    if prev == "absent":
+    if prev == status.ABSENT:
         # 先判隔离：99 区里的文件永远不能借"恢复上线"洗成正式语料
         if quarantined:
-            return "to_quarantine", "quarantined"
+            return "to_quarantine", status.QUARANTINED
         # 曾删除又回到正式区：复用原结果，不能被当成普通重复件
-        return "resurrected", ("classified" if row["category"] else "pending_classify")
+        return "resurrected", (status.CLASSIFIED if row["category"] else status.PENDING)
     full_rel = f"{row['dir_path']}/{row['file_name']}" if row["dir_path"] else row["file_name"]
     if quarantined:
         if full_rel == rel:
@@ -160,12 +170,12 @@ def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False,
         if _src_is_original(row, rel):
             return "duplicate", prev          # 原件还在正式区 → 99 里的只是散副本，不能夺主
         # 原件已被移进隔离区（过时件清理走这条路）：改路径并把状态转 quarantined
-        return "to_quarantine", "quarantined"
-    if prev == "quarantined" and not quarantined:
+        return "to_quarantine", status.QUARANTINED
+    if prev == status.QUARANTINED and not quarantined:
         # 隔离区（99-重复文件待删）里的副本只是"待删副本"，不是可靠来源。
         # 正式区又见到同内容 → 内容要回正式区重新走分类，否则"库里只有隔离副本"的件
         # 永远不会进库（曾踩：Spring系列面试题129道 只判 duplicate，既不导入也不判重）。
-        return "revived", "pending_classify"
+        return "revived", status.PENDING
     if full_rel == rel:
         return "duplicate", prev
     if _src_is_original(row, rel):
@@ -189,7 +199,7 @@ def ghost_candidates(conn, dir_path: str, file_name: str, new_hash: str,
     rows = conn.execute(
         "SELECT doc_hash, sha256, src_path FROM source_documents "
         "WHERE dir_path=? AND file_name=? AND doc_hash != ? "
-        "AND status NOT IN ('absent','superseded')",
+        f"AND status NOT IN {status.sql_in((status.ABSENT, status.SUPERSEDED))}",
         (dir_path, file_name, new_hash),
     ).fetchall()
     out = []
@@ -209,14 +219,26 @@ def ghost_candidates(conn, dir_path: str, file_name: str, new_hash: str,
 
 
 def retire_hash(conn, old_hash: str, new_hash: str) -> int:
-    """把单条旧行转 superseded，保留原 note 留痕。"""
+    """把单条旧行转 superseded，保留原 note 留痕，同时记 replaced_by 事件。"""
     cur = conn.execute(
-        "UPDATE source_documents SET status='superseded', "
+        f"UPDATE source_documents SET status='{status.SUPERSEDED}', "
         "note='replaced_by:' || ? || COALESCE(' | ' || note, '') "
-        "WHERE doc_hash=? AND status NOT IN ('absent','superseded')",
+        f"WHERE doc_hash=? AND status NOT IN {status.sql_in((status.ABSENT, status.SUPERSEDED))}",
         (new_hash, old_hash),
     )
+    if cur.rowcount:
+        events.append(conn, old_hash, events.KIND_REPLACED_BY, {"hash": new_hash})
     return cur.rowcount
+
+
+def _batch_counts(actions: Counter) -> dict:
+    return {
+        "added": actions["added"],
+        "duplicated": actions["duplicate"],
+        "moved": actions["moved"] + actions["renamed"] + actions["resurrected"],
+        "quarantined": actions["quarantined"],
+        "ignored": actions["ignored"],
+    }
 
 
 def main(argv=None) -> int:
@@ -235,29 +257,53 @@ def main(argv=None) -> int:
 
     batch = args.batch or (datetime.now().strftime("%Y%m%d-%H%M%S") + "-"
                            + secrets.token_hex(3) + "-intake")
+    stack = ExitStack()
     write_conn = None
     read_conn = None
-    if args.dry_run:
-        db_file = Path(args.db)
-        if db_file.exists():                       # 只读打开，用于报出真实重复数
-            read_conn = sqlite3.connect(f"file:{db_file.as_posix()}?mode=ro", uri=True)
-            read_conn.row_factory = sqlite3.Row
-        conn = read_conn
-    else:
-        db_existed = Path(args.db).exists()
-        write_conn = db.connect(args.db)
-        conn = write_conn
-        if db_existed:
-            db.backup_db(args.db)   # 写库前先热备份事实源（账本/金标不可重建）
+    if not args.dry_run:
+        try:
+            stack.enter_context(wlock.write_lock("kb", tool="intake",
+                                                 build_dir=Path(args.db).parent))
+        except wlock.LockHeld as ex:
+            print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                              "note": "另一个写库工具在跑；等它结束再重试，不要手工删锁"},
+                             ensure_ascii=False, indent=2), file=sys.stderr)
+            return 2
 
-    actions = Counter()
-    by_ext = Counter()
-    added = 0
-    started = time.perf_counter()
+    actions: Counter = Counter()
+    by_ext: Counter = Counter()
     seen_hashes: dict[str, str] = {}   # 本次扫描内存判重：dry-run 与真实运行的重复数对齐
     pending_ghosts: list[tuple[str, str]] = []   # (旧 hash, 新 hash)，扫完再退役
+    started = time.perf_counter()
+    pending_writes = 0
+
+    def flush_batch(state: str | None = None) -> None:
+        """提交并刷新批次进度（每 CHUNK_SIZE 件一次；final=True 时写结束状态）。"""
+        nonlocal pending_writes
+        if write_conn is None:
+            return
+        db.update_batch(write_conn, batch,
+                        state=state or db.BATCH_RUNNING, **_batch_counts(actions))
+        write_conn.commit()
+        pending_writes = 0
 
     try:
+        if args.dry_run:
+            db_file = Path(args.db)
+            if db_file.exists():                       # 只读打开，用于报出真实重复数
+                read_conn = sqlite3.connect(f"file:{db_file.as_posix()}?mode=ro", uri=True)
+                read_conn.row_factory = sqlite3.Row
+            conn = read_conn
+        else:
+            db_existed = Path(args.db).exists()
+            write_conn = db.connect(args.db)
+            conn = write_conn
+            if db_existed:
+                db.backup_db(args.db)   # 写库前先热备份事实源（账本/金标不可重建）
+            # 批次先落 running：中途崩溃时库里有"这批跑到哪"，重扫可据判重幂等续上
+            db.start_batch(write_conn, batch_id=batch, root=str(root), mode="full")
+            write_conn.commit()
+
         for p, rel, ext, size, quarantined in iter_files(root, args.all_exts):
             if size is None:
                 actions["ignored"] += 1
@@ -284,7 +330,7 @@ def main(argv=None) -> int:
                 actions["hash_collision"] += 1
                 continue
             if quarantined and action == "added":
-                action, status_after = "quarantined", "quarantined"
+                action, status_after = "quarantined", status.QUARANTINED
             actions[action] += 1
             if args.dry_run:
                 continue
@@ -311,8 +357,11 @@ def main(argv=None) -> int:
                 # 立即落库：这样同一批里出现的第二份相同文件会被判成 duplicate，
                 # 而不是把小批次的重复留到"下次扫描"才发现。
                 db.upsert_document(conn, row)
-                added += 1
-            elif write_conn is not None:
+                if ext in config.NEEDS_CONVERT_EXTS:
+                    events.append(conn, doc_hash, events.KIND_NEEDS_CONVERT)
+                added_n = 1
+            else:
+                added_n = 0
                 now = datetime.now().strftime(NOW_FMT)
                 if action in ("moved", "renamed", "resurrected", "to_quarantine", "revived"):
                     old_src = db.get_by_hash(conn, doc_hash)["src_path"] if action == "revived" else None
@@ -324,6 +373,8 @@ def main(argv=None) -> int:
                         "  ELSE ? || ' | ' || note END WHERE doc_hash=?",
                         (dir_of(rel), parent_of(rel), p.name, str(p), now, note, note, doc_hash),
                     )
+                    events.append(conn, doc_hash, f"{action}_from",
+                                  {"rel": old_src if action == "revived" else rel})
                     # F7 补遗（评审 Important#1，2026-11-19）：行被（重）指到新路径时，
                     # 该路径上不同 hash 的占用行同样要退役——移动/复制覆盖与原地改
                     # 内容是同一故障模式（doc_pool 同路径双份抽题 + hash 绑错内容）。
@@ -338,7 +389,11 @@ def main(argv=None) -> int:
                         "UPDATE source_documents SET last_seen_at=? WHERE doc_hash=?", (now, doc_hash)
                     )
                 if action in ("resurrected", "to_quarantine", "revived"):
-                    write_conn.execute("UPDATE source_documents SET status=? WHERE doc_hash=?", (status_after, doc_hash))
+                    write_conn.execute("UPDATE source_documents SET status=? WHERE doc_hash=?",
+                                       (status_after, doc_hash))
+            pending_writes += 1 + added_n
+            if pending_writes >= CHUNK_SIZE:
+                flush_batch()
 
         if write_conn is not None:
             # 扫描结束才退役：旧内容若在本批另一条路径被见到，它的记录已走 moved 更新，
@@ -346,25 +401,26 @@ def main(argv=None) -> int:
             for old_hash, new_hash in pending_ghosts:
                 if old_hash in seen_hashes:
                     continue
-                actions["ghost_retired"] += retire_hash(conn, old_hash, new_hash)
-            db.record_batch(
-                write_conn,
-                batch_id=batch,
-                created_at=datetime.now().strftime(NOW_FMT),
-                root=str(root),
-                mode="full",
-                added=actions["added"],
-                duplicated=actions["duplicate"],
-                moved=actions["moved"] + actions["renamed"] + actions["resurrected"],
-                quarantined=actions["quarantined"],
-                ignored=actions["ignored"],
-                note="",
-            )
-            write_conn.commit()
+                actions["ghost_retired"] += retire_hash(write_conn, old_hash, new_hash)
+            flush_batch(state=db.BATCH_COMPLETED)
+    except Exception as ex:                            # noqa: BLE001
+        # 已提交的分块保留（下次重扫按 hash 幂等续）；先把批次打成 failed 再退出
+        if write_conn is not None:
+            try:
+                db.update_batch(write_conn, batch, state=db.BATCH_FAILED,
+                                note=f"{type(ex).__name__}: {str(ex)[:120]}",
+                                **_batch_counts(actions))
+                write_conn.commit()
+            except Exception as ex2:                   # noqa: BLE001
+                print(f"[warn] 批次状态写入失败: {ex2}", file=sys.stderr)
+        print(f"[fatal] 扫描中断（已提交的分块保留，重跑可续）：{type(ex).__name__}: {ex}",
+              file=sys.stderr)
+        return 3
     finally:
         for c in (write_conn, read_conn):
             if c is not None:
                 c.close()
+        stack.close()
 
     elapsed = time.perf_counter() - started
     summary = {

@@ -32,13 +32,14 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kb import config  # noqa: E402
+from kb import config, wlock  # noqa: E402
 
 SHADOW_NAME = "面经库_shadow.db"
 ONLINE_NAME = "面经库.db"
 ROLLBACK_DIR = "rollback"      # 切换前把线上库留一份，给回滚窗口
 ROLLBACK_KEEP = 3              # 只留最近 3 份，避免把盘塞满
 LOCK_NAME = "refresh.lock"
+KB_LOCK_WAIT_SEC = 10          # 等别的写库工具让路的上限；超时就放弃，不硬抢
 LOG_NAME = "refresh_log.jsonl"
 REQUIRED_GATES = ("G1", "G2", "G3", "G4", "G5")
 KNOWN_STATES = ("PASS", "WARN", "FAIL", "SKIP")
@@ -361,6 +362,19 @@ def main(argv=None) -> int:
                          ensure_ascii=False, indent=1))
         return 2
 
+    # T15：refresh 也是写库工具，与 intake / batch_label / doc_convert 共用同一把写锁，
+    # 否则 refresh 重建影子库期间别人往线上库写字，切换后这些写入会凭空消失。
+    kb_lock = wlock.write_lock("kb", tool="refresh", build_dir=build_dir,
+                               wait_sec=KB_LOCK_WAIT_SEC)
+    try:
+        kb_lock.__enter__()
+    except wlock.LockHeld as ex:
+        _release_lock(lock)
+        print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                          "note": "已有写库工具在写 kb/线上库，refresh 不与之并行；稍后重试"},
+                         ensure_ascii=False, indent=1))
+        return 2
+
     swapped = False
     summary: dict = {}
     vec: dict | str = "skip"
@@ -498,6 +512,7 @@ def main(argv=None) -> int:
                          ensure_ascii=False, indent=1))
         return 1
     finally:
+        kb_lock.__exit__(None, None, None)
         _release_lock(lock)
 
 

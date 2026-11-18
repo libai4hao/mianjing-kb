@@ -31,7 +31,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kb import config, db, hashing  # noqa: E402
+from kb import config, db, events, hashing, status, wlock  # noqa: E402
 
 WD_FORMAT_XML_DOCUMENT = 16   # 2010+ 的 wdFormatDocumentDefault；2007 只认 12，见 convert()
 WD_FORMAT_XML_DOCUMENT_2007 = 12
@@ -159,10 +159,25 @@ def main(argv=None) -> int:
         return 0
 
     try:
-        import win32com.client as win32
+        __import__("win32com.client")          # 只探测依赖，真正实例在 _apply 里创建
     except ImportError:
         print("[fatal] 需要 pywin32：pip install pywin32", file=sys.stderr)
         return 2
+    # 本工具既是写盘（生成 .docx）也是写库（标 superseded），全程持写锁：
+    # 与 intake / batch_label / review_cli 互斥，别让另一个写库工具读到半更新账本。
+    try:
+        with wlock.write_lock("kb", tool="doc_convert", build_dir=Path(args.db).parent):
+            return _apply(files, args)
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                          "note": "另一个写库工具在跑；等它结束再重试"},
+                         ensure_ascii=False, indent=2), file=sys.stderr)
+        return 2
+
+
+def _apply(files, args) -> int:
+    import win32com.client as win32
+
     word = win32.DispatchEx("Word.Application")   # 独立私有实例，不劫持用户正在用的 Word
     word.Visible = False
     word.DisplayAlerts = 0
@@ -214,16 +229,20 @@ def main(argv=None) -> int:
                 print(f"[warn] {src.name}: 转换成功但数据库无对应源记录（先跑 intake）",
                       file=sys.stderr)
                 continue
-            if row["status"] in ("quarantined", "absent", "superseded"):
+            if row["status"] in (status.QUARANTINED, status.ABSENT, status.SUPERSEDED):
                 continue
             rel_docx = (f"{row['dir_path']}/{docx.name}" if row["dir_path"] else docx.name)
-            note = f"converted_to:{rel_docx}#{hashing.sha256_file(docx)[:16]}"
+            target = {"dir": row["dir_path"] or "", "name": docx.name,
+                      "hash": hashing.sha256_file(docx)[:16]}
+            note = f"converted_to:{rel_docx}#{target['hash']}"
             conn.execute(
-                "UPDATE source_documents SET status='superseded', last_seen_at=?, "
+                f"UPDATE source_documents SET status='{status.SUPERSEDED}', last_seen_at=?, "
                 "note=CASE WHEN note IS NULL OR note='' THEN ? ELSE ? || ' | ' || note END "
                 "WHERE doc_hash=?",
                 (now, note, note, doc_hash),
             )
+            # 事件与 note 双写：G5 / purge 读事件，人工仍看 note（T12）
+            events.append(conn, doc_hash, events.KIND_CONVERTED_TO, target, at=now)
             superseded += 1
         conn.commit()
     finally:
@@ -237,3 +256,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

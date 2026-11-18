@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+import intake
 from intake import main
+from kb import wlock
 
 
 @pytest.fixture()
@@ -452,3 +454,57 @@ def test_junction_inside_corpus_is_not_walked(tmp_path, capsys):
     summary = json.loads(capsys.readouterr().out)
     assert summary["actions"]["added"] == 1
     assert len(rows(db_path)) == 1
+
+
+# ---------------- T11：分块提交 + 批次状态 ----------------
+def _batch(db_path: Path) -> sqlite3.Row:
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM batches").fetchone()
+    conn.close()
+    return row
+
+
+def test_batch_row_tracks_completed_state_and_counts(corpus, tmp_path, capsys):
+    db_path = tmp_path / "kb.sqlite"
+    assert main(["--root", str(corpus), "--db", str(db_path)]) == 0
+    b = _batch(db_path)
+    assert b["state"] == "completed"
+    assert b["added"] == 2 and b["quarantined"] == 1
+    assert b["updated_at"]
+
+
+def test_crash_midway_keeps_committed_chunk_and_marks_batch_failed(corpus, tmp_path,
+                                                                   monkeypatch, capsys):
+    """分块提交：第 N 件炸掉后，前面已 commit 的行可查，批次显式标 failed（可重扫续）。"""
+    db_path = tmp_path / "kb.sqlite"
+    monkeypatch.setattr(intake, "CHUNK_SIZE", 2)
+    real = intake.hashing.sha256_file_sized
+    calls = {"n": 0}
+
+    def boom(path):
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            raise RuntimeError("注入中断")
+        return real(path)
+
+    monkeypatch.setattr(intake.hashing, "sha256_file_sized", boom)
+    assert main(["--root", str(corpus), "--db", str(db_path)]) == 3
+    capsys.readouterr()
+    assert len(rows(db_path)) == 2                 # 第 1-2 件已提交，没被整批回滚
+    b = _batch(db_path)
+    assert b["state"] == "failed"
+    assert "注入中断" in (b["note"] or "")
+
+    monkeypatch.setattr(intake.hashing, "sha256_file_sized", real)
+    assert main(["--root", str(corpus), "--db", str(db_path)]) == 0
+    assert len(rows(db_path)) == 3                 # 重扫按 hash 幂等续上
+
+
+def test_intake_refuses_when_another_writer_holds_lock(corpus, tmp_path, capsys):
+    db_path = tmp_path / "kb.sqlite"
+    with wlock.write_lock("kb", tool="batch_label", build_dir=db_path.parent):
+        assert main(["--root", str(corpus), "--db", str(db_path)]) == 2
+    err = capsys.readouterr().err
+    assert "batch_label" in err and "ABORT" in err
+    assert not db_path.exists()                    # 拿不到锁就不建库

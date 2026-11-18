@@ -274,3 +274,18 @@ def test_sidecar_cleanup_failure_is_warning_not_abort(mini_env, monkeypatch, cap
     assert rf.main([]) == 0
     out = capsys.readouterr().out
     assert '"swapped": true' in out and "warnings" in out and "locked sidecar" in out
+
+
+def test_refuses_when_kb_lock_held_by_other_writer(mini_env, monkeypatch, capsys):
+    """T15：refresh 与 intake/batch_label 共用写锁；别人持锁就别重建影子库。
+
+    否则 refresh 在切换窗口内别人往线上库写的行会被覆盖掉。
+    """
+    from tools.kb import wlock
+    monkeypatch.setattr(rf, "KB_LOCK_WAIT_SEC", 0)
+    with wlock.write_lock("kb", tool="intake", build_dir=mini_env["build"]):
+        assert rf.main([]) == 2
+    out = capsys.readouterr().out
+    assert "ABORT" in out and "intake" in out
+    assert not (mini_env["build"] / rf.LOCK_NAME).exists()   # 自己的锁也要放掉
+    assert not (mini_env["build"] / rf.SHADOW_NAME).exists()  # 没动影子库

@@ -26,7 +26,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
-from kb import config, db  # noqa: E402
+from kb import config, db, status  # noqa: E402
 
 OUT_DB = Path(config.BUILD_DIR) / "面经库.db"
 MD_ROOT = Path(config.CORPUS_ROOT) / "20-题库MD"
@@ -77,7 +77,7 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
     docs = src.execute(
         "SELECT doc_hash, file_name, category, topic, sub_topic, collection, source_trust, "
         "       dir_path, source_count, sources_json, note FROM source_documents "
-        "WHERE status='classified'").fetchall()
+        f"WHERE status='{status.CLASSIFIED}'").fetchall()
     out.executemany(
         "INSERT INTO documents(doc_hash, file_name, category, topic, sub_topic, collection, "
         "  source_trust, dir_path, source_count, sources_json, note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",

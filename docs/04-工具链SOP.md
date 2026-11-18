@@ -232,5 +232,19 @@ root 落在语料根内时（如默认的 `31-收件箱`）仍写全 `31-收件�
 |---|---|---|
 | `partially initialized module 'inspect'` | `%TEMP%` 根有 zcode 残留 `inspect.py` | 临时脚本放独立子目录（如 `%TEMP%\zocr\`） |
 | `Copy-Item` 找不到中文路径文件 | PowerShell 直接写中文路径 | 先 `Get-ChildItem \| Where-Object { $_.Name -like ... }` 取 `FullName` 再操作 |
-| sqlite 写入报 locked | WAL 下多写者 | 单写者串行；本仓库脚本都是短事务 |
+| sqlite 写入报 locked | WAL 下多写者 | 单写者串行：写库工具统一走 `kb/wlock.py` 的 `locks/kb.lock`，抢不到直接退 2 |
+
+## 10. 写库并发与长任务取舍（T11 / T12 / T15）
+
+- **写锁**：`intake` / `batch_label` / `doc_convert` / `review_cli` / `refresh` 启动即抢
+  `<build>/locks/kb.lock`（JSON 记 pid + tool + started_at）。拿不到就打印
+  `{"verdict":"ABORT","why":"写锁被占用：kb.lock（pid=… tool=…）"}` 并退 2，**不会**等到
+  `database is locked` 栈；持有者进程已死则自动改名 `.stale-<pid>` 接管并打 `[warn]`。
+  `refresh.lock` 保留，只管"同一时间一个 refresh"。
+- **intake 分块提交**：每 500 件（`CHUNK_SIZE`，按"文档 + 新增题"计件）提交一次，批次行
+  `batches.state` 走 `running → completed / failed`。中途崩溃或异常：已提交的块可查，
+  批次记 `failed` + 异常摘要，返回码 3；直接重跑即可按 hash 幂等续扫。
+  取舍是**吞吐换可恢复性**（每 500 件一次 commit），不追求"整批原子"。
+- **事件表**：`document_events(doc_hash, kind, payload, at)` 是 note 的结构化镜像，
+  写方双写、读方事件优先。历史 note 已在迁移 011 回填；`converted_to` 的读方不再依赖子串。
 | 分类判错 | 规则词典（`meta/*.yaml`）而非数据 | 改 yaml → `classify --redo`，**不碰 md、不重跑 OCR** |

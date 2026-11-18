@@ -44,7 +44,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kb import config, hashing  # noqa: E402
+from kb import config, events, hashing, status  # noqa: E402
 from kb.vocab import topic_vocab  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
@@ -263,9 +263,82 @@ def g4_index(out_conn) -> dict:
 
 
 # ---------------- G5 台账-磁盘一致 ----------------
+MAX_CHAIN = 3
+
+
+def _successor_row(kb_conn, target: dict):
+    """converted_to 目标 → 台账里对应的后继行（找不到返回 None）。
+
+    新格式带 hash：`<dir>/<name>#<docx_hash>`，hash 就是 docx 记录的 doc_hash，
+    直接按 doc_hash 命中，比"文件名 + 目录"更硬（同名不同目录不会被误认）。
+    旧格式裸 `<name>`（T19）：只能按文件名找，找不到才算缺失。
+    """
+    digest = target.get("hash")
+    if digest:
+        return kb_conn.execute(
+            "SELECT doc_hash, status, note, file_name FROM source_documents WHERE doc_hash=?",
+            (digest,)).fetchone()
+    name = target.get("name")
+    if not name:
+        return None
+    dir_path = target.get("dir")
+    if dir_path is not None:
+        rows = kb_conn.execute(
+            "SELECT doc_hash, status, note, file_name FROM source_documents "
+            "WHERE file_name=? AND dir_path=?", (name, dir_path)).fetchall()
+    else:
+        rows = kb_conn.execute(
+            "SELECT doc_hash, status, note, file_name FROM source_documents "
+            "WHERE file_name=?", (name,)).fetchall()
+    if not rows:
+        return None
+    good = [r for r in rows if r["status"] in status.SUCCESSOR_OK]
+    if good:
+        return good[0]
+    # 只有被退役的候选——可能是一条接替链（.doc → .docx → .pdf），继续往下追
+    return rows[0]
+
+
+def converted_target_ok(kb_conn, target: dict, depth: int = 0) -> bool:
+    """后继记录存在且最终落在有效态（允许有限跳数的接替链）。"""
+    row = _successor_row(kb_conn, target)
+    if row is None:
+        return False
+    if row["status"] in status.SUCCESSOR_OK:
+        return True
+    if row["status"] not in (status.SUPERSEDED,) or depth >= MAX_CHAIN:
+        return False
+    nxt = events.converted_targets(kb_conn, row["doc_hash"], row["note"])
+    return any(converted_target_ok(kb_conn, t, depth + 1) for t in nxt)
+
+
+def audit_converted(kb_conn) -> list[dict]:
+    """盘点全库 superseded 行的 converted_to 是否都能解析到有效后继（`--audit-converted`）。"""
+    out = []
+    for r in kb_conn.execute(
+            "SELECT doc_hash, file_name, dir_path, note FROM source_documents "
+            f"WHERE status='{status.SUPERSEDED}' ORDER BY dir_path, file_name").fetchall():
+        targets = events.converted_targets(kb_conn, r["doc_hash"], r["note"])
+        out.append({
+            "doc_hash": r["doc_hash"],
+            "rel": f"{r['dir_path']}/{r['file_name']}" if r["dir_path"] else r["file_name"],
+            "targets": targets,
+            "resolved": bool(targets) and all(converted_target_ok(kb_conn, t) for t in targets),
+            "legacy": any(not t.get("hash") for t in targets),
+            "no_target": not targets,
+        })
+    return out
+
+
 def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
-    """classified 在盘；superseded 在 99 区或已删且留痕；99 区每件在台账。"""
+    """classified 在盘；superseded 在 99 区或已删且留痕；99 区每件在台账。
+
+    converted_to 校验（T12/T19）：读 `document_events`，老库退回 note 子串；
+    新格式按 hash 精确命中后继记录，历史裸格式按文件名解析——两者都必须落到
+    有效态（非 absent/superseded/quarantined）或一条有限的接替链末端。
+    """
     sql = ("classified: src_path exists; superseded: dir_path LIKE '99-%' OR 留痕(note/retire_log); "
+           "converted_to: 后继记录存在且未退役; "
            "99区: sha256(file)[:16] ∈ source_documents.doc_hash")
     fails = []
     retire_names = set()
@@ -276,31 +349,30 @@ def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
                 if len(row) >= 3 and row[2].strip():
                     retire_names.add(Path(row[2].strip()).name)
 
+    legacy_checked = 0
     for r in kb_conn.execute(
             "SELECT doc_hash, file_name, dir_path, src_path, status, note "
-            "FROM source_documents WHERE status IN ('classified','superseded')").fetchall():
+            f"FROM source_documents WHERE status IN {status.sql_in(status.G5_SCAN)}").fetchall():
         src = Path(r["src_path"] or "")
-        if r["status"] == "classified":
+        if r["status"] == status.CLASSIFIED:
             if not src.exists():
                 fails.append({"kind": "classified_src_missing", "rel": r["file_name"]})
             continue
         # superseded：在盘则须在 99 区，或 note 有留痕（converted_to 原地转换 /
         # review_cli 退役确认——"已退役待物理清理"是合法中间态，docs/15 G5 意图=有记录即过）；
-        # 不在盘则同样须有留痕（note / retire_log）
-        # 新格式 converted_to:<dir>/<name>#<hash> 额外校验后继记录：必须存在且未被退役，
-        # 否则"原 .doc 已 superseded、docx 根本没入库"，purge 的 superseded_no_replacement 会虚高。
-        for part in (r["note"] or "").split(" | "):
-            if part.startswith("converted_to:") and "#" in part:
-                target = part.split(":", 1)[1].split("#", 1)[0].strip()
-                name = target.rsplit("/", 1)[-1]
-                dir_path = target.rsplit("/", 1)[0] if "/" in target else ""
-                trow = kb_conn.execute(
-                    "SELECT status FROM source_documents WHERE file_name=? AND dir_path=? "
-                    "AND status NOT IN ('absent','superseded','quarantined')",
-                    (name, dir_path)).fetchone()
-                if trow is None:
-                    fails.append({"kind": "converted_target_missing", "rel": r["file_name"],
-                                  "target": target})
+        # 不在盘则同样须有留痕（note / retire_log）。
+        # converted_to 额外校验后继记录：否则"原 .doc 已 superseded、docx 根本没入库"，
+        # purge 的 superseded_no_replacement 会虚高。
+        targets = events.converted_targets(kb_conn, r["doc_hash"], r["note"])
+        for t in targets:
+            if t.get("hash"):
+                legacy = False
+            else:
+                legacy = True
+                legacy_checked += 1
+            if not converted_target_ok(kb_conn, t):
+                fails.append({"kind": "converted_target_missing", "rel": r["file_name"],
+                              "target": t, "legacy": legacy})
         if src.exists():
             in_99 = (r["dir_path"] or "").startswith(config.QUARANTINE_PREFIX) \
                     or config.QUARANTINE_PREFIX in str(src)
@@ -322,7 +394,8 @@ def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
                 fails.append({"kind": "orphan_in_99", "rel": str(p.relative_to(corpus_root))})
     state = "PASS" if not fails else "FAIL"
     return _gate("G5", "台账-磁盘一致", "硬", state, fails,
-                 {"retire_log_rows": len(retire_names)}, sql)
+                 {"retire_log_rows": len(retire_names), "legacy_converted_checked": legacy_checked},
+                 sql)
 
 
 # ---------------- G6 打标质量 ----------------
@@ -561,6 +634,8 @@ def write_backfill_plan(build_dir: Path, gates: list[dict]) -> Path:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="G1-G7 核账门禁（任一硬门禁 FAIL 即非 0 退出）")
     ap.add_argument("--docs", action="store_true", help="加跑 G7 文档一致性（pre-commit 用）")
+    ap.add_argument("--audit-converted", action="store_true",
+                    help="只盘点 superseded 行的 converted_to 能否解析到有效后继（T19）")
     ap.add_argument("--kb-db", default=str(config.DB_PATH), help="台账 kb.sqlite")
     ap.add_argument("--out-db", default=str(Path(config.BUILD_DIR) / "面经库.db"),
                     help="检索库 面经库.db")
@@ -570,6 +645,23 @@ def main(argv=None) -> int:
     started = time.perf_counter()
     kb_conn = sqlite3.connect(f"file:{Path(args.kb_db).as_posix()}?mode=ro", uri=True)
     kb_conn.row_factory = sqlite3.Row
+    if args.audit_converted:
+        rows = audit_converted(kb_conn)
+        unresolved = [r for r in rows if not r["resolved"]]
+        # 只把"有目标却解析不到"算问题：99 区里 superseded 且从未写过 converted_to 的行
+        # 本来就没有后继（被覆盖/被删/纯重复），它们进 no_target_rows 供人工抽查，不算失败。
+        bad = [r for r in unresolved if r["targets"]]
+        print(json.dumps({
+            "superseded_rows": len(rows),
+            "resolved": len(rows) - len(unresolved),
+            "unresolved": len(unresolved),
+            "unresolved_with_target": len(bad),
+            "legacy_rows": sum(1 for r in rows if r["legacy"]),
+            "no_target_rows": sum(1 for r in rows if r["no_target"]),
+            "unresolved_detail": bad[:50],
+        }, ensure_ascii=False, indent=1))
+        kb_conn.close()
+        return 1 if bad else 0
     out_conn = sqlite3.connect(f"file:{Path(args.out_db).as_posix()}?mode=ro", uri=True)
     out_conn.row_factory = sqlite3.Row
     try:  # vec_questions 是 vec0 虚表，校验它需要 sqlite_vec 扩展（可用则加载，G4 自行降级 WARN）

@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pymupdf  # noqa: E402
 
-from kb import config, db  # noqa: E402
+from kb import config, db, status  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
@@ -64,8 +64,8 @@ def main(argv=None) -> int:
     conn = db.connect(args.db)
     sql = (
         "SELECT doc_hash, file_name, src_path, dir_path, source_count "
-        "FROM source_documents WHERE ext = '.pdf' AND status = 'classified' "
-        "AND dir_path NOT LIKE '99-重复文件待删%'"
+        f"FROM source_documents WHERE ext = '.pdf' AND status = '{status.CLASSIFIED}' "
+        f"AND dir_path NOT LIKE '{config.QUARANTINE_PREFIX}%'"
     )
     rows = [dict(r) for r in conn.execute(sql)]
 

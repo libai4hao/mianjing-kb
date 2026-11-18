@@ -6,21 +6,39 @@
 - 已应用的版本记在 `schema_version(version, applied_at)`；
 - SQL 文件只是函数的载荷；006（questions 题级 topic）没有独立 SQL，就在代码里实现，
   版本号照记，不再出现"006 找不到迁移文件"的歧义。
+
+事务与并发（T14，2026-11-19 二审）：
+- 每个迁移单独一个 `BEGIN IMMEDIATE` 事务，迁移体 + 版本记账同生共死：中途失败回滚到
+  "这个版本没发生过"，下次连接从该版本续跑，不会留下半张表/半列；
+- 版本表在**锁内二次校验**：两个进程同时 migrate 时，后拿到写锁的进程会看到版本已落地，
+  直接放行而不是重放 DDL；拿锁失败按 busy_timeout 排队，超时才报错；
+- `executescript` 会隐式 COMMIT（把外面的事务顶掉），所以 SQL 文件一律用
+  `split_sql()` 拆成单句 `execute`；脚本里的 `PRAGMA` 在事务内无效（journal_mode 还会
+  直接报错），由 `exec_script(skip_pragma=True)` 跳过——连接层已经设过。
 """
 from __future__ import annotations
 
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from . import config
+from . import config, events, status
 
 SCHEMA_FILE = Path(config.META_DIR) / "schema" / "001_init.sql"
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 BACKUP_KEEP = 5
+BEGIN_RETRIES = 5
 COUNT_FIELDS = {"status", "category", "collection", "source_trust", "topic",
                 "sub_topic", "ext", "parent_dir", "batch_id", "gate_result"}
+
+# batches.state（T11）：intake 分块提交时先写 running，正常结束写 completed，异常写 failed
+BATCH_RUNNING = "running"
+BATCH_COMPLETED = "completed"
+BATCH_FAILED = "failed"
+BATCH_STATES = (BATCH_RUNNING, BATCH_COMPLETED, BATCH_FAILED)
+_BATCH_COUNT_FIELDS = ("added", "duplicated", "moved", "quarantined", "ignored")
 
 
 def connect(db_path: Path | str | None = None, *, create: bool = True,
@@ -46,10 +64,11 @@ def connect(db_path: Path | str | None = None, *, create: bool = True,
         path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=10)
     conn.row_factory = sqlite3.Row
+    # busy_timeout 必须先设：journal_mode 切换本身要拿写锁，并发打开时没有它就直接报 locked
+    conn.execute("PRAGMA busy_timeout = 10000")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = FULL")   # kb.sqlite 是事实源，断电不丢已提交事务
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 10000")
     if create:
         migrate(conn)
     return conn
@@ -58,6 +77,73 @@ def connect(db_path: Path | str | None = None, *, create: bool = True,
 def migrate(conn: sqlite3.Connection) -> None:
     """按 schema_version 逐个应用未落地的迁移（每项都幂等）。"""
     _apply_migrations(conn)
+
+
+def split_sql(sql: str) -> list[str]:
+    """把 SQL 脚本拆成单句：跳过 `--`/`/* */` 注释，引号内的 `;` 不算分隔符。
+
+    为什么要拆：`executescript` 在执行前会隐式 COMMIT，迁移的事务性会被它顶掉；
+    改成逐句 `execute` 才能让"迁移体 + 版本记账"待在同一个事务里。
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    i, n = 0, len(sql)
+    quote: str | None = None
+    while i < n:
+        ch = sql[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                if i + 1 < n and sql[i + 1] == quote:      # SQL 里 '' / "" 是转义
+                    buf.append(sql[i + 1])
+                    i += 2
+                    continue
+                quote = None
+            i += 1
+            continue
+        if ch == "-" and i + 1 < n and sql[i + 1] == "-":
+            j = sql.find("\n", i)
+            i = n if j < 0 else j + 1
+            buf.append(" ")
+            continue
+        if ch == "/" and i + 1 < n and sql[i + 1] == "*":
+            j = sql.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            buf.append(" ")
+            continue
+        if ch in "'\"`":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ";":
+            stmt = "".join(buf).strip()
+            if stmt:
+                out.append(stmt)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def exec_script(conn: sqlite3.Connection, sql: str, *, skip_pragma: bool = True) -> int:
+    """逐句执行脚本（事务安全版 executescript）。返回实际执行的语句数。"""
+    n = 0
+    for stmt in split_sql(sql):
+        if skip_pragma and stmt.lstrip().upper().startswith("PRAGMA"):
+            continue
+        conn.execute(stmt)
+        n += 1
+    return n
+
+
+def _read_schema(name: str) -> str:
+    return (SCHEMA_FILE.parent / name).read_text(encoding="utf-8")
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -70,16 +156,16 @@ def _ensure_parent_dir(conn: sqlite3.Connection) -> None:
     if not _column_exists(conn, "source_documents", "parent_dir"):
         conn.execute("ALTER TABLE source_documents ADD COLUMN parent_dir TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sd_parent ON source_documents(parent_dir)")
-    # 注意：本迁移已上线，视图定义不得再改；口径要演进必须新增 010 迁移。
+    # 注意：本迁移已上线，视图定义不得再改；口径要演进必须新增迁移。
     conn.execute("DROP VIEW IF EXISTS ingest_queue")
     conn.execute(
-        """
+        f"""
         CREATE VIEW ingest_queue AS
         SELECT doc_hash, file_name, parent_dir, dir_path, ext, size_bytes,
                category, topic, sub_topic, collection, source_trust
         FROM source_documents
-        WHERE status = 'classified'
-          AND dir_path NOT LIKE '99-重复文件待删%'
+        WHERE status = '{status.CLASSIFIED}'
+          AND dir_path NOT LIKE '{config.QUARANTINE_PREFIX}%'
         """
     )
 
@@ -93,14 +179,12 @@ def _ensure_source_spans(conn: sqlite3.Connection) -> None:
 
 def _ensure_questions(conn: sqlite3.Connection) -> None:
     """补 questions 表 + 频次视图（004，P1-1 extract 落表）。"""
-    sql = (SCHEMA_FILE.parent / "004_questions.sql").read_text(encoding="utf-8")
-    conn.executescript(sql)
+    exec_script(conn, _read_schema("004_questions.sql"))
 
 
 def _ensure_labels_staging(conn: sqlite3.Connection) -> None:
     """补 labels_staging 打标暂存表（005，docs/15 §3.6——G6 通过才 merge）。"""
-    sql = (SCHEMA_FILE.parent / "005_labels_staging.sql").read_text(encoding="utf-8")
-    conn.executescript(sql)
+    exec_script(conn, _read_schema("005_labels_staging.sql"))
 
 
 def _ensure_question_topic(conn: sqlite3.Connection) -> None:
@@ -121,8 +205,7 @@ def _ensure_label_facts(conn: sqlite3.Connection) -> None:
     labels_staging 加 q_norm_hash 供 merge 校验题干一致性（历史 NULL 行放行）；
     questions 加 difficulty/tags（qtype 004 已有，merge 四列落库用）。
     """
-    sql = (SCHEMA_FILE.parent / "007_label_facts.sql").read_text(encoding="utf-8")
-    conn.executescript(sql)
+    exec_script(conn, _read_schema("007_label_facts.sql"))
     if not _column_exists(conn, "labels_staging", "q_norm_hash"):
         conn.execute("ALTER TABLE labels_staging ADD COLUMN q_norm_hash TEXT")
     for col in ("prompt_tokens", "completion_tokens"):   # F5：in/out 拆分计价（bug4）
@@ -139,8 +222,7 @@ def _ensure_golden_labels(conn: sqlite3.Connection) -> None:
     键 = q_norm_hash（与 label_facts 同源，跨 extract 重切存活）；
     人工抽检经 batch_label --golden-sample/--golden-load 录入。
     """
-    sql = (SCHEMA_FILE.parent / "008_golden_labels.sql").read_text(encoding="utf-8")
-    conn.executescript(sql)
+    exec_script(conn, _read_schema("008_golden_labels.sql"))
 
 
 def _ensure_review_columns(conn: sqlite3.Connection) -> None:
@@ -154,9 +236,44 @@ def _ensure_review_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE labels_staging ADD COLUMN {col} TEXT")
 
 
+def _ensure_batch_state(conn: sqlite3.Connection) -> None:
+    """010：batches 加 state / updated_at（T11 分块提交的批次进度）。
+
+    老行默认 completed（都是已经跑完的历史批次）；state 取值见 BATCH_STATES。
+    """
+    if not _column_exists(conn, "batches", "state"):
+        conn.execute(f"ALTER TABLE batches ADD COLUMN state TEXT NOT NULL "
+                     f"DEFAULT '{BATCH_COMPLETED}'")
+    if not _column_exists(conn, "batches", "updated_at"):
+        conn.execute("ALTER TABLE batches ADD COLUMN updated_at TEXT")
+
+
+def _ensure_document_events(conn: sqlite3.Connection) -> None:
+    """011：document_events 事件表（T12）+ 历史 note 回填。
+
+    回填放在迁移里，是为了让"旧库第一次被新代码打开"就完成 note → 事件的一次性搬迁；
+    事件写入是 INSERT OR IGNORE，重复跑不会重复记。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS document_events (
+          id        INTEGER PRIMARY KEY AUTOINCREMENT,
+          doc_hash  TEXT NOT NULL,
+          kind      TEXT NOT NULL,
+          payload   TEXT NOT NULL DEFAULT '{}',
+          at        TEXT NOT NULL,
+          UNIQUE (doc_hash, kind, payload)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_de_doc  ON document_events(doc_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_de_kind ON document_events(kind)")
+    events.backfill(conn)
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     """001：基础表（source_documents / batches 等）。脚本本身 IF NOT EXISTS，可直接重放。"""
-    conn.executescript(SCHEMA_FILE.read_text(encoding="utf-8"))
+    exec_script(conn, SCHEMA_FILE.read_text(encoding="utf-8"))
 
 
 MIGRATIONS = [
@@ -169,7 +286,46 @@ MIGRATIONS = [
     ("007_label_facts", _ensure_label_facts),
     ("008_golden_labels", _ensure_golden_labels),
     ("009_review_columns", _ensure_review_columns),
+    ("010_batches_state", _ensure_batch_state),
+    ("011_document_events", _ensure_document_events),
 ]
+
+
+def _version_applied(conn: sqlite3.Connection, version: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM schema_version WHERE version=? LIMIT 1", (version,)
+    ).fetchone() is not None
+
+
+def _begin_immediate(conn: sqlite3.Connection, retries: int = BEGIN_RETRIES) -> None:
+    """拿写锁开事务；并发进程在 busy_timeout 内排队，抢不到才退避重试。"""
+    if conn.in_transaction:
+        conn.commit()
+    for attempt in range(retries):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as ex:
+            if "locked" not in str(ex).lower() or attempt == retries - 1:
+                raise
+            time.sleep(0.2 * (attempt + 1))
+
+
+def _apply_one(conn: sqlite3.Connection, version: str, fn) -> str:
+    """应用单个迁移：事务内二次校验版本 → 执行 → 记账 → 提交。返回 applied/already。"""
+    _begin_immediate(conn)
+    try:
+        if _version_applied(conn, version):      # 锁内二次校验：别的进程可能刚跑完
+            conn.commit()
+            return "already"
+        fn(conn)
+        conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                     (version, datetime.now().strftime(NOW_FMT)))
+        conn.commit()
+        return "applied"
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
@@ -177,14 +333,9 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS schema_version ("
         " version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
     )
-    applied = {r[0] for r in conn.execute("SELECT version FROM schema_version").fetchall()}
-    for version, fn in MIGRATIONS:
-        if version in applied:
-            continue
-        fn(conn)
-        conn.execute("INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
-                     (version, datetime.now().strftime(NOW_FMT)))
     conn.commit()
+    for version, fn in MIGRATIONS:
+        _apply_one(conn, version, fn)
     _validate_schema(conn)
 
 
@@ -196,6 +347,8 @@ REQUIRED = {
                        "review_state", "review_model", "review_note"),
     "label_facts": ("q_norm_hash", "topic"),
     "golden_labels": ("q_norm_hash",),
+    "batches": ("batch_id", "state", "updated_at"),
+    "document_events": ("doc_hash", "kind", "payload", "at"),
 }
 
 
@@ -262,11 +415,55 @@ def record_batch(conn: sqlite3.Connection, **kw) -> None:
     )
 
 
+def start_batch(conn: sqlite3.Connection, *, batch_id: str, root: str, mode: str,
+                at: str | None = None) -> None:
+    """批次开始：先落一行 state=running，后面靠分块提交更新进度（T11）。
+
+    先落 running 的好处：中途崩溃时，库里有这批的"存在证明"与已提交条数，
+    下次重扫能看出上一批是失败了还是还在跑。
+    """
+    conn.execute(
+        "INSERT INTO batches (batch_id, created_at, root, mode, state, updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (batch_id, at or datetime.now().strftime(NOW_FMT), root, mode,
+         BATCH_RUNNING, at or datetime.now().strftime(NOW_FMT)),
+    )
+
+
+def update_batch(conn: sqlite3.Connection, batch_id: str, *, state: str | None = None,
+                 note: str | None = None, **counts) -> None:
+    """更新批次状态/计数（白名单字段，防止写错列名）。"""
+    sets, args = [], []
+    if state is not None:
+        if state not in BATCH_STATES:
+            raise ValueError(f"未知批次状态：{state}")
+        sets.append("state=?")
+        args.append(state)
+    if note is not None:
+        sets.append("note=?")
+        args.append(note)
+    for k, v in counts.items():
+        if k not in _BATCH_COUNT_FIELDS:
+            raise ValueError(f"不支持的批次计数字段：{k}")
+        sets.append(f"{k}=?")
+        args.append(v)
+    sets.append("updated_at=?")
+    args.append(datetime.now().strftime(NOW_FMT))
+    args.append(batch_id)
+    conn.execute(f"UPDATE batches SET {','.join(sets)} WHERE batch_id=?", args)
+
+
+def batch_state(conn: sqlite3.Connection, batch_id: str) -> str | None:
+    row = conn.execute("SELECT state FROM batches WHERE batch_id=?", (batch_id,)).fetchone()
+    return row["state"] if row else None
+
+
 def count_by(conn: sqlite3.Connection, field: str) -> dict[str, int]:
     if field not in COUNT_FIELDS:
         raise ValueError(f"不支持的统计字段：{field}")
     rows = conn.execute(
-        f"SELECT COALESCE({field},'<null>') AS k, COUNT(*) AS n FROM source_documents GROUP BY 1 ORDER BY n DESC"
+        f"SELECT COALESCE({field},'<null>') AS k, COUNT(*) AS n "
+        "FROM source_documents GROUP BY 1 ORDER BY n DESC"
     ).fetchall()
     return {r["k"]: r["n"] for r in rows}
 

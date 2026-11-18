@@ -25,9 +25,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
-from kb import config, db  # noqa: E402
+from kb import config, db, events, status, wlock  # noqa: E402
 
-RESOLVABLE = {"classified", "superseded", "rejected"}
+RESOLVABLE = {status.CLASSIFIED, status.SUPERSEDED, status.REJECTED}
 
 
 def _plan_rows() -> list[dict]:
@@ -44,7 +44,7 @@ def gray(conn) -> dict:
         "suggest": [r for r in plan if r["route"] == "supersede_suggest"],
         "quarantined": [dict(r) for r in conn.execute(
             "SELECT doc_hash, file_name, dir_path, note FROM source_documents "
-            "WHERE status='quarantined'").fetchall()],
+            f"WHERE status='{status.QUARANTINED}'").fetchall()],
     }
     lowconf = conn.execute(
         "SELECT COUNT(*) FROM questions WHERE conf='low'").fetchone()[0]
@@ -85,6 +85,9 @@ def resolve(conn, key: str, status: str, note: str) -> dict:
     new_note = f"{old_note} | {entry}" if old_note else entry
     conn.execute("UPDATE source_documents SET status=?, note=? WHERE doc_hash=?",
                  (status, new_note, row["doc_hash"]))
+    # note 与事件双写（T12）：人工复核也进事件表，读方不必再解析 "[review_cli ...]" 文本
+    events.append(conn, row["doc_hash"], events.KIND_REVIEW,
+                  {"status": status, "note": note, "at": stamp})
     conn.commit()
     return {"ok": True, "file_name": row["file_name"],
             "old_status": row["status"], "new_status": status, "note": new_note}
@@ -103,7 +106,14 @@ def main(argv=None) -> int:
         if not args.status:
             print(json.dumps({"ok": False, "err": "--resolve 需配合 --status"}, ensure_ascii=False))
             return 2
-        out = resolve(conn, args.resolve, args.status, args.note)
+        try:
+            with wlock.write_lock("kb", tool="review_cli",
+                                  build_dir=Path(config.DB_PATH).parent):
+                out = resolve(conn, args.resolve, args.status, args.note)
+        except wlock.LockHeld as ex:
+            print(json.dumps({"ok": False, "err": str(ex)}, ensure_ascii=False, indent=1),
+                  file=sys.stderr)
+            return 2
         print(json.dumps(out, ensure_ascii=False, indent=1))
         return 0 if out["ok"] else 2
     g = gray(conn)

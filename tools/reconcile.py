@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kb import db, config  # noqa: E402
+from kb import db, config, status  # noqa: E402
 
 # P1-3 修复（2026-11-17 审核）：原为硬编码绝对路径且定义在 kb import 之前，
 # KB_* 环境变量覆盖对本脚本完全失效；统一走 config，换机器不再坏。
@@ -62,7 +62,7 @@ def main() -> int:
         else:
             src_name = Path(r["rel"]).name
             rec = sd.get(src_name)
-            if rec and rec["status"] == "superseded":
+            if rec and rec["status"] == status.SUPERSEDED:
                 reason = f"源件退役 superseded：{(rec['note'] or '')[:90]}"
             elif rec and (rec["dir_path"] or "").startswith("99-重复文件待删"):
                 reason = "源件在99隔离区待物理删"

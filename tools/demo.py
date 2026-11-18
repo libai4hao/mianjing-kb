@@ -23,6 +23,10 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+if __package__ in (None, ""):
+    sys.path.insert(0, str(REPO))
+from kb import status  # noqa: E402
+
 DEMO_SRC = REPO / "examples" / "demo_corpus"
 TOOLS = REPO / "tools"
 
@@ -103,7 +107,7 @@ def _counts(db_path: Path, out_db: Path) -> dict:
     if db_path.exists():
         con = sqlite3.connect(str(db_path))
         out["docs_classified"] = con.execute(
-            "SELECT COUNT(*) FROM source_documents WHERE status='classified'").fetchone()[0]
+            f"SELECT COUNT(*) FROM source_documents WHERE status='{status.CLASSIFIED}'").fetchone()[0]
         out["docs_total"] = con.execute("SELECT COUNT(*) FROM source_documents").fetchone()[0]
         out["questions"] = con.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
         con.close()

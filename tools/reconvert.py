@@ -26,18 +26,39 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
 
-from kb import config, db, hashing  # noqa: E402
+from kb import config, db, hashing, status  # noqa: E402
 
 # 审核修复（2026-11-18）：原 insert(0) 会把语料侧 tools 顶到最前，遮蔽本仓库同名模块
 # （同进程后续 from build_db import build 会解析到语料侧旧模块）；改为 append 放到末尾。
 # 公开仓脱敏（2026-11-19）：语料侧 tools 路径不再硬编码，由 config.CORPUS_ROOT 推导；
 # 路径不存在时模块仍可导入（换机器/未设 KB_CORPUS_ROOT 不至于连 import 都炸），调用时才报错。
+# T17（2026-11-19 二审）：仓内 `kb/convert_one.py` 是主路，语料侧只是 fallback——
+# 换机器不配语料侧 tools 也能跑转换；日志里记来源与 sha256，输出可回归。
 def _load_convert_one():
+    try:
+        from kb import convert_one as repo_convert_one   # 仓内固定版（vendored）
+        return repo_convert_one
+    except ModuleNotFoundError as ex:
+        if ex.name not in ("kb.convert_one", "kb"):
+            raise                    # 仓内版本自身依赖缺失，不能被误报成"没配语料根"
     tools_dir = config.CORPUS_ROOT / "21-面经数据库" / "tools"
     if tools_dir.is_dir() and str(tools_dir) not in sys.path:
         sys.path.append(str(tools_dir))
-    import convert_one  # 存量转换器（pdf_to_md / docx_to_md / safe_name / cjk_ratio）
+    import convert_one  # noqa: F401  语料侧存量转换器（仅 fallback）
     return convert_one
+
+
+def _converter_source(cv) -> str:
+    """转换器来源：repo（仓内）/ corpus（语料侧 fallback）/ unknown。"""
+    f = getattr(cv, "__file__", None)
+    if not f:
+        return "unknown"
+    try:
+        p = Path(f).resolve()
+        p.relative_to((REPO / "tools").resolve())
+        return "repo"
+    except ValueError:
+        return "corpus"
 
 
 convert_one = None
@@ -51,10 +72,11 @@ def _require_convert_one():
     try:
         convert_one = _load_convert_one()
     except ModuleNotFoundError as ex:
-        if ex.name == "convert_one":
+        if ex.name in ("convert_one", "kb.convert_one", "kb"):
             raise RuntimeError(
-                "找不到语料侧 convert_one 模块：请设置 KB_CORPUS_ROOT 指向语料根"
-                "（其中应含 21-面经数据库/tools/convert_one.py）") from ex
+                "仓库内 tools/kb/convert_one.py 不可用，且语料侧也找不到 convert_one："
+                "请检查仓库完整性，或设置 KB_CORPUS_ROOT 指向语料根（其中应含 "
+                "21-面经数据库/tools/convert_one.py 作为 fallback）") from ex
         raise RuntimeError(f"convert_one 的依赖缺失：{ex.name}（请先安装该依赖）") from ex
     return convert_one
 
@@ -169,7 +191,7 @@ def _extra_job(conn, rel: str) -> dict | None:
         print(f"[error] extra 匹配到 {len(rows)} 条记录（要求唯一）: {rel}", file=sys.stderr)
         return None
     row = rows[0]
-    if row["status"] != "classified":
+    if row["status"] != status.CLASSIFIED:
         print(f"[warn] extra 记录不是 classified（{row['status']}）: {rel}", file=sys.stderr)
         return None
     return {"rel": f"{row['dir_path']}/{name}" if row["dir_path"] else name,
@@ -184,7 +206,8 @@ def _converter_meta(cv) -> dict:
         ver = version("pymupdf4llm")
     except Exception:  # noqa: BLE001
         ver = None
-    return {"convert_one": path, "convert_one_sha256": sha, "pymupdf4llm": ver}
+    return {"convert_one": path, "convert_one_sha256": sha, "pymupdf4llm": ver,
+            "convert_one_source": _converter_source(cv)}
 
 
 def main(argv=None) -> int:

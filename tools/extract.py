@@ -24,7 +24,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kb import config, db  # noqa: E402
+from kb import config, db, status  # noqa: E402
 from question_freq import close_word, extract, normalize, simhash  # noqa: E402
 from chunker import chunk_v2  # noqa: E402
 
@@ -79,7 +79,7 @@ def doc_pool(conn) -> list[tuple[str, Path]]:
     pool: dict[str, Path] = {}
     ex_src, ex_md = _excluded_rels()
     for r in conn.execute(
-            "SELECT doc_hash, src_path FROM source_documents WHERE status='classified'").fetchall():
+            f"SELECT doc_hash, src_path FROM source_documents WHERE status='{status.CLASSIFIED}'").fetchall():
         p = Path(r["src_path"])
         if not p.exists():
             continue

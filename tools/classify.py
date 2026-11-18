@@ -26,6 +26,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kb import config, db  # noqa: E402
+from kb import status as st  # noqa: E402  （本模块有同名局部变量/参数 status，用别名避免遮蔽）
 
 try:
     import yaml
@@ -35,12 +36,8 @@ except ImportError:      # pragma: no cover
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
-# schema CHECK 的 12 个状态（meta/schema/001_init.sql）——--status 白名单（P1 注入面修复）
-VALID_STATUSES = frozenset({
-    "pending_classify", "classified", "processing", "processed",
-    "rejected", "failed", "duplicate", "moved", "renamed",
-    "absent", "superseded", "quarantined",
-})
+# --status 白名单（P1 注入面修复）：状态全集只在 kb/status.py 定义，这里只做引用
+VALID_STATUSES = frozenset(st.ALL)
 
 
 def build_select_sql(status: str, redo: bool, limit: int) -> tuple[str, list]:
@@ -51,7 +48,8 @@ def build_select_sql(status: str, redo: bool, limit: int) -> tuple[str, list]:
     if redo:
         # 'processed' 不进重判范围：它表示"已入库有产物"，重判会被打回 classified、
         # 把入库状态抹掉（2026-11-19 审核修复）。确需重判单件走 --status processed。
-        where = "status NOT IN ('quarantined','absent','superseded','processed')"
+        where = "status NOT IN " + st.sql_in(
+            (st.QUARANTINED, st.ABSENT, st.SUPERSEDED, st.PROCESSED))
         params: list = []
     else:
         if status not in VALID_STATUSES:
@@ -260,10 +258,10 @@ def run_neighbor(conn, rules, dry_run: bool = False, show: int = 0) -> int:
     import csv as _csv
     uncls = conn.execute(
         "SELECT doc_hash, dir_path, file_name, category FROM source_documents "
-        "WHERE status='classified' AND topic=? ORDER BY dir_path", (config.UNCLASSIFIED,)).fetchall()
+        f"WHERE status='{st.CLASSIFIED}' AND topic=? ORDER BY dir_path", (config.UNCLASSIFIED,)).fetchall()
     refs = conn.execute(
         "SELECT file_name, topic, sub_topic, category FROM source_documents "
-        "WHERE status='classified' AND topic NOT IN (?, '')",
+        f"WHERE status='{st.CLASSIFIED}' AND topic NOT IN (?, '')",
         (config.UNCLASSIFIED,)).fetchall()
     ref_by_cat: dict[str, list] = {}
     for r in refs:
@@ -370,10 +368,10 @@ def run_neighbor_vec(conn, dry_run: bool = False, show: int = 0) -> int:
 
     uncls = conn.execute(
         "SELECT doc_hash, dir_path, file_name, category FROM source_documents "
-        "WHERE status='classified' AND topic=? ORDER BY dir_path", (config.UNCLASSIFIED,)).fetchall()
+        f"WHERE status='{st.CLASSIFIED}' AND topic=? ORDER BY dir_path", (config.UNCLASSIFIED,)).fetchall()
     refs = conn.execute(
         "SELECT doc_hash, file_name, topic, sub_topic, category FROM source_documents "
-        "WHERE status='classified' AND topic NOT IN (?, '', '综合')",
+        f"WHERE status='{st.CLASSIFIED}' AND topic NOT IN (?, '', '综合')",
         (config.UNCLASSIFIED,)).fetchall()
     ref_by_cat: dict[str, list] = {}
     for r in refs:
@@ -450,7 +448,7 @@ def run_neighbor_vec(conn, dry_run: bool = False, show: int = 0) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="按规则给源文档打分类")
     ap.add_argument("--db", default=str(config.DB_PATH))
-    ap.add_argument("--status", default="pending_classify", help="要处理的状态，默认 pending_classify")
+    ap.add_argument("--status", default=st.PENDING, help="要处理的状态，默认 pending_classify")
     ap.add_argument("--redo", action="store_true", help="连已分类的也重判（改规则后用）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--dry-run", action="store_true", help="不写库")
@@ -490,7 +488,7 @@ def main(argv=None) -> int:
     for r in rows:
         rel = f"{r['dir_path']}/{r['file_name']}" if r["dir_path"] else r["file_name"]
         res = rules.classify(rel)
-        status = "rejected" if res["category"] == "非内容" else "classified"
+        new_status = st.REJECTED if res["category"] == "非内容" else st.CLASSIFIED
         changes.append((r["doc_hash"], rel, res))
         if not args.dry_run:
             parent = r["dir_path"].rsplit("/", 1)[-1] if r["dir_path"] else "<顶层直属>"
@@ -500,7 +498,7 @@ def main(argv=None) -> int:
                 "WHERE doc_hash=?",
                 (res["category"], res["topic"], res["sub_topic"], res["topic_source"],
                  res["collection"], res["source_trust"], parent,
-                 datetime.now().strftime(NOW_FMT), status, r["doc_hash"]),
+                 datetime.now().strftime(NOW_FMT), new_status, r["doc_hash"]),
             )
     if not args.dry_run:
         conn.commit()

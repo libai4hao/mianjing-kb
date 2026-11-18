@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO))
 
 import doc_convert as dc  # noqa: E402
 import reconvert as rc    # noqa: E402
-from kb import db, hashing  # noqa: E402
+from kb import db, events, hashing  # noqa: E402
 
 
 def _docx(path: Path, text: str = "ok") -> Path:
@@ -153,6 +153,10 @@ def test_converted_result_marks_superseded_with_hash_and_preserves_note(tmp_path
     assert row["status"] == "superseded"
     assert row["note"].startswith("converted_to:02-JVM/foo.docx#")
     assert "needs_convert" in row["note"]        # 原有 note 保留
+    # T12：事件与 note 双写，读方不用再解析子串
+    assert events.has(conn, row["doc_hash"], events.KIND_CONVERTED_TO)
+    ev = events.rows(conn, row["doc_hash"], events.KIND_CONVERTED_TO)[0]["payload"]
+    assert ev["name"] == "foo.docx" and ev["dir"] == "02-JVM" and ev["hash"]
     conn.close()
 
 

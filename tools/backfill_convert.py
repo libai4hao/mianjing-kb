@@ -34,7 +34,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
-from kb import config  # noqa: E402
+from kb import config, status  # noqa: E402
 
 BUILD = Path(config.BUILD_DIR)
 LEDGER = Path(config.DB_PATH)
@@ -92,7 +92,7 @@ def build_plan() -> list[dict]:
     led.row_factory = sqlite3.Row
     rows = led.execute(
         "SELECT doc_hash, file_name, ext, category, topic, src_path "
-        "FROM source_documents WHERE status='classified'").fetchall()
+        f"FROM source_documents WHERE status='{status.CLASSIFIED}'").fetchall()
     led.close()
 
     plan, skip = [], []

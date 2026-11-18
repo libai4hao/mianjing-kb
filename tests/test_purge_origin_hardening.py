@@ -19,7 +19,7 @@ sys.path.insert(0, str(REPO / "tools"))
 sys.path.insert(0, str(REPO))
 
 import purge_origin as po           # noqa: E402
-from kb import config, db, hashing  # noqa: E402
+from kb import config, db, events, hashing  # noqa: E402
 
 
 @pytest.fixture()
@@ -138,6 +138,22 @@ def test_superseded_without_converted_to_is_blocked(env, capsys):
     assert "superseded" in capsys.readouterr().out
 
     assert _run(env, p.parent, "--apply", "--yes", "--allow-superseded-no-replacement") == 0
+    assert not p.exists()
+
+
+def test_superseded_with_event_converted_to_is_allowed(env):
+    """T12：note 里没有 converted_to 子串，但事件表记了接替件 → purge 必须放行。
+
+    旧实现只认 note 子串，事件化之后如果读方不同步，就会把合法转换件永久拒绝。
+    """
+    p = _victim(env)
+    _add(env, p, status="superseded", note="no successor recorded", src=_keep(env))
+    conn = db.connect(env["db"], create=False)
+    events.append(conn, hashing.sha256_file(p)[:16], events.KIND_CONVERTED_TO,
+                  {"dir": "11-面经与真题", "name": "keep.pdf", "hash": "0" * 16})
+    conn.commit()
+    conn.close()
+    assert _run(env, p.parent, "--apply", "--yes") == 0
     assert not p.exists()
 
 

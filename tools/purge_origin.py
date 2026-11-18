@@ -6,7 +6,8 @@
 
 判据（缺一不删）：
   ① 该文件完整 sha256 在 `source_documents` 里有记录（日志写完整 64 位）
-  ② 记录状态是**已入库**（`classified`；`superseded` 还要求 note 里有 `converted_to:`，
+  ② 记录状态是**已入库**（`classified`；`superseded` 还要求有接替件——优先读
+     `document_events` 的 converted_to 事件，老库退回 note 里的 `converted_to:`，
      否则默认拒绝，需显式 `--allow-superseded-no-replacement`）
   ③ 记录自己在磁盘上的那份（`src_path`）**真实存在**、落在语料根内、
      不是待删文件自身（`samefile`）、非 0 字节、且**完整 sha256 与待删文件相等**
@@ -34,9 +35,16 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kb import config, db, hashing  # noqa: E402
+from kb import config, db, events, hashing, status  # noqa: E402
 
-OK_STATUS = ("classified", "superseded")
+OK_STATUS = status.PURGE_OK
+
+
+def _has_replacement(conn, doc_hash: str, note: str | None) -> bool:
+    """是否有"接替件"：事件表优先（T12），老库没跑迁移时退回 note 子串。"""
+    if events.has(conn, doc_hash, events.KIND_CONVERTED_TO):
+        return True
+    return any(k == events.KIND_CONVERTED_TO for k, _ in events.parse_note(note))
 
 
 def _resolved(p: Path) -> Path:
@@ -129,7 +137,7 @@ def main(argv=None) -> int:
     ap.add_argument("--max-delete", type=int, default=0,
                     help="计划删除数超过 N 件时拒绝 --apply（0 = 不设上限）")
     ap.add_argument("--allow-superseded-no-replacement", action="store_true",
-                    help="放行 note 里没有 converted_to: 的 superseded 记录（默认拒绝）")
+                    help="放行没有接替件的 superseded 记录（事件表与 note 都查不到 converted_to）")
     ap.add_argument("--no-rehash", action="store_true",
                     help="删除前不重算原文 sha256（快一倍，但会把'扫描后内容被换掉'的窗口留开）")
     ap.add_argument("--no-backup", action="store_true",
@@ -201,8 +209,8 @@ def main(argv=None) -> int:
             if not ok_rows:
                 kept.append((str(p), "只有隔离副本:" + "/".join(sorted({r["status"] for r in rows}))))
                 continue
-            bad_repl = [r for r in ok_rows if r["status"] == "superseded"
-                        and "converted_to:" not in (r["note"] or "")]
+            bad_repl = [r for r in ok_rows if r["status"] == status.SUPERSEDED
+                        and not _has_replacement(conn, r["doc_hash"], r["note"])]
             if bad_repl and not args.allow_superseded_no_replacement:
                 no_repl += 1
                 kept.append((str(p), "superseded 无接替件（需 --allow-superseded-no-replacement）"))

@@ -34,7 +34,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from kb import config, db  # noqa: E402
+from kb import config, db, wlock  # noqa: E402
 from kb.vocab import OTHER_TOPIC, topic_vocab  # noqa: E402
 from llm_client import ConfigError, chat, chat_json, redact, resolve_config  # noqa: E402
 
@@ -719,9 +719,16 @@ def main(argv=None) -> int:
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if not out["unknown"] else 1
         if args.merge:
-            # merge 会写 questions/label_facts，属于不可重建的事实源 → 先热备份
-            db.backup_db(args.db)
-            out = merge(conn, drop_orphans=args.drop_orphans)
+            # merge 会写 questions/label_facts，属于不可重建的事实源 → 先热备份；
+            # 并与 intake / doc_convert / review_cli 串行（T15 跨进程写锁）
+            try:
+                with wlock.write_lock("kb", tool="batch_label",
+                                      build_dir=Path(args.db).parent):
+                    db.backup_db(args.db)
+                    out = merge(conn, drop_orphans=args.drop_orphans)
+            except wlock.LockHeld as ex:
+                print(json.dumps({"ok": False, "err": str(ex)}, ensure_ascii=False, indent=1))
+                return 2
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if out["ok"] else 1
         out = run_batch(cfg, conn, limit=args.limit, budget=args.budget, dry_run=args.dry_run)

@@ -25,6 +25,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
 from kb import config, db  # noqa: E402
+from kb import status as st  # noqa: E402  （decide() 的参数名就是 status，用别名避免遮蔽）
 
 BUILD = Path(config.BUILD_DIR)   # P1-3 修复（2026-11-17 审核）：路径统一走 config，KB_* 环境变量可覆盖
 OCR_TEXT = BUILD / "ocr_text"
@@ -41,9 +42,9 @@ def dir_of(rel_posix: str) -> str:
 
 
 def decide(row: dict, status: str | None, note: str, has_ocr: bool) -> str:
-    if status == "superseded":
+    if status == st.SUPERSEDED:
         return "superseded"
-    if status == "rejected":
+    if status == st.REJECTED:
         return "skip"
     if has_ocr:
         return "ocr_done"
@@ -74,7 +75,7 @@ def main(argv=None) -> int:
         cands = conn.execute(
             "SELECT status, note, doc_hash, dir_path FROM source_documents WHERE file_name=?",
             (name,)).fetchall()
-        pri = {"superseded": 1, "classified": 2, "rejected": 3}
+        pri = {st.SUPERSEDED: 1, st.CLASSIFIED: 2, st.REJECTED: 3}
         row = None
         for c in sorted(cands, key=lambda c: (c["dir_path"] != dir_path, pri.get(c["status"], 9))):
             row = c
