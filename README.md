@@ -113,6 +113,11 @@ doc_hash, file_name, parent_dir, dir_path, ext, size_bytes, category, topic, col
 
 ## 实测基线（2026-11-17 本机 i5-13400F / 31.9 GB）
 
+> **历史快照**：下表是 2026-11-17 入库阶段的口径（登记 1,501 行、397 个 md、OCR v1.4.1）。
+> 经过后续补录与两轮原子切换，当前生产为 **32,087 题 / 1,434 doc_contents / 18,642 向量**
+> （topic 空串归零、G1-G7 全绿；详见 `docs/17-项目审核与修复报告-2026-11-17.md`）。
+> 门禁终态以 `python tools/verify_ledger.py --docs` 输出为准，勿把下表当成现状。
+
 | 项 | 结果 |
 |---|---|
 | 语料登记 | **1,501 行 = 1,347 可入库 + 37 隔离区（99 区剩 37 件待人工）+ 20 非内容 + 97 superseded（`.doc` 已转 docx）**，全量重扫 4.6 s |

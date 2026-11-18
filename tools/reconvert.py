@@ -23,7 +23,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
-sys.path.insert(0, str(Path(r"<CORPUS_ROOT>\21-面经数据库\tools")))
+# 审核修复（2026-11-18）：原 insert(0) 会把语料侧 tools 顶到最前，遮蔽本仓库同名模块
+# （同进程后续 from build_db import build 会解析到语料侧旧模块）；改为 append 放到末尾。
+sys.path.append(str(Path(r"<CORPUS_ROOT>\21-面经数据库\tools")))
 
 import convert_one  # noqa: E402  存量转换器（pdf_to_md / docx_to_md / safe_name / cjk_ratio）
 from kb import config, db  # noqa: E402

@@ -174,17 +174,24 @@ def render_pages(pdf_path: Path, pages: list[int], out_dir: Path, dpi: int = con
 
 
 def parse_range(text: str, total: int) -> list[int]:
-    """'1-3,7' → [1,2,3,7]"""
+    """'1-3,7' → [1,2,3,7]。非法段（含负数/空段/非数字）跳过而非抛异常
+    （2026-11-18 审核修复：原 `chunk.split('-',1)` 会把 '-1' 拆成空串致 ValueError）。"""
     out = []
     for chunk in text.split(","):
         chunk = chunk.strip()
         if not chunk:
             continue
-        if "-" in chunk:
-            a, b = chunk.split("-", 1)
-            out.extend(range(int(a), int(b) + 1))
+        if "-" in chunk[1:]:                      # 首字符的 '-' 是负号，不作为范围分隔
+            a_s, b_s = chunk.split("-", 1)
+            try:
+                out.extend(range(int(a_s), int(b_s) + 1))
+            except ValueError:                    # 段内含非数字 → 跳过该段
+                continue
         else:
-            out.append(int(chunk))
+            try:
+                out.append(int(chunk))
+            except ValueError:
+                continue
     return [p for p in out if 1 <= p <= total]
 
 

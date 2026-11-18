@@ -35,6 +35,34 @@ except ImportError:      # pragma: no cover
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
+# schema CHECK 的 12 个状态（meta/schema/001_init.sql）——--status 白名单（P1 注入面修复）
+VALID_STATUSES = frozenset({
+    "pending_classify", "classified", "processing", "processed",
+    "rejected", "failed", "duplicate", "moved", "renamed",
+    "absent", "superseded", "quarantined",
+})
+
+
+def build_select_sql(status: str, redo: bool, limit: int) -> tuple[str, list]:
+    """构造待分类记录的 SELECT（P1 修复：状态参数化 + 白名单，杜绝命令行注入）。
+
+    返回 (sql, params)。--redo 走固定 NOT IN 子句、忽略 status；limit 强转非负整数。
+    """
+    if redo:
+        where = "status NOT IN ('quarantined','absent','superseded')"
+        params: list = []
+    else:
+        if status not in VALID_STATUSES:
+            raise ValueError(f"非法状态 {status!r}，允许: {sorted(VALID_STATUSES)}")
+        where = "status=?"
+        params = [status]
+    sql = f"SELECT doc_hash, dir_path, file_name FROM source_documents WHERE {where} ORDER BY dir_path"
+    if limit:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError(f"非法 limit {limit!r}，须为非负整数")
+        sql += f" LIMIT {limit}"
+    return sql, params
+
 
 def glob_to_re(pat: str) -> re.Pattern:
     """'*' 只匹配单段，'**' 匹配多段。"""
@@ -449,11 +477,8 @@ def main(argv=None) -> int:
         conn.close()
         return 0
 
-    where = "status NOT IN ('quarantined','absent','superseded')" if args.redo else f"status='{args.status}'"
-    sql = f"SELECT doc_hash, dir_path, file_name FROM source_documents WHERE {where} ORDER BY dir_path"
-    if args.limit:
-        sql += f" LIMIT {args.limit}"
-    rows = conn.execute(sql).fetchall()
+    sql, params = build_select_sql(args.status, args.redo, args.limit)
+    rows = conn.execute(sql, params).fetchall()
     if not rows:
         print("[info] 没有待分类记录")
         conn.close()
