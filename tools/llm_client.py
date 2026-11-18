@@ -7,7 +7,8 @@
     LLM_KEY          online 必填（用户级环境变量，绝不进 git；local 留空）
     LLM_MODEL        local: qwen3:4b | online: deepseek-flash
     LLM_CONCURRENCY  local: 1 | online: 8
-    LLM_PRICE_IN/OUT 每百万 token 单价（预算核算；deepseek-flash 闲时 1/4）
+    LLM_PRICE        输入价,输出价（¥/百万 token；如 "1,4"）
+    LLM_JSON_MODE    覆盖 provider 默认的 json_object 支持开关（1/0 true/false yes/no on/off）
 
 降级策略（docs/15 §3.4）：429/5xx/超时 → 指数退避重试 3 次；单题 3 次失败由
 batch_label 落 failed.jsonl 不阻塞整批。JSON 解析失败 → 重试时强化"只输出 JSON"。
@@ -56,6 +57,30 @@ DEFAULTS = {
 }
 
 
+def _parse_bool(name: str, raw: str) -> bool:
+    """配置布尔解析（1/0 true/false yes/no on/off，大小写不敏感）；非法抛 ConfigError。"""
+    v = raw.strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(f"{name} 只接受 1/0 true/false yes/no on/off，当前: {raw!r}")
+
+
+def _parse_price(raw: str) -> tuple[float, float]:
+    """配置价格解析：必须恰好"输入价,输出价"两个非负浮点数；非法抛 ConfigError。"""
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != 2:
+        raise ConfigError(f'LLM_PRICE 格式须为 "输入价,输出价"（如 "1,4"），当前: {raw!r}')
+    try:
+        pin, pout = float(parts[0]), float(parts[1])
+    except ValueError:
+        raise ConfigError(f'LLM_PRICE 须为数字对（如 "1,4"），当前: {raw!r}') from None
+    if pin < 0 or pout < 0:
+        raise ConfigError(f"LLM_PRICE 不可为负数，当前: {raw!r}")
+    return pin, pout
+
+
 def resolve_config(env: dict | None = None) -> dict:
     """环境变量 → 完整配置。online 缺 key 抛 ConfigError（带指引，不静默降级烧本地 GPU）。"""
     e = env if env is not None else os.environ
@@ -63,6 +88,10 @@ def resolve_config(env: dict | None = None) -> dict:
     if provider not in DEFAULTS:
         raise ConfigError(f"LLM_PROVIDER 只允许 local|online，当前: {provider!r}")
     d = DEFAULTS[provider]
+    # P2 修复：json_mode 可由环境变量覆盖——换不支持 response_format 的兼容端点时可关；
+    # 本地端点（如 llama.cpp server）支持时也可开。默认仍由 provider 类型决定。
+    json_mode = _parse_bool("LLM_JSON_MODE", e["LLM_JSON_MODE"]) \
+        if e.get("LLM_JSON_MODE") else bool(d["json_mode"])
     cfg = {
         "provider": provider,
         "base": (e.get("LLM_BASE") or d["base"]).rstrip("/"),
@@ -70,9 +99,8 @@ def resolve_config(env: dict | None = None) -> dict:
         "key": e.get("LLM_KEY") or "",
         "concurrency": int(e.get("LLM_CONCURRENCY") or d["concurrency"]),
         "timeout": float(e.get("LLM_TIMEOUT") or d["timeout"]),
-        "json_mode": bool(d["json_mode"]),
-        "price": tuple(float(x) for x in e.get("LLM_PRICE", "").split(",")) if e.get("LLM_PRICE")
-                 else d.get("price", (0.0, 0.0)),
+        "json_mode": json_mode,
+        "price": _parse_price(e["LLM_PRICE"]) if e.get("LLM_PRICE") else d.get("price", (0.0, 0.0)),
     }
     if provider == "online" and not cfg["key"]:
         raise ConfigError(

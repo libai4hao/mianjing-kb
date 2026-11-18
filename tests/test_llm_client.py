@@ -37,6 +37,63 @@ def test_config_bad_provider():
         resolve_config(env={"LLM_PROVIDER": "midway"})
 
 
+# ---------------- P2：LLM_JSON_MODE 覆盖 ----------------
+def test_json_mode_override_off_for_compatible_endpoint():
+    """换用不支持 response_format 的在线端点（vLLM/部分通义）→ 手动关掉 json_mode。"""
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k", "LLM_JSON_MODE": "0"})
+    assert cfg["json_mode"] is False
+
+
+def test_json_mode_override_on_for_local():
+    """本地端点若支持 json_object（如 llama.cpp server）→ 手动打开。"""
+    cfg = resolve_config(env={"LLM_JSON_MODE": "true"})
+    assert cfg["json_mode"] is True
+
+
+@pytest.mark.parametrize("val", ["1", "yes", "ON", "false", "no", "Off"])
+def test_json_mode_accepts_common_boolean_spellings(val):
+    cfg = resolve_config(env={"LLM_JSON_MODE": val})
+    assert isinstance(cfg["json_mode"], bool)
+
+
+def test_json_mode_invalid_raises_config_error():
+    with pytest.raises(ConfigError, match="LLM_JSON_MODE"):
+        resolve_config(env={"LLM_JSON_MODE": "maybe"})
+
+
+# ---------------- P2：LLM_PRICE 校验 ----------------
+def test_price_valid_pair():
+    cfg = resolve_config(env={"LLM_PRICE": "1,4"})
+    assert cfg["price"] == (1.0, 4.0)
+
+
+def test_price_bad_value_raises_config_error_not_value_error():
+    with pytest.raises(ConfigError, match="LLM_PRICE") as ei:
+        resolve_config(env={"LLM_PRICE": "bad"})
+    assert "输入价,输出价" in str(ei.value)
+
+
+def test_price_single_value_rejected():
+    """单值会让预算只算输入价、低估成本——明确拒绝而非静默补齐。"""
+    with pytest.raises(ConfigError, match="LLM_PRICE"):
+        resolve_config(env={"LLM_PRICE": "1"})
+
+
+def test_price_three_values_rejected():
+    with pytest.raises(ConfigError, match="LLM_PRICE"):
+        resolve_config(env={"LLM_PRICE": "1,4,9"})
+
+
+def test_price_negative_rejected():
+    with pytest.raises(ConfigError, match="LLM_PRICE"):
+        resolve_config(env={"LLM_PRICE": "-1,4"})
+
+
+def test_price_empty_uses_provider_default():
+    assert resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})["price"] == (1.0, 4.0)
+    assert resolve_config(env={})["price"] == (0.0, 0.0)
+
+
 # ---------------- 脱敏 ----------------
 def test_redact_all_kinds():
     t, hit = redact("联系 13812345678 或 me@qq.com，微信 wx_abc123，"

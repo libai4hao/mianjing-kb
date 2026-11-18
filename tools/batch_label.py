@@ -9,7 +9,8 @@
   --sample N         从 staging 随机抽 N 条打印（人工抽查，docs/15 G6 的 ≥0.8 准确率环节）
   --merge            G6 门禁复核 → PASS 才单事务 merge 进 questions（失败可整批回滚）
 
-环境变量见 llm_client（LLM_PROVIDER/LLM_BASE/LLM_KEY/LLM_MODEL/LLM_CONCURRENCY）。
+环境变量见 llm_client（LLM_PROVIDER/LLM_BASE/LLM_KEY/LLM_MODEL/LLM_CONCURRENCY/
+LLM_PRICE/LLM_JSON_MODE——后两者可覆盖 provider 默认的价格与 json_object 支持开关）。
 
 用法：
     python tools/batch_label.py --check
