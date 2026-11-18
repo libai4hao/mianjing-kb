@@ -89,6 +89,15 @@ OCR 不是 pip 包：走外置引擎 PaddleOCR-json v1.4.1（`KB_OCR_ENGINE_EXE`
 
 其余可覆盖的变量：`KB_BUILD_DIR`（台账/库目录）、`KB_DB`（库文件）、`KB_META_DIR`（规则目录）。
 
+首次使用先把语料根落到用户级环境变量（写一次，之后不用再设）：
+
+```powershell
+[Environment]::SetEnvironmentVariable('KB_CORPUS_ROOT','<CORPUS_ROOT>','User')
+[Environment]::SetEnvironmentVariable('KB_OCR_ENGINE_DIR','<OCR_ENGINE_DIR>','User')   # 只跑 OCR 才需要
+```
+
+未设时工具不会乱读别的目录，而是直接报 `<CORPUS_ROOT>` 路径不存在——这是有意为之的快速失败。
+
 ## 快速开始
 
 ```powershell
