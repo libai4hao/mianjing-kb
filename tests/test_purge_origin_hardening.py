@@ -67,6 +67,12 @@ def _run(env, root: Path, *extra: str) -> int:
                     "--log", str(env["build"] / "del.csv"), *extra])
 
 
+def _reasons(out: str) -> dict:
+    """从预览 JSON 里取 kept_reasons（dry-run 一律 rc 0，必须看原因才算真断言）。"""
+    import json
+    return json.loads(out[out.index("{"):])["kept_reasons"]
+
+
 # ---------------- Issue 1：根目录与语料根重叠 ----------------
 @pytest.mark.parametrize("which", ["same", "inside", "parent"])
 def test_refuses_root_overlapping_corpus(env, which):
@@ -88,42 +94,40 @@ def test_refuses_root_overlapping_corpus(env, which):
     assert p.exists()
 
 
-def test_self_as_keep_copy_is_not_deletable(env):
+def test_self_as_keep_copy_is_not_deletable(env, capsys):
     p = _victim(env, name="hardlink.pdf")
     cand = env["corpus"] / "11-面经与真题" / "hardlink.pdf"
-    hardlink_ok = True
     try:
         cand.hardlink_to(p)             # 同一文件两个路径（NTFS 支持硬链接）
     except (OSError, NotImplementedError):
-        hardlink_ok = False
-        cand.write_bytes(p.read_bytes())
-    if hardlink_ok:
-        _add(env, p, src=cand)
-        assert _run(env, p.parent) == 0
-        assert p.exists()               # 唯一副本不许被"自己"顶掉
+        pytest.skip("当前文件系统不支持硬链接，无法构造 samefile 场景")
+    _add(env, p, src=cand)
+    assert _run(env, p.parent) == 0
+    assert p.exists()                   # 唯一副本不许被"自己"顶掉
+    assert _reasons(capsys.readouterr().out).get("keep copy is self") == 1
 
 
 # ---------------- Issue 2：保留副本内容校验 ----------------
-def test_keep_copy_missing_or_empty_or_mismatched(env):
+def test_keep_copy_missing_or_empty_or_mismatched(env, capsys):
     p = _victim(env)
     missing = env["corpus"] / "11-面经与真题" / "gone.pdf"
     _add(env, p, src=missing)
-    env["corpus"].joinpath("11-面经与真题", "gone.pdf").write_bytes(p.read_bytes())
-    assert _run(env, p.parent) == 0         # 存在且内容一致 → 计划删除
-    missing.unlink()
+    assert _run(env, p.parent) == 0
+    assert _reasons(capsys.readouterr().out).get("保留副本不存在") == 1
 
     empty = env["corpus"] / "11-面经与真题" / "empty.pdf"
     empty.write_bytes(b"")
-    _add(env, p, src=empty)                 # 0 字节保留副本
+    _add(env, p, src=empty)
     assert _run(env, p.parent) == 0
+    assert _reasons(capsys.readouterr().out).get("保留副本为空") == 1
     assert p.exists()
 
-    diff = _keep(env, data=b"another-content")
-    _add(env, p, src=diff)                  # 同尺寸不同内容？ -> 用同长度不同字节
-    diff.write_bytes(b"victim-bytez")
+    diff = env["corpus"] / "11-面经与真题" / "keep.pdf"
+    diff.write_bytes(b"victim-bytez")    # 同尺寸、不同字节
+    _add(env, p, src=diff)
     assert _run(env, p.parent) == 0
+    assert _reasons(capsys.readouterr().out).get("keep copy content mismatch") == 1
     assert p.exists()
-    assert diff.stat().st_size == p.stat().st_size
 
 
 def test_superseded_without_converted_to_is_blocked(env, capsys):
