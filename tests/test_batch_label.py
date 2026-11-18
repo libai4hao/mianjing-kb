@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """batch_label 离线测试：目标筛选 / 打标落 staging / 断点续跑 / 预算停 / 抽查 / G6 merge。"""
 import json
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -10,7 +9,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import batch_label as bl  # noqa: E402
-import llm_client as lc  # noqa: E402
 from tools.kb import config  # noqa: E402
 
 REAL_META = config.META_DIR
@@ -277,9 +275,10 @@ def test_redact_integration_in_label_one(monkeypatch):
                 "latency_ms": 5, "tokens": 10, "prompt_tokens": 7, "completion_tokens": 3}
 
     monkeypatch.setattr(bl, "chat_json", fake_chat_json)
-    row = bl.label_one(CFG, {"qid": 9, "q_text": "自我介绍？电话 13812345678", "a_text": "答"})
+    row = bl.label_one(CFG, {"qid": 9, "q_text": "自我介绍？电话 13812345678",  # privacy-scan: allow 合成号码
+                             "a_text": "答"})
     assert row["redacted"] == 1
-    assert "13812345678" not in sent["user"]
+    assert "13812345678" not in sent["user"]                       # privacy-scan: allow
     assert "[联系方式]" in sent["user"]
     assert row["prompt_tokens"] == 7 and row["completion_tokens"] == 3   # F5 透传拆分计数
 

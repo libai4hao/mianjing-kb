@@ -30,6 +30,32 @@ def test_migration_idempotent(tmp_path):
     conn2.close()
 
 
+def test_schema_version_records_all_migrations(tmp_path):
+    """统一迁移口径：每次落地的版本都进 schema_version，006 也在册（不再"找不到迁移文件"）。"""
+    conn = db.connect(tmp_path / "kb.sqlite")
+    versions = db.applied_versions(conn)
+    assert versions == [v for v, _fn in db.MIGRATIONS]
+    assert "006_questions_topic" in versions
+    # 重复跑不重复记账
+    db.migrate(conn)
+    assert db.applied_versions(conn) == versions
+    conn.close()
+
+
+def test_legacy_db_without_schema_version_is_backfilled(tmp_path):
+    """老库（有表但没有 schema_version）首次连接后应补齐版本记录，且不报错。"""
+    import sqlite3
+    p = tmp_path / "legacy.sqlite"
+    raw = sqlite3.connect(str(p))
+    raw.executescript(db.SCHEMA_FILE.read_text(encoding="utf-8"))
+    raw.execute("DROP TABLE IF EXISTS schema_version")      # 模拟改造前的老库
+    raw.commit()
+    raw.close()
+    conn = db.connect(p)
+    assert db.applied_versions(conn) == [v for v, _fn in db.MIGRATIONS]
+    conn.close()
+
+
 def test_008_golden_labels_migration(tmp_path):
     """008：golden_labels 金标表（批次二 G1，键=q_norm_hash 跨重切存活）。"""
     conn = db.connect(tmp_path / "kb.sqlite")

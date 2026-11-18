@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """llm_client 离线测试：配置路由 / 缺 key 指引 / 重试退避 / JSON 宽松解析 / 脱敏。"""
-import json
 import sys
 from pathlib import Path
 
@@ -127,10 +126,10 @@ def test_numeric_config_rejects_nonpositive(key, val):
 
 # ---------------- 脱敏 ----------------
 def test_redact_all_kinds():
-    t, hit = redact("联系 13812345678 或 me@qq.com，微信 wx_abc123，"
+    t, hit = redact("联系 13812345678 或 me@qq.com，微信 wx_abc123，"       # privacy-scan: allow 合成样例
                     "身份证 11010119900307867X，见 https://blog.example.com/post")
     assert hit
-    assert "13812345678" not in t and "me@qq.com" not in t
+    assert "13812345678" not in t and "me@qq.com" not in t                 # privacy-scan: allow
     assert "wx_abc123" not in t and "11010119900307867X" not in t
     assert "https://" not in t
     assert t.count("[联系方式]") == 5

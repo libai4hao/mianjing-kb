@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mianjing-kb"
+version = "0.1.0"
+description = "面经/题库知识库管线：接入 → 分类 → 切题 → 检索（Windows 优先，核心链路跨平台）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "PyYAML>=6.0",
+    "pymupdf>=1.24",
+    "fastembed>=0.4",
+    "sqlite-vec>=0.1.6",
+    "pywin32>=306; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyflakes>=3", "ruff>=0.6"]
+
+[project.scripts]
+kb = "tools.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tools*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = ["build", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+# 历史代码风格遗留：单行多条语句（E702）、lambda 赋值（E731）、单字母变量 l（E741）
+ignore = ["E501", "E402", "E741", "E702", "E731"]

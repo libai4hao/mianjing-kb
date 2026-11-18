@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """refresh 测试：全链路 PASS→原子切换 / 门禁 FAIL→影子删除线上不动 / 向量回填失败→中止。"""
 import hashlib
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -78,6 +79,29 @@ def test_full_path_swap(mini_env):
     con.close()
     # 旧库侧车已清（fixture 里 online 从未带侧车，切换后也不应出现）
     assert not Path(str(mini_env["online"]) + "-wal").exists()
+
+
+def test_swap_keeps_rollback_snapshot(mini_env):
+    """切换前必须留旧库快照，回滚窗口不能靠"再跑一次 refresh"。"""
+    assert rf.main([]) == 0
+    snaps = list((mini_env["build"] / rf.ROLLBACK_DIR).glob("面经库-*.db"))
+    assert len(snaps) == 1
+    con = sqlite3.connect(str(snaps[0]))          # 快照本身是可打开的有效库
+    assert con.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 1
+    con.close()
+
+
+def test_snapshot_keeps_only_last_n(tmp_path):
+    d = tmp_path
+    online = d / "面经库.db"
+    online.write_bytes(b"db")
+    for i in range(5):
+        p = d / rf.ROLLBACK_DIR / f"面经库-2026010{i}-000000.db"
+        p.parent.mkdir(exist_ok=True)
+        p.write_bytes(b"old")
+        os.utime(p, (1000 + i, 1000 + i))       # 让 mtime 有序，稳定断言"只留 3 份"
+    rf._snapshot(online, keep=3)
+    assert len(list((d / rf.ROLLBACK_DIR).glob("面经库-*.db"))) == 3
 
 
 def test_gate_fail_keeps_online(mini_env, monkeypatch, capsys):

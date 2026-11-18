@@ -22,7 +22,7 @@ def _items(*qs):
 
 def test_build_clusters_exact_and_strong():
     items = _items(Q_A, Q_A2, Q_C)
-    dsu, pending, strong = cl.build_clusters(items, 0.92, 0.85)
+    dsu, pending, strong, _conf = cl.build_clusters(items, 0.92, 0.85)
     # Q_A / Q_A2 归一化同文 → 强并
     assert dsu.find(0) == dsu.find(1)
     assert dsu.find(0) != dsu.find(2)
@@ -33,7 +33,7 @@ def test_build_clusters_exact_and_strong():
 def test_build_clusters_pending_not_merged():
     # Q_B 与 Q_A 相近但加了尾巴：Jaccard 介于 0.85~0.92 → 只记 pending 不并
     items = _items(Q_A, Q_B, Q_C)
-    dsu, pending, strong = cl.build_clusters(items, 0.92, 0.05)
+    dsu, pending, strong, _conf = cl.build_clusters(items, 0.92, 0.05)
     assert dsu.find(0) != dsu.find(1)
     assert pending and all(0.05 <= p[2] < 0.92 for p in pending)
     assert dsu.find(0) != dsu.find(2)
@@ -41,7 +41,7 @@ def test_build_clusters_pending_not_merged():
 
 def test_build_clusters_unrelated():
     items = _items(Q_A, Q_C)
-    dsu, pending, strong = cl.build_clusters(items, 0.92, 0.85)
+    dsu, pending, strong, _conf = cl.build_clusters(items, 0.92, 0.85)
     assert dsu.find(0) != dsu.find(1)
     assert pending == []
 
@@ -91,3 +91,4 @@ def test_end_to_end_verdict(tiny_corpus, tmp_path, monkeypatch):
     # 且必须落在临时 build 里——写进生产 build 即回归）
     assert (build / "cluster_pending.csv").exists()
     assert (build / "cluster_sample50.md").exists()
+

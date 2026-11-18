@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -35,6 +36,22 @@ from kb import config  # noqa: E402
 
 SHADOW_NAME = "面经库_shadow.db"
 ONLINE_NAME = "面经库.db"
+ROLLBACK_DIR = "rollback"      # 切换前把线上库留一份，给回滚窗口
+ROLLBACK_KEEP = 3              # 只留最近 3 份，避免把盘塞满
+
+
+def _snapshot(online: Path, keep: int = ROLLBACK_KEEP) -> Path | None:
+    """切换前快照线上库 → build/rollback/面经库-YYYYmmdd-HHMMSS.db（只留最近 keep 份）。"""
+    if not online.exists():
+        return None
+    d = online.parent / ROLLBACK_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    dst = d / f"{online.stem}-{time.strftime('%Y%m%d-%H%M%S')}.db"
+    shutil.copy2(online, dst)
+    olds = sorted(d.glob(f"{online.stem}-*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in olds[keep:]:
+        p.unlink(missing_ok=True)
+    return dst
 
 
 def _sidecars(p: Path) -> tuple[Path, Path]:
@@ -180,10 +197,12 @@ def main(argv=None) -> int:
 
         # 原子切换（同卷 os.replace）+ 旧库 WAL 侧车清理：侧车属于被废弃的旧库，
         # 留着会被 sqlite 硬套到新主文件上（Windows 实测坑，见模块 docstring）
+        snapshot = _snapshot(online)
         os.replace(shadow, online)
         for p in _sidecars(online):
             p.unlink(missing_ok=True)
-        summary["note"] = "影子库已原子切换为线上 面经库.db"
+        summary["note"] = ("影子库已原子切换为线上 面经库.db"
+                           + (f"；旧库快照 {snapshot.name}（{ROLLBACK_DIR}/，回滚用）" if snapshot else ""))
         print(json.dumps(summary, ensure_ascii=False, indent=1, default=str))
         return 0
     except Exception as ex:  # noqa: BLE001 —— 刷新失败必须保住线上库

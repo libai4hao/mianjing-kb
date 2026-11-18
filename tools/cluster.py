@@ -41,7 +41,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kb import config  # noqa: E402
 from question_freq import (DSU, close_word, extract, grams, hamming, jaccard,  # noqa: E402
-                           normalize, simhash, split_questions)
+                           normalize, simhash, split_qa)
+
+ANSWER_AGREE = 0.45      # 答案块 Jaccard 低于此值 → 视为"同题不同答"，不许自动删
 
 DOC_EXTS = {".pdf", ".docx", ".doc", ".md", ".txt"}
 
@@ -94,7 +96,11 @@ class TextCache:
 
 
 def collect_questions(paths, cache: TextCache, stats: defaultdict, limit: int = 0):
-    """返回 [(question_norm, question_raw, doc_rel)]；抽取失败/无文本记账不中断。"""
+    """返回 [(question_norm, question_raw, doc_rel, answer_norm)]；抽取失败/无文本记账不中断。
+
+    answer_norm 用于"同题不同答"判定：聚类只看题干时，题干相同但答案不同的两份资料
+    会被判成重复并允许删除，这是最危险的一类误删。
+    """
     out = []
     n = 0
     for p in paths:
@@ -121,25 +127,34 @@ def collect_questions(paths, cache: TextCache, stats: defaultdict, limit: int = 
                 print(f"[warn] 抽取失败 {rel}: {type(ex).__name__}", file=sys.stderr)
                 cache.put(key, [])
                 continue
-            qs = split_questions(text) if text else []
+            qs = [list(x) for x in split_qa(text)] if text else []
             cache.put(key, qs)
         stats["docs"] += 1
         stats["questions"] += len(qs)
-        for q in qs:
+        for item in qs:
+            q, a = (item, "") if isinstance(item, str) else (item[0], item[1] if len(item) > 1 else "")
             nq = normalize(q)
             if len(nq) < 6:
                 stats["too_short"] += 1
                 continue
-            out.append((nq, q, rel))
+            out.append((nq, q, rel, normalize(a) if a else ""))
         n += 1
     return out
 
 
-def build_clusters(items, auto: float, manual: float):
-    """items = [(norm, simhash, rel)] → (dsu, pending_pairs, strong_pairs)。
+def _answer_conflict(ans_a: str, ans_b: str) -> bool:
+    """同题不同答：两边都有实质答案且相似度过低 → 不可自动删。"""
+    if len(ans_a) < 8 or len(ans_b) < 8:
+        return False                      # 一方没答案：无从比较，不按冲突处理（仍由人工抽样兜）
+    return jaccard(grams(ans_a), grams(ans_b)) < ANSWER_AGREE
+
+
+def build_clusters(items, auto: float, manual: float, answers=None):
+    """items = [(norm, simhash, rel)] → (dsu, pending_pairs, strong_pairs, conflicts)。
 
     强并条件：精确同文 或 (LSH 候选 & 汉明<=24 & Jaccard>=auto)。
     0.85<=J<0.92 只记 pending，不 union。
+    conflicts：被强并但**答案不同**的对（不撤销并簇，只在 99 区判定时降级为 manual）。
     """
     hashes = [simhash(t) for t, _, _ in items]
     gsets = [grams(t) for t, _, _ in items]
@@ -148,8 +163,19 @@ def build_clusters(items, auto: float, manual: float):
     for idx, h in enumerate(hashes):
         for band in range(8):                      # 8×8bit 分带：比 4×16 召回高（差 6 位的近重复对也能撞带）
             buckets[(band, (h >> (band * 8)) & 0xFF)].append(idx)
-    pending, strong = [], []
+    pending, strong, conflicts = [], [], []
     seen_pair = set()
+    conflict_seen = set()
+
+    def check_answers(a: int, b: int) -> None:
+        pk = (min(a, b), max(a, b))
+        if pk in conflict_seen:
+            return
+        if answers and _answer_conflict(answers[a], answers[b]):
+            conflict_seen.add(pk)
+            conflicts.append({"pool_idx": pk[0], "q99_idx": pk[1],
+                              "q": items[pk[0]][0][:120]})
+
     for cands in buckets.values():
         if len(cands) < 2:
             continue
@@ -166,6 +192,7 @@ def build_clusters(items, auto: float, manual: float):
                 if jac >= auto:
                     dsu.union(a, b)
                     strong.append((a, b, round(jac, 4)))
+                    check_answers(a, b)
                 elif jac >= manual:
                     pending.append((a, b, round(jac, 4)))
     # 精确同文强并（不同措辞归一后撞车）
@@ -176,7 +203,8 @@ def build_clusters(items, auto: float, manual: float):
         for k in idxs[1:]:
             dsu.union(idxs[0], k)
             strong.append((idxs[0], k, 1.0))
-    return dsu, pending, strong
+            check_answers(idxs[0], k)
+    return dsu, pending, strong, conflicts
 
 
 def main(argv=None) -> int:
@@ -204,12 +232,13 @@ def main(argv=None) -> int:
     close_word()        # 文本抽取阶段结束，Word COM 立即释放（2026-11-19 审核修复）
     cache.save()
 
-    items = [(t, h, rel) for (t, q, rel), h in
-             [((t, q, rel), simhash(t)) for (t, q, rel) in pool_q + q99]]
+    all_q = pool_q + q99
+    items = [(t, simhash(t), rel) for (t, _q, rel, _a) in all_q]
+    answers = [a for (_t, _q, _r, a) in all_q]
     n_pool = len(pool_q)
     print(f"[items] 库内题 {n_pool}，99 区题 {len(q99)}，共 {len(items)}", flush=True)
 
-    dsu, pending, strong = build_clusters(items, args.auto, args.manual)
+    dsu, pending, strong, conflicts = build_clusters(items, args.auto, args.manual, answers)
 
     groups = defaultdict(list)
     for i in range(len(items)):
@@ -244,6 +273,19 @@ def main(argv=None) -> int:
                                              "q99": items[ib][0][:120], "jac": jac})
             pending_pool_roots.add(dsu.find(ia))
 
+    # 同题不同答：被强并但答案不同的题对 → 该 99 件不许自动删，降级 manual
+    answer_conflicts = []
+    conflict_by_99item: dict[str, list] = defaultdict(list)
+    for c in conflicts:
+        a, b = c["pool_idx"], c["q99_idx"]
+        ia, ib = (a, b) if a < n_pool else (b, a)
+        if ia < n_pool and ib >= n_pool:
+            rel99 = items[ib][2]
+            rec = {"pool_rel": items[ia][2], "pool_rel_q": items[ia][0][:120],
+                   "q99": items[ib][0][:120]}
+            conflict_by_99item[rel99].append(rec)
+            answer_conflicts.append({**rec, "pool_q": items[ia][0][:120]})
+
     agg: dict[str, dict] = defaultdict(lambda: {"strong": 0, "manual": 0, "none": 0, "best_size": 0})
     for i in range(n_pool, len(items)):
         rel = items[i][2]
@@ -254,6 +296,8 @@ def main(argv=None) -> int:
             v = "manual"
         else:
             v = "none"
+        if v == "strong" and rel in conflict_by_99item:
+            v = "manual"          # 题干一样但答案不同：退到人工，绝不自动删
         a = agg[rel]
         a[v] += 1
         if v == "strong":
@@ -269,7 +313,8 @@ def main(argv=None) -> int:
             continue
         v = "strong" if a["strong"] else ("manual" if a["manual"] else "none")
         verdicts.append({"rel": rel, "verdict": v, "cluster_size": a["best_size"],
-                         "pending": pending_by_99item.get(rel, [])})
+                         "pending": pending_by_99item.get(rel, []),
+                         "answer_conflicts": conflict_by_99item.get(rel, [])})
     cnt = defaultdict(int)
     for v in verdicts:
         cnt[v["verdict"]] += 1
@@ -283,8 +328,10 @@ def main(argv=None) -> int:
         "thresholds": {"auto": args.auto, "manual": args.manual},
         "stats": {**stats, "pool_questions": n_pool, "q99_questions": len(q99),
                   "clusters_ge2_with_pool": len(clusters_out),
-                  "strong_pairs": len(strong), "pending_pairs": len(pending)},
+                  "strong_pairs": len(strong), "pending_pairs": len(pending),
+                  "answer_conflicts": len(answer_conflicts)},
         "verdict99": dict(cnt),
+        "answer_conflicts": answer_conflicts,
         "verdict_detail": verdicts,
         "clusters_top": clusters_out[:300],
         "sample": sample,
@@ -319,6 +366,7 @@ def main(argv=None) -> int:
         "docs": stats["docs"], "questions": stats["questions"],
         "clusters_ge2_with_pool": len(clusters_out),
         "strong_pairs": len(strong), "pending_pairs": len(pending),
+        "answer_conflicts": len(answer_conflicts),
         "verdict99": dict(cnt),
         "elapsed_s": round(time.perf_counter() - t0, 1),
     }, ensure_ascii=False, indent=1))

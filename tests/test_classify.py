@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """classify 的规则判定：topic / category / collection / source_trust / 未分类兜底。"""
-import json
 import sqlite3
 from pathlib import Path
 

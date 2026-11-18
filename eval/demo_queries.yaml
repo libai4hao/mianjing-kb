@@ -1,0 +1,27 @@
+# 检索评测集（示例）：配合 examples/demo_corpus，CI 里跑 `kb eval --queries eval/demo_queries.yaml`
+# 每条 = 查询 + 期望命中（任一返回行的 q_text/a_text/source 含 expect_any 里的子串即算命中）
+#
+# 说明：kw 模式走 FTS5 trigram，查询串以「原文里连续出现」的词组最稳；
+# 跨词短语（如「ConcurrentHashMap 线程安全」）在纯 kw 下可能漏召回，属已知限制，
+# 加向量层（--mode hybrid）后再补这类查询。扩充时请把真实漏召回案例原样记进来。
+queries:
+  - q: "HashMap"
+    expect_any: ["HashMap"]
+  - q: "ConcurrentHashMap"
+    expect_any: ["ConcurrentHashMap"]
+  - q: "ThreadLocal"
+    expect_any: ["ThreadLocal"]
+  - q: "最左前缀"
+    expect_any: ["最左前缀"]
+  - q: "聚簇索引"
+    expect_any: ["聚簇索引"]
+  - q: "慢查询"
+    expect_any: ["慢查询"]
+  - q: "覆盖索引"
+    expect_any: ["覆盖索引"]
+  - q: "ArrayList"
+    expect_any: ["ArrayList"]
+  - q: "equals"
+    expect_any: ["equals"]
+  - q: "自我介绍"
+    expect_any: ["自我介绍"]

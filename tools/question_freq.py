@@ -140,8 +140,12 @@ def extract(path: Path) -> str:
 
 
 # ---------------- 切题 ----------------
-def split_questions(text: str) -> list[str]:
-    """返回题目块列表（未归一化）。"""
+def split_qa(text: str) -> list[tuple[str, str]]:
+    """把文本切成 (题干块, 答案块) 列表（均未归一化）。
+
+    题干块仍需再过 `_clean_question` 才知是否真是题；答案块用于"同题不同答"的对抗判定
+    （聚类删重只看题干会把"题目一样、答案不同"的两份资料判成重复）。
+    """
     blocks: list[str] = []
     buf: list[str] = []
 
@@ -167,26 +171,41 @@ def split_questions(text: str) -> list[str]:
     out = []
     for b in blocks:
         b = b.strip()
-        # ① 先砍答案：这些题集的排版是"题号 问题 / 答案：/ 解析：/ 说明："连着走
-        m = ANSWER_CUT.search(b)
+        m = ANSWER_CUT.search(b)        # 排版是"题号 问题 / 答案：…"连着走
         if m:
-            b = b[: m.start()]
-        b = b.strip(" ：:；;，,")
-        # ② 只留到第一个问号；没有问号就留到第一个句号（避免把整段代码/答案算成题
-        m = re.search(r"[？?]", b)
-        if m:
-            b = b[: m.start()]
+            out.append((b[: m.start()], b[m.end():].strip()))
         else:
-            m = re.search(r"[。；;，,]", b)
-            if m:
-                b = b[: m.start()]
-        b = b.strip(" ：:；;，,")
-        # ③ 必须是"像问题"的：带疑问/祈使词，或长度够但要短（长块基本是答案正文）
-        if len(b) < 6 or len(b) > 120:
-            continue
-        if not (Q_WORD.search(b) or re.search(r"[？?]", b)):
-            continue
-        out.append(b)
+            out.append((b, ""))
+    return out
+
+
+def _clean_question(b: str) -> str | None:
+    """题干块 → 像问题的短句；不像题返回 None。"""
+    b = b.strip().strip(" ：:；;，,")
+    # ① 只留到第一个问号；没有问号就留到第一个句号（避免把整段代码/答案算成题）
+    m = re.search(r"[？?]", b)
+    if m:
+        b = b[: m.start()]
+    else:
+        m = re.search(r"[。；;，,]", b)
+        if m:
+            b = b[: m.start()]
+    b = b.strip(" ：:；;，,")
+    # ② 必须是"像问题"的：带疑问/祈使词，或长度够但要短（长块基本是答案正文）
+    if len(b) < 6 or len(b) > 120:
+        return None
+    if not (Q_WORD.search(b) or re.search(r"[？?]", b)):
+        return None
+    return b
+
+
+def split_questions(text: str) -> list[str]:
+    """返回题目块列表（未归一化）。"""
+    out = []
+    for q, _a in split_qa(text):
+        cleaned = _clean_question(q)
+        if cleaned:
+            out.append(cleaned)
     return out
 
 

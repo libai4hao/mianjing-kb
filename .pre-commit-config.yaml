@@ -1,0 +1,22 @@
+default_stages: [pre-commit]
+repos:
+  - repo: local
+    hooks:
+      - id: privacy-scan
+        name: privacy scan (staged)
+        entry: python tools/privacy_scan.py --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ruff
+        name: ruff check
+        entry: python -m ruff check tools tests
+        language: system
+        pass_filenames: false
+        types_or: [python]
+      - id: pytest-fast
+        name: pytest (干活前先跑一遍)
+        entry: python -m pytest tests -q
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

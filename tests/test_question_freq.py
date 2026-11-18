@@ -59,6 +59,7 @@ def test_near_duplicates_hash_close_far_ones_apart():
     # 复核阈值取 0.7 是**高精度优先**：复制粘贴时带题号/空格的变体能到 0.9+，
     # 真·同义改写（如"说一下…"vs"说说…是怎么…的"）只有 0.42，会被放过 —— 这是有意的。
     assert hamming(a, b) <= 24
+    assert hamming(a, c) > 24          # 无关题必须拉得开，否则 LSH 候选会被噪声淹没
     assert jaccard(grams(normalize("1、说一下 JVM 的内存区域划分？")),
                    grams(normalize("说一下 JVM 的内存区域划分"))) >= 0.9
     assert jaccard(grams(normalize("说一下 JVM 的内存区域划分")),

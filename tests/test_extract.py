@@ -159,7 +159,6 @@ def test_pool_hash_stable_across_content_change(tmp_env, monkeypatch):
     p.mkdir()
     f = p / "题库.md"
     f.write_text("# 第一版\n\n" + "1. 什么是索引？" * 5, encoding="utf-8")
-    h1 = dict(extract.doc_pool(conn)).keys()
     key1 = next(k for k, v in extract.doc_pool(conn) if v == f)
     f.write_text("# 第二版（内容变了，懒加载改写）\n\n" + "1. 什么是索引？" * 5, encoding="utf-8")
     key2 = next(k for k, v in extract.doc_pool(conn) if v == f)
