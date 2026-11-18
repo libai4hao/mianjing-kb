@@ -142,6 +142,22 @@ def decide(conn, doc_hash: str, rel: str, name: str, quarantined: bool = False) 
     return "moved", prev
 
 
+def retire_path_ghost(conn, dir_path: str, file_name: str, new_hash: str) -> int:
+    """F7（2026-11-19）：同路径换内容时退役旧行（幽灵行）。
+
+    intake 只按 hash 判重：同路径新内容判 added 落新行后，旧行（不同 hash）仍
+    classified——doc_pool 会同路径双份抽题，G5 只查 src 存在拦不住。旧行转
+    superseded + note replaced_by:<new_hash>，不再进任何清单（doc_pool/ingest_queue
+    都只取 classified）。返回退役行数。
+    """
+    cur = conn.execute(
+        "UPDATE source_documents SET status='superseded', note='replaced_by:' || ? "
+        "WHERE dir_path=? AND file_name=? AND doc_hash != ? "
+        "AND status NOT IN ('absent','superseded')",
+        (new_hash, dir_path, file_name, new_hash))
+    return cur.rowcount
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="登记源文档并做哈希判重")
     ap.add_argument("--root", default=str(config.CORPUS_ROOT), help="扫描根目录")
@@ -198,6 +214,9 @@ def main(argv=None) -> int:
                 continue
 
             if action in ("added", "quarantined"):
+                n_ghost = retire_path_ghost(conn, dir_of(rel), p.name, doc_hash)
+                if n_ghost:
+                    actions["ghost_retired"] += n_ghost
                 row = {
                     "doc_hash": doc_hash,
                     "sha256": sha,
