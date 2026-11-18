@@ -12,7 +12,6 @@ losers 取每组前 n-1、purge 四重判据）。
 import sys
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -109,10 +108,39 @@ def test_purge_ok_status_whitelist():
     assert "quarantined" not in OK_STATUS and "rejected" not in OK_STATUS
 
 
+def test_purge_refuses_apply_without_yes(tmp_path, capsys):
+    """高危：物理删除必须 --apply + --yes 两个开关，缺一个就只打印计划并返回 2。"""
+    from purge_origin import main as purge_main
+    src = tmp_path / "corpus"
+    keep_dir = src / "keep"
+    keep_dir.mkdir(parents=True)
+    (keep_dir / "a.pdf").write_bytes(b"x")
+    victim = tmp_path / "inbox"
+    victim.mkdir()
+    (victim / "a.pdf").write_bytes(b"x")
+
+    db_path = tmp_path / "kb.sqlite"
+    conn = __import__("tools.kb.db", fromlist=["connect"]).connect(db_path)
+    conn.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path,"
+        " dir_path, status, batch_id, first_seen_at, last_seen_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("h" * 16, "h" * 16, "a.pdf", ".pdf", 1, str(keep_dir / "a.pdf"), "keep", "classified",
+         "t", "now", "now"))
+    conn.commit()
+    conn.close()
+
+    rc = purge_main(["--roots", str(victim), "--apply", "--db", str(db_path),
+                     "--log", str(tmp_path / "log.csv")])
+    assert rc == 2
+    assert (victim / "a.pdf").exists()          # 一个字节都没删
+    assert "--yes" in capsys.readouterr().err
+
+
 def test_purge_decision_guard():
     """四重判据的纯逻辑：状态白名单 + 保留副本在语料根内且存在。"""
     from purge_origin import OK_STATUS
-    import purge_origin as po
+
     corpus = Path(r"D:\corpus").resolve()
 
     def decide(rows, keep_path, keep_exists=True):

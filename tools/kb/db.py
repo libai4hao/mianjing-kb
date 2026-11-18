@@ -1,19 +1,39 @@
 # -*- coding: utf-8 -*-
-"""SQLite 连接与迁移。表结构见 meta/schema/001_init.sql（docs/03 §10.2）。"""
+"""SQLite 连接与迁移。表结构见 meta/schema/001~009（docs/03 §10.2）。
+
+迁移口径（2026-11-19 统一，替换原先"SQL 文件 + db.py 里一串 _ensure_*"两套逻辑）：
+- 唯一入口是 `MIGRATIONS` 有序注册表，每一项是 (版本号, 幂等函数)；
+- 已应用的版本记在 `schema_version(version, applied_at)`；
+- SQL 文件只是函数的载荷；006（questions 题级 topic）没有独立 SQL，就在代码里实现，
+  版本号照记，不再出现"006 找不到迁移文件"的歧义。
+"""
 from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 from . import config
 
 SCHEMA_FILE = Path(config.META_DIR) / "schema" / "001_init.sql"
+NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
 
-def connect(db_path: Path | str | None = None, *, create: bool = True) -> sqlite3.Connection:
-    """连接数据库；create=True 时自动建库并跑迁移。"""
+def connect(db_path: Path | str | None = None, *, create: bool = True,
+            readonly: bool = False) -> sqlite3.Connection:
+    """连接数据库；create=True 时自动建库并跑迁移。
+
+    readonly=True 以 `mode=ro` 打开（不建库、不迁移、不写 WAL）：只读工具（如 purge_origin）
+    用它在"只查询、绝不改库"的场景下工作。
+    """
     path = Path(db_path or config.DB_PATH)
+    if readonly:
+        if not path.exists():
+            raise FileNotFoundError(f"数据库不存在：{path}")
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
@@ -26,18 +46,8 @@ def connect(db_path: Path | str | None = None, *, create: bool = True) -> sqlite
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    """幂等迁移：schema 用 IF NOT EXISTS；需要 ADD COLUMN 的用 pragma 先探。"""
-    sql = SCHEMA_FILE.read_text(encoding="utf-8")
-    conn.executescript(sql)
-    _ensure_parent_dir(conn)
-    _ensure_source_spans(conn)
-    _ensure_questions(conn)
-    _ensure_labels_staging(conn)
-    _ensure_question_topic(conn)
-    _ensure_label_facts(conn)
-    _ensure_golden_labels(conn)
-    _ensure_review_columns(conn)
-    conn.commit()
+    """按 schema_version 逐个应用未落地的迁移（每项都幂等）。"""
+    _apply_migrations(conn)
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -132,6 +142,43 @@ def _ensure_review_columns(conn: sqlite3.Connection) -> None:
     if not _column_exists(conn, "labels_staging", "review_state"):
         sql = (SCHEMA_FILE.parent / "009_review_columns.sql").read_text(encoding="utf-8")
         conn.executescript(sql)
+
+
+def _init_schema(conn: sqlite3.Connection) -> None:
+    """001：基础表（source_documents / batches 等）。脚本本身 IF NOT EXISTS，可直接重放。"""
+    conn.executescript(SCHEMA_FILE.read_text(encoding="utf-8"))
+
+
+MIGRATIONS = [
+    ("001_init", _init_schema),
+    ("002_parent_dir", _ensure_parent_dir),
+    ("003_source_spans", _ensure_source_spans),
+    ("004_questions", _ensure_questions),
+    ("005_labels_staging", _ensure_labels_staging),
+    ("006_questions_topic", _ensure_question_topic),   # 代码内迁移，无独立 .sql（见模块 docstring）
+    ("007_label_facts", _ensure_label_facts),
+    ("008_golden_labels", _ensure_golden_labels),
+    ("009_review_columns", _ensure_review_columns),
+]
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_version ("
+        " version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
+    applied = {r[0] for r in conn.execute("SELECT version FROM schema_version").fetchall()}
+    for version, fn in MIGRATIONS:
+        if version in applied:
+            continue
+        fn(conn)
+        conn.execute("INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
+                     (version, datetime.now().strftime(NOW_FMT)))
+    conn.commit()
+
+
+def applied_versions(conn: sqlite3.Connection) -> list[str]:
+    return [r[0] for r in conn.execute("SELECT version FROM schema_version ORDER BY version")]
 
 
 @contextmanager
