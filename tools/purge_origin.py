@@ -14,7 +14,8 @@
   ⑤ 待删文件非 0 字节
 
 删除链路：先写 `planned` 日志行并 fsync，再删，再追加 `deleted`/`failed` 行；
-删除前二次校验 size/mtime 未变；实删数与计划数不一致时退出码 1。
+删除前二次校验 size/mtime 未变、并**重算原文 sha256**（`--no-rehash` 可跳过），
+实删数与计划数不一致时退出码 1。
 
 用法：
     python tools/purge_origin.py --roots "%RESOURCE_ROOT%\\就业资料" "%DOC_ROOT%\\待分类"          # 只预览
@@ -119,6 +120,8 @@ def main(argv=None) -> int:
                     help="计划删除数超过 N 件时拒绝 --apply（0 = 不设上限）")
     ap.add_argument("--allow-superseded-no-replacement", action="store_true",
                     help="放行 note 里没有 converted_to: 的 superseded 记录（默认拒绝）")
+    ap.add_argument("--no-rehash", action="store_true",
+                    help="删除前不重算原文 sha256（快一倍，但会把'扫描后内容被换掉'的窗口留开）")
     args = ap.parse_args(argv)
     refused = False
     if args.apply and not args.yes:
@@ -254,6 +257,9 @@ def main(argv=None) -> int:
                     raise OSError("扫描后文件已变化")
                 if not keep.is_file():
                     raise OSError("保留副本已不存在")
+                # 收窗：扫描到删除之间文件可能被改写（同 size+同 mtime 也能换内容），删前重算一次
+                if not args.no_rehash and hashing.sha256_file(p) != digest:
+                    raise OSError("删除前内容已变化（重算 sha256 不符）")
                 p.unlink()
             except OSError as ex:
                 failures += 1

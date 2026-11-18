@@ -205,6 +205,45 @@ def test_rmdirs_only_removes_dirs_emptied_by_this_run(env):
     assert not target.exists()                     # 本次删空 → 清掉
 
 
+def test_rehash_detects_content_swapped_between_scan_and_delete(env, monkeypatch):
+    """扫描到删除之间文件被换掉（size/mtime 都伪造成一样）→ 重算 sha256 拦下，不删。"""
+    p = _victim(env)
+    _add(env, p, src=_keep(env))
+    real = hashing.sha256_file
+
+    def fake(path):
+        if Path(path) == p and fake.calls:
+            return "0" * 64
+        if Path(path) == p:
+            fake.calls += 1
+        return real(path)
+
+    fake.calls = 0
+    monkeypatch.setattr(po.hashing, "sha256_file", fake)
+    assert _run(env, p.parent, "--apply", "--yes") == 1
+    assert p.exists()
+    rows = list(csv.DictReader((env["build"] / "del.csv").open(encoding="utf-8-sig")))
+    assert [r["status"] for r in rows] == ["planned", "failed"]
+
+
+def test_no_rehash_flag_skips_the_second_hash(env, monkeypatch):
+    p = _victim(env)
+    _add(env, p, src=_keep(env))
+    real = hashing.sha256_file
+
+    def fake(path):
+        if Path(path) == p and fake.calls:
+            return "0" * 64
+        if Path(path) == p:
+            fake.calls += 1
+        return real(path)
+
+    fake.calls = 0
+    monkeypatch.setattr(po.hashing, "sha256_file", fake)
+    assert _run(env, p.parent, "--apply", "--yes", "--no-rehash") == 0
+    assert not p.exists()
+
+
 def test_legacy_log_header_is_rotated(env):
     """老日志是 5 列，直接追加 6 列行会撑坏 CSV：表头不符时改写 _v2，旧文件一个字节不动。"""
     p = _victim(env)
