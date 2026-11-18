@@ -132,6 +132,28 @@ PS：篇幅问题，我这并没有对分布式缓存选型做详细介绍和对
     assert v2["coverage"] >= 0.95
 
 
+def test_coverage_never_exceeds_one_with_inner_noise():
+    """页码行落在题块 span 内部时，旧口径"既算覆盖又减分母"会算出 >1.0（实测 1.0612）。"""
+    md = "1. 什么是 JVM？\n\n答案第一段。\n\n12\n\n答案第二段。\n\n## 2. 说一下 GC\n\n答案三。\n"
+    v2 = chunker.chunk_v2(md)
+    assert 0.0 < v2["coverage"] <= 1.0, v2["note"]
+    assert "其中噪声" in v2["note"]
+
+
+def test_span_maps_original_offsets_after_noise_removal():
+    """答案区剔除页码行后，后置切题的分段 span 必须按行映射回原文，不能按 a_text 累计前移。"""
+    md = ("1. 什么是 JVM？\n\n答案第一段。\n\n7\n\n什么是 GC 啊？\n\n答案二。\n\n"
+          "2. 下一个问题？\n\n答案三。\n")
+    v2 = chunker.chunk_v2(md)
+    assert len(v2["items"]) >= 2
+    first = v2["items"][0]
+    s, _e = first["span"]
+    assert first["q"][:4] in md[s:s + 200]        # 题号块：q 剥了 "1. " 前缀，按首段回指
+    post = v2["items"][1]                         # 由 _split_answers 后置拆出的题（旧口径会偏 1–2 字符）
+    s, _e = post["span"]
+    assert md[s:s + len(post["q"])] == post["q"]
+
+
 def test_render_two_steps():
     out = chunker.render(DOC)
     assert out.startswith("第一步：题目清单")

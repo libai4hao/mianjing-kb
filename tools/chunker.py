@@ -38,7 +38,8 @@ R2' 答案内部的列举编号与句中问词不判新题：只切"空行前置
        "coverage":float, "note":"扣除明细"}
   - qtype ∈ 八股|算法|项目|场景|HR（关键词启发式）
   - conf：high(题号/问句) / low(标题/考点) / none
-  - coverage = items 覆盖字符 / (全长 - 可扣除字符)，扣除=目录/代码/表格/页码/引用/水印/致谢
+  - coverage = (items 覆盖 − span 内噪声) / (全长 − 可扣除)，扣除=目录/代码/表格/页码/引用/水印/致谢
+    （同一噪声不能既算覆盖又从分母扣，否则会 >1.0）
   - items 为空时 probe 必须非空（1–3 个候选区块）
 render(md_text)：两步输出（第一步纯文本清单 ≤12 字/行，第二步 JSON）。
 
@@ -51,10 +52,9 @@ render(md_text)：两步输出（第一步纯文本清单 ≤12 字/行，第二
 """
 from __future__ import annotations
 
-import bisect
 import re
 from collections import Counter
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 CJK = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf]')
 
@@ -285,7 +285,7 @@ def chunk(md_text: str) -> Dict:
         end_line = bounds[bi + 1]["line"] if bi + 1 < len(bounds) else n
         b_start, b_end = starts[i], starts[end_line] if end_line < n else total
         # 答案区：剔除页码/目录行/水印（→ leftovers，span 保留在块区间内）
-        inc, exc_runs = [], []
+        inc, exc_runs, inc_idx = [], [], []
         for j in range(i + 1, end_line):
             k = kinds[j]
             why = None
@@ -304,8 +304,11 @@ def chunk(md_text: str) -> Dict:
                     exc_runs.append((why, j, j + 1))
             else:
                 inc.append(lines[j])
+                inc_idx.append(j)
         for why, a, b in exc_runs:
             leftovers.append({"span": [starts[a], starts[b] if b < n else total], "why": why})
+        # 行级原文偏移：a_text 剔掉噪声行后长度会变，span 必须按"行 → 原文"映射（不能累计长度）
+        a_segs = [(starts[j], starts[j + 1] if j + 1 < n else total) for j in inc_idx]
         a_text = "".join(inc).rstrip("\n")
         seg = md_text[b_start:b_end]
         for j, (qid, qtext) in enumerate(bd["parts"]):
@@ -315,6 +318,7 @@ def chunk(md_text: str) -> Dict:
                 "a_text": a_text if j == len(bd["parts"]) - 1 else "",
                 "style": bd["style"] if j == 0 else "题号",
                 "source_span": [b_start, b_end],
+                "a_segs": a_segs,
                 "icons": RE_IMG.findall(seg),
             })
         cur_line = end_line
@@ -343,6 +347,7 @@ def chunk(md_text: str) -> Dict:
             runs.append((acc, [run_start, b["source_span"][1]]))
         for j, (atext, span) in enumerate(runs):
             nb = dict(b)
+            nb.pop("a_segs", None)      # a_text 已被再切，行级映射失效 → 走旧口径（R8 块仅用于续并）
             if j == 0:
                 nb["a_text"], nb["source_span"] = atext, [b["source_span"][0], span[1]]
             else:
@@ -395,22 +400,25 @@ def _conf_of(style: str, q_text: str) -> str:
     return "low"
 
 
-def _split_answers(a_text: str, a_base: int):
+def _split_answers(a_text: str, a_base: int, a_segs: list | None = None):
     """v2 后置切分：a_text 内"空行前置的独立问句/考点行"另起新题（R2' 守卫）。
 
+    a_segs = 该块每行在原文里的 (start, end)（chunk() 落库，行序为剔除噪声前的原始行序）。
+    给了 a_segs 就按行映射 span（精确）；没给则退化为 a_text 累计偏移的旧口径
+    （a_text 剔过页码/目录行，累计长度会整体前移，仅作兼容兜底）。
     返回 (head_a_text, new_items)；new_items 的 q 为原文行文本。
     """
-    out, lines = [], a_text.splitlines(keepends=True)
+    lines = a_text.splitlines(keepends=True)
     starts, pos = [], 0
     for ln in lines:
         starts.append(pos); pos += len(ln)
     starts.append(pos)
+    segs: list[tuple[list[int], int, int]] = []
     prev_blank, in_code, cur = True, False, []
 
-    def flush(end_rel):
+    def flush(end_rel: int) -> None:
         if cur:
-            s = starts[cur[0]]
-            out.append(a_text[s:end_rel])
+            segs.append((list(cur), starts[cur[0]], end_rel))
 
     for i, ln in enumerate(lines):
         s = ln.strip()
@@ -429,23 +437,53 @@ def _split_answers(a_text: str, a_base: int):
             cur.append(i)
         prev_blank = not s
     flush(len(a_text))
-    if not out:
+    if not segs:
         return a_text, []
+    out = [a_text[s:e] for _idx, s, e in segs]
     head = out[0]
     new_items = []
-    for seg in out[1:]:
+    for (idxs, s, e), seg in zip(segs[1:], out[1:]):
         first_line = strip_bold(seg.split("\n", 1)[0].strip())   # 题干剥粗体壳
         m = RE_KPOINT.match(first_line)
         new_items.append({"q": (m.group(1) if m else first_line)[:200], "a": seg,
-                          "style": "考点" if m else "问句"})
-    # span 相对原文：段起点 = a_base + 该段首字符偏移（逐段累计）
-    rel, spans = 0, []
-    for seg in out:
-        spans.append((a_base + rel, a_base + rel + len(seg)))
-        rel += len(seg)
-    for it, (s, e) in zip(new_items, spans[1:]):
-        it["span"] = [s, e]
+                          "style": "考点" if m else "问句", "_idxs": idxs})
+    for it in new_items:
+        idxs = it.pop("_idxs")
+        if a_segs and idxs[-1] < len(a_segs):
+            it["span"] = [a_segs[idxs[0]][0], a_segs[idxs[-1]][1]]
+        else:
+            it["span"] = [a_base + starts[idxs[0]], a_base + starts[idxs[-1] + 1]]
     return head, new_items
+
+
+def _merge_intervals(spans: List[Sequence[int]]) -> List[Tuple[int, int]]:
+    """区间并集（相邻/重叠合并），用于 coverage 不重复计数。"""
+    out: List[Tuple[int, int]] = []
+    for s, e in sorted((int(s), int(e)) for s, e in spans if e > s):
+        if out and s <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def _span_len(spans: List[Sequence[int]]) -> int:
+    return sum(e - s for s, e in _merge_intervals(spans))
+
+
+def _overlap_len(a: List[Sequence[int]], b: List[Sequence[int]]) -> int:
+    """两个区间集的交集总长。"""
+    aa, bb = _merge_intervals(a), _merge_intervals(b)
+    i = j = total = 0
+    while i < len(aa) and j < len(bb):
+        lo, hi = max(aa[i][0], bb[j][0]), min(aa[i][1], bb[j][1])
+        if lo < hi:
+            total += hi - lo
+        if aa[i][1] < bb[j][1]:
+            i += 1
+        else:
+            j += 1
+    return total
 
 
 def chunk_v2(md_text: str) -> Dict:
@@ -464,7 +502,7 @@ def chunk_v2(md_text: str) -> Dict:
             items[-1]["a"] = (items[-1]["a"] + "\n" + b["a_text"]).strip("\n")
             items[-1]["span"][1] = b["source_span"][1]
             continue
-        a_rest, extra = _split_answers(b["a_text"], b["source_span"][0])
+        a_rest, extra = _split_answers(b["a_text"], b["source_span"][0], b.get("a_segs"))
         end = extra[0]["span"][0] if extra else b["source_span"][1]
         add(b["q_text"], a_rest, [b["source_span"][0], end], b["style"])
         for e in extra:
@@ -493,21 +531,27 @@ def chunk_v2(md_text: str) -> Dict:
                 if len(probe) >= 3:
                     break
 
-    # coverage：items 覆盖 / (全长 - 可扣除)
+    # coverage：净覆盖 / 可计入总长
+    # 2026-11-19 审核修复：扣除区（页码/目录/水印）常常落在 item span 内部，旧口径
+    # "covered 累加 + 分母减扣除"两边同时计，会算出 >1.0 的 coverage（实测 1.0612）。
     total = len(md_text)
-    covered = sum(max(0, it["span"][1] - it["span"][0]) for it in items)
+    item_iv = [it["span"] for it in items]
+    deduct_iv: List[Sequence[int]] = []
     deduct_detail: Dict[str, int] = {}
-    deduct = 0
     for l in res["leftovers"]:
         if l["why"] == "未识别正文":
             continue
         s, e = l["span"]
-        deduct += e - s
+        deduct_iv.append((s, e))
         deduct_detail[l["why"]] = deduct_detail.get(l["why"], 0) + (e - s)
+    covered = _span_len(item_iv)
+    noise_in_items = _overlap_len(item_iv, deduct_iv)
+    deduct = _span_len(deduct_iv)
+    net = covered - noise_in_items
     denom = max(1, total - deduct)
-    coverage = round(covered / denom, 4) if total else 1.0
+    coverage = round(min(1.0, max(0.0, net / denom)), 4) if total else 1.0
     note = "扣除:" + (", ".join(f"{k} {v}" for k, v in sorted(deduct_detail.items())) or "无") \
-           + f"; 总长 {total}, 覆盖 {covered}, 扣除 {deduct}"
+           + f"; 总长 {total}, 覆盖 {covered}(其中噪声 {noise_in_items}), 净覆盖 {net}, 扣除 {deduct}"
     return {"items": items, "probe": probe, "coverage": coverage, "note": note}
 
 
@@ -541,7 +585,10 @@ def main(argv=None) -> int:
     import sys as _sys
     text = open(args.file, encoding="utf-8").read() if args.file else _sys.stdin.read()
     if args.v1:
-        print(_json.dumps(chunk(text), ensure_ascii=False, indent=1))
+        res_v1 = chunk(text)
+        for b in res_v1["blocks"]:
+            b.pop("a_segs", None)       # 行级偏移是内部口径，不进 CLI 输出
+        print(_json.dumps(res_v1, ensure_ascii=False, indent=1))
     else:
         print(render(text))
     return 0
