@@ -252,12 +252,14 @@ def test_g6_skip_and_pass_and_fail(mini_env):
     assert any(f.get("kind") == "schema_ok_rate" for f in g3["fails"])
 
 
-def test_g6_first_batch_no_drift_warn(mini_env):
+def test_g6_first_batch_no_drift_warn(mini_env, monkeypatch):
     """F8/bug1：首批打标（questions 现有 topic 全空=无基线）不得因 drift 误报 WARN。
 
     原实现 drift 基线=questions 现有非空 topic，首批打标前必空 → 所有 topic 都算
     "新主题" → drift=1.0 必 WARN。无基线时漂移指标无意义，应跳过并留痕。
+    批次三 R2 后该分支仅在词表不可用（topic_vocab 空）时可达——monkeypatch 模拟。
     """
+    monkeypatch.setattr(vl, "topic_vocab", lambda: ())
     kb = mini_env["kb"]
     kb.execute("INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
                "q_norm_hash, simhash, span_start, span_end, topic, extracted_at) VALUES "
@@ -270,6 +272,26 @@ def test_g6_first_batch_no_drift_warn(mini_env):
     assert g["state"] == "PASS"
     assert g["detail"]["new_topic_ratio"] == 0.0
     assert g["detail"].get("drift_baseline") == "none(首批)"
+
+
+def test_g6_drift_vocab_baseline(mini_env, monkeypatch):
+    """批次三 R2：词表非空 → drift 基线=词表——词表外主题算漂移（捕捉 prompt 锁失败）。"""
+    monkeypatch.setattr(vl, "topic_vocab", lambda: ("JVM", "Redis", "其他"))
+    kb = mini_env["kb"]
+    kb.execute("INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, provider, "
+               "model, redacted, latency_ms, tokens, labeled_at) VALUES "
+               "(1,'JVM','八股',3,'[]','p','m',0,1,1,'now'),"
+               "(2,'玄学','八股',3,'[]','p','m',0,1,1,'now'),"
+               "(3,'怪谈','八股',3,'[]','p','m',0,1,1,'now')")
+    kb.commit()
+    g = vl.g6_label(kb)
+    assert g["detail"]["drift_baseline"] == "vocab"
+    assert g["state"] == "WARN"                    # 2/3 词表外 > 0.15
+    # 全部落回词表内 → 漂移归零
+    kb.execute("UPDATE labels_staging SET topic='Redis' WHERE qid IN (2,3)")
+    kb.commit()
+    g2 = vl.g6_label(kb)
+    assert g2["state"] == "PASS" and g2["detail"]["new_topic_ratio"] == 0.0
 
 
 # ---------------- main / exit code ----------------
@@ -302,3 +324,59 @@ def test_g7_docs_warns(tmp_path):
     assert g["state"] == "WARN"
     kinds = {x["kind"] for x in g["fails"]}
     assert kinds == {"tests_count_stale", "unimplemented_listed_but_exists", "docs_index_stale"}
+
+
+# ---- 批次二 G3：G6b 金标抽检门禁（docs/15 G6 规格"抽检准确率 ≥0.8"自动化）----
+
+def _golden_db(tmp_path):
+    from tools.kb import db as kbdb
+    return kbdb.connect(tmp_path / "kb.sqlite")     # 全迁移：labels_staging + golden_labels
+
+
+def _pair(conn, i: int, gold: str = "JVM", pred=None):
+    """插一对金标 + staging 行（q_norm_hash=gh{i}）；pred=None 表示标注与金标一致。"""
+    h = f"gh{i}"
+    conn.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                 "VALUES (?,?,?, 'now')", (h, f"题{i}", gold))
+    conn.execute("INSERT INTO labels_staging(qid, q_norm_hash, topic, qtype, difficulty, "
+                 "tags, provider, model, redacted, latency_ms, tokens, labeled_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?, 'now')",
+                 (1000 + i, h, gold if pred is None else pred,
+                  "八股", 3, "[]", "local", "m", 0, 1, 10))
+
+
+def test_g6b_skip_no_golden(tmp_path):
+    conn = _golden_db(tmp_path)
+    g = vl.g6b_golden(conn)
+    assert g["state"] == "SKIP"
+    conn.close()
+
+
+def test_g6b_skip_small_sample(tmp_path):
+    """matched < 20 → SKIP（样本不足不判准确率，不挡 merge）。"""
+    conn = _golden_db(tmp_path)
+    for i in range(5):
+        _pair(conn, i)
+    conn.commit()
+    g = vl.g6b_golden(conn)
+    assert g["state"] == "SKIP" and g["detail"]["matched"] == 5
+    conn.close()
+
+
+def test_g6b_pass_and_fail(tmp_path):
+    """20 matched：全对 PASS；5 题标错 → 0.75 FAIL + weak_topics + 混淆矩阵。"""
+    conn = _golden_db(tmp_path)
+    for i in range(20):
+        _pair(conn, i)
+    conn.commit()
+    g = vl.g6b_golden(conn)
+    assert g["state"] == "PASS" and g["detail"]["topic_acc"] == 1.0
+    assert g["detail"]["weak_topics"] == []
+    for i in range(5):
+        conn.execute("UPDATE labels_staging SET topic='数据库' WHERE qid=?", (1000 + i,))
+    conn.commit()
+    g2 = vl.g6b_golden(conn)
+    assert g2["state"] == "FAIL" and g2["detail"]["topic_acc"] == 0.75
+    assert g2["detail"]["weak_topics"] == ["JVM"]
+    assert g2["detail"]["matrix"]["JVM"] == {"数据库": 5, "JVM": 15}
+    conn.close()

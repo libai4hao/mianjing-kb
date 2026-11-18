@@ -45,6 +45,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kb import config, hashing  # noqa: E402
+from kb.vocab import topic_vocab  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 SKIP_REASONS = ("no_text_layer", "garbled", "converted_only", "duplicate_of",
@@ -352,14 +353,19 @@ def g6_label(kb_conn) -> dict:
                         "difficulty": r["difficulty"], "bad_fields": why})
     ok_rate = 1 - len(bad) / n
 
-    # 软指标：新 topic 占比（现有 questions 未出现过的主题）
-    known = {r[0] for r in kb_conn.execute(
-        "SELECT DISTINCT topic FROM questions WHERE topic IS NOT NULL AND topic != ''")}
+    # 软指标：新 topic 占比。基线优先用封闭词表（批次三 R2，2026-11-19）——词表封闭后
+    # drift 捕捉的是 prompt 锁失败（词表外主题漏网）；词表不可用退回 questions 现有分布。
+    known = set(topic_vocab())
+    if known:
+        drift_baseline = "vocab"
+    else:
+        known = {r[0] for r in kb_conn.execute(
+            "SELECT DISTINCT topic FROM questions WHERE topic IS NOT NULL AND topic != ''")}
+        drift_baseline = "questions"
     if known:
         new_topics = {r["topic"] for r in rows if (r["topic"] or "").strip()} - known
         n_new = sum(1 for r in rows if (r["topic"] or "").strip() in new_topics)
         drift = n_new / n
-        drift_baseline = "questions"
     else:
         # F8/bug1（2026-11-19）：首批打标时 questions 的 topic 必然全空（无基线），
         # 漂移指标无意义——原实现此时 drift=1.0 必 WARN，属误报。跳过并留痕。
@@ -382,6 +388,62 @@ def g6_label(kb_conn) -> dict:
                  {"staged": n, "ok_rate": round(ok_rate, 4),
                   "new_topic_ratio": round(drift, 4),
                   "drift_baseline": drift_baseline}, sql)
+
+
+def g6b_golden(kb_conn) -> dict:
+    """G6b 金标抽检（批次二 G3，2026-11-19——docs/15 G6 规格"抽检 50 题准确率 ≥0.8"
+    从人工环节变自动门禁）。
+
+    golden_labels 无表/无行 → SKIP（金标未启用）；与 staging 按 q_norm_hash 求交集，
+    matched < 20 → SKIP（样本不足不判，不挡 merge）；topic_acc < 0.8 → FAIL（阻断 merge）。
+    qtype/difficulty 准确率只记录不设阈（docs/13 L6 旧口径 ≥70% 仅供参考）。
+    detail 带 weak_topics（acc<0.8 的金标主题，批次三 --review 的复核目标）与
+    混淆矩阵 matrix[gold][pred]。"""
+    import sqlite3
+    sql = ("SELECT g.topic_gold, s.topic FROM golden_labels g "
+           "JOIN labels_staging s ON s.q_norm_hash=g.q_norm_hash")
+    try:
+        n_gold = kb_conn.execute("SELECT COUNT(*) FROM golden_labels").fetchone()[0]
+    except sqlite3.OperationalError:
+        return _gate("G6b", "金标抽检", "软→硬", "SKIP", [],
+                     {"note": "golden_labels 表不存在（008 迁移未应用）"}, sql)
+    if n_gold == 0:
+        return _gate("G6b", "金标抽检", "软→硬", "SKIP", [],
+                     {"golden": 0, "note": "golden_labels 无行——先 --golden-sample/--golden-load"}, sql)
+    rows = kb_conn.execute(
+        "SELECT g.topic_gold, g.qtype_gold, g.difficulty_gold, s.topic, s.qtype, s.difficulty "
+        "FROM golden_labels g JOIN labels_staging s ON s.q_norm_hash=g.q_norm_hash").fetchall()
+    n = len(rows)
+    if n == 0:
+        return _gate("G6b", "金标抽检", "软→硬", "SKIP", [],
+                     {"golden": n_gold, "matched": 0,
+                      "note": "金标与 staging 无交集（staging 已 merge 或非同批）"}, sql)
+    if n < 20:
+        return _gate("G6b", "金标抽检", "软→硬", "SKIP", [],
+                     {"golden": n_gold, "matched": n,
+                      "note": f"样本 {n} < 20 不足以判准确率（docs/15 抽检 50 题口径）"}, sql)
+    topic_acc = sum(1 for r in rows if r["topic"] == r["topic_gold"]) / n
+    qt = [r for r in rows if r["qtype_gold"]]
+    qtype_acc = (sum(1 for r in qt if r["qtype"] == r["qtype_gold"]) / len(qt)) if qt else None
+    df = [r for r in rows if r["difficulty_gold"]]
+    diff_acc = (sum(1 for r in df if r["difficulty"] == r["difficulty_gold"]) / len(df)) if df else None
+    by_topic: dict[str, list[bool]] = {}
+    matrix: dict[str, dict[str, int]] = {}
+    for r in rows:
+        by_topic.setdefault(r["topic_gold"], []).append(r["topic"] == r["topic_gold"])
+        matrix.setdefault(r["topic_gold"], {})
+        matrix[r["topic_gold"]][r["topic"]] = matrix[r["topic_gold"]].get(r["topic"], 0) + 1
+    weak = sorted(t for t, oks in by_topic.items() if sum(oks) / len(oks) < 0.8)
+    fails, state = [], "PASS"
+    if topic_acc < 0.8:
+        state = "FAIL"
+        fails.append({"kind": "golden_topic_acc", "topic_acc": round(topic_acc, 4),
+                      "threshold": 0.8, "weak_topics": weak})
+    return _gate("G6b", "金标抽检", "软→硬", state, fails,
+                 {"golden": n_gold, "matched": n, "topic_acc": round(topic_acc, 4),
+                  "qtype_acc": round(qtype_acc, 4) if qtype_acc is not None else None,
+                  "difficulty_acc": round(diff_acc, 4) if diff_acc is not None else None,
+                  "weak_topics": weak, "matrix": matrix}, sql)
 
 
 # ---------------- G7 文档一致性（软） ----------------
@@ -510,6 +572,7 @@ def main(argv=None) -> int:
         g4_index(out_conn),
         g5_disk(kb_conn, Path(config.CORPUS_ROOT), build_dir),
         g6_label(kb_conn),
+        g6b_golden(kb_conn),
     ]
     if args.docs:
         repo_root = Path(__file__).resolve().parents[1]

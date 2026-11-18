@@ -28,3 +28,33 @@ def test_migration_idempotent(tmp_path):
     conn2 = db.connect(p)
     assert conn2.execute("SELECT COUNT(*) FROM label_facts").fetchone()[0] == 0
     conn2.close()
+
+
+def test_008_golden_labels_migration(tmp_path):
+    """008：golden_labels 金标表（批次二 G1，键=q_norm_hash 跨重切存活）。"""
+    conn = db.connect(tmp_path / "kb.sqlite")
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "golden_labels" in tables
+    assert _cols(conn, "golden_labels") >= {
+        "q_norm_hash", "q_text", "topic_gold", "qtype_gold",
+        "difficulty_gold", "annotator", "created_at"}
+    # annotator 默认 human
+    conn.execute(
+        "INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+        "VALUES ('h1', '题干', 'JVM', '2026-11-19T00:00:00')")
+    r = conn.execute("SELECT annotator FROM golden_labels WHERE q_norm_hash='h1'").fetchone()
+    assert r[0] == "human"
+    conn.close()
+
+
+def test_009_review_columns_migration(tmp_path):
+    """009：labels_staging 加复核三列（批次三 R1）。"""
+    conn = db.connect(tmp_path / "kb.sqlite")
+    assert {"review_state", "review_model", "review_note"} <= _cols(conn, "labels_staging")
+    # NULL = 未复核（不加 NOT NULL 默认，历史行为兼容）
+    conn.execute(
+        "INSERT INTO labels_staging(qid, topic, labeled_at) VALUES (1, 'JVM', 't')")
+    r = conn.execute("SELECT review_state FROM labels_staging WHERE qid=1").fetchone()
+    assert r[0] is None
+    conn.close()

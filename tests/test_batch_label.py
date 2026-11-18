@@ -282,3 +282,350 @@ def test_redact_integration_in_label_one(monkeypatch):
     assert "13812345678" not in sent["user"]
     assert "[联系方式]" in sent["user"]
     assert row["prompt_tokens"] == 7 and row["completion_tokens"] == 3   # F5 透传拆分计数
+
+
+# ---- 批次二 G2：金标抽样/录入（docs/项目审核报告/修复方案-2026-11-19.md §八）----
+
+def _stage(conn, qid: int, topic: str = "JVM", q_norm_hash: str | None = "X"):
+    """往 staging 塞一行（q_norm_hash=None 显式造 NULL 历史行）。"""
+    conn.execute("INSERT OR REPLACE INTO labels_staging "
+                 "(qid, q_norm_hash, topic, qtype, difficulty, tags, provider, model, "
+                 "redacted, latency_ms, tokens, prompt_tokens, completion_tokens, labeled_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (qid, f"hash{qid}" if q_norm_hash == "X" else q_norm_hash,
+                  topic, "八股", 3, '["tag"]', "local", "m", 0, 1, 10, 8, 2, "now"))
+
+
+def test_golden_sample_stratified_writes_todo(mini_db):
+    """G2 --golden-sample：按 topic 分层轮转抽样（小主题不被淹没），写 build/golden_todo.json。"""
+    for qid, topic in [(1, "JVM"), (2, "MySQL"), (3, "MySQL"), (4, "Redis")]:
+        _stage(mini_db, qid, topic)
+    out = bl.golden_sample(mini_db, 3)
+    assert out["sampled"] == 3 and out["strata"] == 3
+    data = json.loads((config.BUILD_DIR / "golden_todo.json").read_text(encoding="utf-8"))
+    items = data["items"]
+    assert len(items) == 3
+    assert {it["current"]["topic"] for it in items} == {"JVM", "MySQL", "Redis"}  # 层覆盖
+    it = items[0]
+    assert {"qid", "q_norm_hash", "q_text", "a_text", "current",
+            "topic_gold", "qtype_gold", "difficulty_gold"} <= set(it)
+    assert it["topic_gold"] == "" and it["qtype_gold"] == "" and it["difficulty_gold"] is None
+
+
+def test_golden_sample_skips_legacy_rows_without_hash(mini_db):
+    """G2：staging 无 q_norm_hash 的历史行不进金标（金标以 hash 为键，跨重切存活）。"""
+    _stage(mini_db, 1, "JVM")
+    _stage(mini_db, 2, "MySQL", q_norm_hash=None)
+    out = bl.golden_sample(mini_db, 5)
+    assert out["sampled"] == 1
+    assert out["items"][0]["q_norm_hash"] == "hash1"
+
+
+def test_golden_load_validates_and_inserts(mini_db, tmp_path):
+    """G2 --golden-load：填好的 todo 回灌 golden_labels；重复载入 REPLACE 幂等。"""
+    _stage(mini_db, 1, "JVM")
+    todo = {"items": [{"qid": 1, "q_norm_hash": "hash1", "q_text": "什么是 HashMap？",
+                       "a_text": "…", "topic_gold": "Java基础", "qtype_gold": "八股",
+                       "difficulty_gold": 3}]}
+    p = tmp_path / "golden_todo.json"
+    p.write_text(json.dumps(todo, ensure_ascii=False), encoding="utf-8")
+    out = bl.golden_load(mini_db, p, annotator="张三")
+    assert out["ok"] and out["loaded"] == 1
+    r = mini_db.execute("SELECT topic_gold, qtype_gold, difficulty_gold, annotator "
+                        "FROM golden_labels WHERE q_norm_hash='hash1'").fetchone()
+    assert tuple(r) == ("Java基础", "八股", 3, "张三")
+    archived = next(tmp_path.glob("golden_todo.loaded-*.json"))   # 载入成功后原文件已归档
+    out2 = bl.golden_load(mini_db, archived)           # 默认 annotator=human（归档副本重灌）
+    assert out2["ok"] and out2["total"] == 1           # REPLACE：不重复累积
+    assert mini_db.execute("SELECT annotator FROM golden_labels").fetchone()[0] == "human"
+
+
+def test_golden_load_rejects_invalid_whole_batch(mini_db, tmp_path):
+    """G2：topic_gold 空 / qtype_gold 越界 / difficulty_gold 越界 → 整批拒绝不落表。"""
+    todo = {"items": [
+        {"q_norm_hash": "hash1", "topic_gold": "JVM"},                     # 合法（gold 类型可空）
+        {"q_norm_hash": "hash2", "topic_gold": ""},
+        {"q_norm_hash": "hash3", "topic_gold": "JVM", "qtype_gold": "玄学"},
+        {"q_norm_hash": "hash4", "topic_gold": "JVM", "difficulty_gold": 9},
+    ]}
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(todo, ensure_ascii=False), encoding="utf-8")
+    out = bl.golden_load(mini_db, p)
+    assert not out["ok"] and out["rejected"] == 3 and len(out["errors"]) <= 10
+    assert mini_db.execute("SELECT COUNT(*) FROM golden_labels").fetchone()[0] == 0
+
+
+def test_merge_rejects_on_g6b_fail(mini_db):
+    """批次二 G3：金标抽检 <0.8 → merge 拒绝（staging 保留），提示看弱项。"""
+    for i in range(20):
+        _stage(mini_db, 100 + i, "JVM")                # q_norm_hash=hash{100+i}
+        mini_db.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                        "VALUES (?,?,?, 'now')", (f"hash{100 + i}", "题", "数据库"))
+    mini_db.commit()
+    out = bl.merge(mini_db)
+    assert not out["ok"] and "金标" in out["note"] and out["gate"] == "G6b"
+    assert mini_db.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0] == 20
+    assert mini_db.execute("SELECT topic FROM questions WHERE qid=1").fetchone()[0] == ""
+
+
+def test_eval_golden_writes_report(mini_db):
+    """批次二 G3 --eval：调 g6b_golden 评准确率 → build/label_eval.json。"""
+    for i in range(20):
+        _stage(mini_db, 100 + i, "JVM")
+        mini_db.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                        "VALUES (?,?,?, 'now')", (f"hash{100 + i}", "题", "JVM"))
+    mini_db.commit()
+    g = bl.eval_golden(mini_db)
+    assert g["state"] == "PASS"
+    data = json.loads((config.BUILD_DIR / "label_eval.json").read_text(encoding="utf-8"))
+    assert data["state"] == "PASS" and data["detail"]["topic_acc"] == 1.0
+
+
+# ---- 批次三 R2：封闭词表——label_one 锁枚举 + 词表外兜底 ----
+
+def test_label_one_vocab_lock_and_fallback(monkeypatch):
+    """词表非空 → SYSTEM 锁枚举（词表注入 prompt）；词表外输出改"其他"+pending。"""
+    monkeypatch.setattr(bl, "topic_vocab", lambda: ("JVM", "Redis", "其他"))
+    sent = {}
+
+    def fake_chat_json(cfg, system, user, **kw):
+        sent["system"] = system
+        return {"obj": {"topic": "玄学", "qtype": "八股", "difficulty": 3, "tags": []},
+                "latency_ms": 5, "tokens": 10, "prompt_tokens": 7, "completion_tokens": 3}
+
+    monkeypatch.setattr(bl, "chat_json", fake_chat_json)
+    row = bl.label_one(CFG, {"qid": 9, "q_norm_hash": "h9", "q_text": "题", "a_text": "答"})
+    assert "词表" in sent["system"] and "JVM" in sent["system"] and "其他" in sent["system"]
+    assert row["topic"] == "其他" and row["review_state"] == "pending"
+
+    def fake2(cfg, system, user, **kw):
+        return {"obj": {"topic": "JVM", "qtype": "八股", "difficulty": 3, "tags": []},
+                "latency_ms": 5, "tokens": 10, "prompt_tokens": 7, "completion_tokens": 3}
+
+    monkeypatch.setattr(bl, "chat_json", fake2)
+    row2 = bl.label_one(CFG, {"qid": 10, "q_norm_hash": "h10", "q_text": "题", "a_text": "答"})
+    assert row2["topic"] == "JVM" and row2["review_state"] is None
+
+
+def test_label_one_no_vocab_keeps_free_topic(monkeypatch):
+    """词表降级（空元组）→ 旧口径：不锁枚举、不兜底，review_state=None。"""
+    monkeypatch.setattr(bl, "topic_vocab", lambda: ())
+
+    def fake(cfg, system, user, **kw):
+        assert system == bl.SYSTEM
+        return {"obj": {"topic": "玄学", "qtype": "八股", "difficulty": 3, "tags": []},
+                "latency_ms": 5, "tokens": 10, "prompt_tokens": 7, "completion_tokens": 3}
+
+    monkeypatch.setattr(bl, "chat_json", fake)
+    row = bl.label_one(CFG, {"qid": 9, "q_norm_hash": "h9", "q_text": "题", "a_text": "答"})
+    assert row["topic"] == "玄学" and row["review_state"] is None
+
+
+# ---- 批次三 R3：复核执行层（--review / --review-list / --review-resolve）----
+
+def test_review_targets_three_classes(mini_db, monkeypatch):
+    """R3 复核目标=三类：词表外（含其他）/低置信/金标弱区；已复核不再选。"""
+    monkeypatch.setattr(bl, "topic_vocab", lambda: ("JVM", "Redis", "其他"))
+    _stage(mini_db, 1, "其他")
+    _stage(mini_db, 2, "玄学")     # A 词表外
+    _stage(mini_db, 3, "JVM")      # B 低置信
+    mini_db.execute("UPDATE questions SET conf='low' WHERE qid=3")
+    _stage(mini_db, 4, "JVM")      # C 金标弱区（staging JVM vs gold MySQL）
+    mini_db.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                    "VALUES ('hash4', '题', 'MySQL', 'now')")
+    mini_db.execute("UPDATE labels_staging SET review_state='agree' WHERE qid=1")  # 已复核
+    mini_db.commit()
+    got = {t["qid"] for t in bl.review_targets(mini_db)}
+    assert got == {2, 3, 4}
+
+
+def test_run_review_updates_states(mini_db, monkeypatch, tmp_path):
+    """R3：agree→agree+note；disagree→disagree+建议 JSON；失败不阻塞。"""
+    _stage(mini_db, 1, "玄学")
+    _stage(mini_db, 2, "怪谈")
+    _stage(mini_db, 3, "乱码")
+    mini_db.commit()
+
+    def fake_review_one(cfg, row):
+        if row["qid"] == 3:
+            raise RuntimeError("LLM 超时")
+        if row["qid"] == 1:
+            return {"verdict": "agree", "suggestion": {}, "note": "主题合理",
+                    "review_model": cfg["model"], "prompt_tokens": 60, "completion_tokens": 15}
+        return {"verdict": "disagree",
+                "suggestion": {"topic": "Redis", "qtype": "八股", "difficulty": 2},
+                "note": "主题错标", "review_model": cfg["model"],
+                "prompt_tokens": 60, "completion_tokens": 15}
+
+    monkeypatch.setattr(bl, "review_one", fake_review_one)
+    out = bl.run_review(CFG, mini_db, failed_path=tmp_path / "rf.jsonl")
+    assert out["reviewed"] == 2 and out["failed"] == 1
+    r1 = mini_db.execute("SELECT review_state, review_note FROM labels_staging WHERE qid=1").fetchone()
+    assert r1[0] == "agree" and "主题合理" in r1[1]
+    r2 = mini_db.execute("SELECT review_state FROM labels_staging WHERE qid=2").fetchone()
+    assert r2[0] == "disagree"
+    note2 = mini_db.execute("SELECT review_note FROM labels_staging WHERE qid=2").fetchone()[0]
+    assert json.loads(note2)["suggestion"]["topic"] == "Redis"
+
+
+def test_merge_holds_disagree_rows(mini_db, monkeypatch, tmp_path):
+    """R3：merge 不落库不删 disagree 分歧行（n_review_hold 输出），终审后放行。"""
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    mini_db.execute("UPDATE labels_staging SET review_state='disagree', review_note=? WHERE qid=1",
+                    (json.dumps({"suggestion": {"topic": "Redis"}}, ensure_ascii=False),))
+    mini_db.commit()
+    out = bl.merge(mini_db)
+    assert out["ok"] and out["merged"] == 2 and out["n_review_hold"] == 1
+    assert mini_db.execute("SELECT topic FROM questions WHERE qid=1").fetchone()[0] == ""
+    left = mini_db.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0]
+    assert left == 1  # 分歧行保留在 staging
+
+
+def test_review_resolve_keep_suggest_drop(mini_db):
+    """R3 终审出口：keep=agree；suggest=应用建议+agree；drop=删行；未知 token 上报。"""
+    _stage(mini_db, 1, "玄学")
+    _stage(mini_db, 2, "怪谈")
+    _stage(mini_db, 3, "乱码")
+    mini_db.execute("UPDATE labels_staging SET review_state='disagree', review_note=? WHERE qid=2",
+                    (json.dumps({"suggestion": {"topic": "Redis", "qtype": "八股", "difficulty": 2},
+                                 "note": "错标"}, ensure_ascii=False),))
+    mini_db.commit()
+    out = bl.review_resolve(mini_db, "1:keep 2:suggest 3:drop 999:drop bad:keep")
+    assert out["resolved"] == 3 and out["unknown"] == ["999:drop", "bad:keep"]
+    assert mini_db.execute("SELECT review_state FROM labels_staging WHERE qid=1").fetchone()[0] == "agree"
+    r2 = mini_db.execute("SELECT topic, qtype, difficulty, review_state FROM labels_staging WHERE qid=2").fetchone()
+    assert tuple(r2) == ("Redis", "八股", 2, "agree")
+    assert mini_db.execute("SELECT COUNT(*) FROM labels_staging WHERE qid=3").fetchone()[0] == 0
+
+
+# ---- 批次三 R5：COALESCE 守卫（评审 Minor#1）+ 待打标口径单源（bug5）----
+
+def test_merge_coalesce_guards_difficulty_tags(mini_db, monkeypatch, tmp_path):
+    """Minor#1：staging tags 为空数组（LLM 没给）时 merge 不覆盖已有 tags；
+    difficulty NULL 同守卫（G6 现拦 NULL，防御性保留）。"""
+    mini_db.execute('UPDATE questions SET difficulty=4, tags=\'["旧"]\' WHERE qid=1')
+    mini_db.commit()
+    monkeypatch.setattr(bl, "label_one", _fake_label(obj={"tags": []}))  # difficulty 默认 3 合规
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    assert bl.merge(mini_db)["ok"]
+    r = mini_db.execute("SELECT difficulty, tags FROM questions WHERE qid=1").fetchone()
+    assert r[0] == 3 and json.loads(r[1]) == ["旧"]   # difficulty 正常覆盖；tags 保留旧值
+
+
+def test_todo_predicate_single_source(mini_db, monkeypatch):
+    """bug5：待打标口径单源 TODO_PREDICATE——pick_targets 与 health 同含"未分类"。"""
+    _add_question(mini_db, 9, "题九", topic="未分类")
+    mini_db.commit()
+    assert 9 in {r["qid"] for r in bl.pick_targets(mini_db)}   # 修复前 pick_targets 跳过未分类
+    monkeypatch.setattr(bl, "chat", lambda *a, **k: {"text": "好", "latency_ms": 1})
+    assert bl.health(CFG, mini_db)["todo"] == 4                # 1/2/3 空 + 9 未分类
+
+# ---- 评审修复（2026-11-19）：Important#1/#2/#3/#4 + Minor#2/#7 ----
+
+def test_merge_drop_orphans_spares_disagree_rows(mini_db):
+    """Important#1：--drop-orphans 不得静默删分歧行——disagree 孤儿行保留待人工终审。"""
+    _add_question(mini_db, 10, "题十")
+    _stage(mini_db, 10, "JVM")                       # 合法行，可 merge
+    mini_db.execute("INSERT OR REPLACE INTO labels_staging "
+                    "(qid, q_norm_hash, topic, qtype, difficulty, tags, provider, model, "
+                    "redacted, latency_ms, tokens, prompt_tokens, completion_tokens, "
+                    "labeled_at, review_state) "
+                    "VALUES (999, 'hash999', 'JVM', '八股', 3, '[]', 'local', 'm', "
+                    "0, 1, 10, 8, 2, 'now', 'disagree')")
+    mini_db.commit()
+    out = bl.merge(mini_db, drop_orphans=True)
+    assert out["ok"] and out["merged"] == 1 and out["n_review_hold"] == 1
+    r = mini_db.execute("SELECT review_state FROM labels_staging WHERE qid=999").fetchone()
+    assert r and r[0] == "disagree"                  # 分歧行未被孤儿清理误删
+
+
+def test_review_list_shows_orphaned_disagree_rows(mini_db):
+    """Important#1b：review_list 改 LEFT JOIN——题干已失效的分歧行仍可见（可 drop 终审）。"""
+    mini_db.execute("INSERT OR REPLACE INTO labels_staging "
+                    "(qid, q_norm_hash, topic, qtype, difficulty, tags, provider, model, "
+                    "redacted, latency_ms, tokens, prompt_tokens, completion_tokens, "
+                    "labeled_at, review_state) "
+                    "VALUES (999, 'hash999', 'JVM', '八股', 3, '[]', 'local', 'm', "
+                    "0, 1, 10, 8, 2, 'now', 'disagree')")
+    mini_db.commit()
+    rows = bl.review_list(mini_db)
+    assert len(rows) == 1 and rows[0]["qid"] == 999
+    assert "(题干已失效)" in (rows[0]["q_text"] or "")
+
+
+def test_review_list_prints_suggestion(mini_db, monkeypatch, capsys):
+    """Important#3：终审清单打印建议（review_note 摘要）——人工有判断依据。"""
+    monkeypatch.setattr(bl, "resolve_config", lambda: CFG)   # main() 走 main 的配置解析
+    _stage(mini_db, 1, "JVM")
+    mini_db.execute("UPDATE labels_staging SET review_state='disagree', review_note=? "
+                    "WHERE qid=1",
+                    (json.dumps({"suggestion": {"topic": "Redis"}, "note": "主题判错"},
+                                ensure_ascii=False),))
+    mini_db.commit()
+    rc = bl.main(["--review-list", "--db", str(config.DB_PATH)])
+    outp = capsys.readouterr().out
+    assert rc == 0 and "建议" in outp and "主题判错" in outp
+
+
+def test_review_targets_gold_mismatch_rows_selected(mini_db, monkeypatch):
+    """Important#2：金标弱区改按行判定——金标判错的行必进复核。
+
+    旧实现按预测主题聚合（HAVING<0.8），错行混进高准确率预测组时漏检
+    （如 Redis 组 4/5=0.8，5 号错行不进复核）；新实现按 q_norm_hash 对照。
+    """
+    monkeypatch.setattr(bl, "topic_vocab", lambda: ("JVM", "Redis", "其他"))
+    for qid in range(5, 10):
+        _add_question(mini_db, qid, f"题{qid}")
+        _stage(mini_db, qid, "Redis")
+    gold = {"hash5": "JVM", "hash6": "Redis", "hash7": "Redis",
+            "hash8": "Redis", "hash9": "Redis"}      # Redis 组 4/5=0.8：旧口径漏检
+    for h, t in gold.items():
+        mini_db.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                        "VALUES (?,?,?,'now')", (h, "题", t))
+    mini_db.commit()
+    qids = {r["qid"] for r in bl.review_targets(mini_db)}
+    assert 5 in qids                                 # 金标判错必进复核
+    assert not ({6, 7, 8, 9} & qids)                 # 金标认可且在词表内不重选
+
+
+def test_golden_sample_refuses_overwrite_of_pending_todo(mini_db):
+    """Important#4：已有未回灌 golden_todo.json → 拒绝重抽（防覆盖人工已填内容）。"""
+    _stage(mini_db, 1, "JVM")
+    p = config.BUILD_DIR / "golden_todo.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"sampled": 1, "items": [
+        {"q_norm_hash": "hash1", "topic_gold": "已填"}]}, ensure_ascii=False),
+        encoding="utf-8")
+    out = bl.golden_sample(mini_db, 3)
+    assert not out["ok"] and "已存在" in out["note"]
+    assert "已填" in p.read_text(encoding="utf-8")   # 原文件未被覆盖
+    p.unlink()                                       # 清掉后可正常重抽
+    out2 = bl.golden_sample(mini_db, 1)
+    assert out2["sampled"] == 1
+
+
+def test_golden_load_archives_todo_file(mini_db, tmp_path):
+    """Important#4：--golden-load 成功后 todo 文件改名留档（loaded-<ts>）→ 可自由重抽。"""
+    _stage(mini_db, 1, "JVM")
+    todo = {"items": [{"q_norm_hash": "hash1", "topic_gold": "JVM"}]}
+    p = tmp_path / "golden_todo.json"
+    p.write_text(json.dumps(todo, ensure_ascii=False), encoding="utf-8")
+    assert bl.golden_load(mini_db, p)["ok"]
+    assert not p.exists()
+    archived = list(tmp_path.glob("golden_todo.loaded-*.json"))
+    assert len(archived) == 1
+
+
+def test_golden_load_rejects_missing_or_malformed_file(mini_db, tmp_path):
+    """Minor#2：文件缺失/JSON 坏/顶层非对象 → 优雅拒绝返回 {"ok": False}，不裸抛。"""
+    out = bl.golden_load(mini_db, tmp_path / "nope.json")
+    assert not out["ok"] and out["errors"]
+    bad = tmp_path / "bad.json"
+    bad.write_text("{oops", encoding="utf-8")
+    out2 = bl.golden_load(mini_db, bad)
+    assert not out2["ok"] and out2["errors"]
+    lst = tmp_path / "list.json"
+    lst.write_text("[1,2]", encoding="utf-8")
+    out3 = bl.golden_load(mini_db, lst)
+    assert not out3["ok"] and out3["errors"]
