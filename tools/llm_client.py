@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -212,7 +213,7 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
             sys_prompt = system + "\n只输出严格 JSON，不要任何其他文字、围栏或解释。"
         # Qwen3 默认开思考链（吃光 max_tokens 且污染 JSON）：本地（无 response_format
         # 支持）追加 /no_think 关闭——docs/12 冒烟同款坑
-        u_text = user if cfg["json_mode"] else user + "\n/no_think"
+        u_text = user if cfg.get("json_mode") else user + "\n/no_think"
         payload = {
             "model": cfg["model"],
             "messages": [{"role": "system", "content": sys_prompt},
@@ -221,11 +222,12 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
             "max_tokens": max_tokens,
             "stream": False,
         }
-        if json_mode and cfg["json_mode"]:
+        if json_mode and cfg.get("json_mode"):
             payload["response_format"] = {"type": "json_object"}
         # R4：num_ctx 设置时透传（Ollama 上下文窗口）；keep_alive 是服务端部署项
         # （OLLAMA_KEEP_ALIVE），客户端不实现——docs/13:76
-        if cfg.get("num_ctx"):
+        # options 是 Ollama 原生字段，OpenAI 兼容端点遇未知键可能直接 400 → 只对 local 透传
+        if cfg.get("num_ctx") and cfg.get("provider", "local") == "local":
             payload["options"] = {"num_ctx": cfg["num_ctx"]}
         t0 = time.perf_counter()
         st, resp = _post(cfg, payload)
@@ -244,7 +246,8 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
         last_err = f"status={st} {str(resp.get('error') or resp)[:160]}"
         if st and st not in (429, 500, 502, 503, 504) and st != 0:
             break               # 4xx（鉴权/参数）重试无意义，快速失败
-        time.sleep(sleep * (2 ** (attempt - 1)))
+        if attempt < retries:   # 末次失败不再空等（随后就 raise）
+            time.sleep(sleep * (2 ** (attempt - 1)) + random.uniform(0, sleep / 2))
     raise RuntimeError(f"LLM 调用重试 {retries} 次耗尽: {last_err}")
 
 

@@ -19,7 +19,6 @@ import argparse
 import csv
 import json
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -55,20 +54,35 @@ def gray(conn) -> dict:
                 "SELECT qid, doc_hash, q_text, qtype FROM questions WHERE conf='low' LIMIT 10").fetchall()]}}
 
 
+def _like_any(key: str) -> str:
+    """关键字 → LIKE 模式：% _ \\ 按字面转义（文件名里的 '_' 很常见，不能当通配符）。"""
+    k = key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{k}%"
+
+
 def resolve(conn, key: str, status: str, note: str) -> dict:
     if status not in RESOLVABLE:
         return {"ok": False, "err": f"status 只允许 {sorted(RESOLVABLE)}"}
+    pat = _like_any(key)
     rows = conn.execute(
-        "SELECT doc_hash, file_name, status FROM source_documents "
-        "WHERE src_path LIKE ? OR file_name LIKE ?", (f"%{key}%", f"%{key}%")).fetchall()
+        "SELECT doc_hash, file_name, status, note FROM source_documents "
+        "WHERE src_path LIKE ? ESCAPE '\\' OR file_name LIKE ? ESCAPE '\\'",
+        (pat, pat)).fetchall()
     if not rows:
         return {"ok": False, "err": f"未找到匹配件: {key}"}
+    if len(rows) > 1:
+        exact = [r for r in rows if r["file_name"] == key]
+        if len(exact) == 1:
+            rows = exact            # 全名精确命中优先，避免同名前缀件挡路
     if len(rows) > 1:
         return {"ok": False, "err": f"匹配到 {len(rows)} 件，请用更精确关键字",
                 "candidates": [r["file_name"] for r in rows]}
     row = rows[0]
     stamp = datetime.now().strftime("%Y-%m-%d")
-    new_note = f"[review_cli {stamp}] {status}: {note}".strip()
+    entry = f"[review_cli {stamp}] {status}: {note}".rstrip()
+    old_note = (row["note"] or "").strip()
+    # 追加而非覆盖：converted_to / replaced_by / needs_convert 等留痕要留给 G5 与人工
+    new_note = f"{old_note} | {entry}" if old_note else entry
     conn.execute("UPDATE source_documents SET status=?, note=? WHERE doc_hash=?",
                  (status, new_note, row["doc_hash"]))
     conn.commit()

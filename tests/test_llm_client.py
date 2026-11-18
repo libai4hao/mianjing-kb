@@ -227,6 +227,35 @@ def test_num_ctx_invalid_raises_config_error():
             resolve_config(env={"LLM_NUM_CTX": bad})
 
 
+def test_num_ctx_only_passed_for_local(monkeypatch):
+    """options 是 Ollama 原生字段：online 端点带上去可能直接 400 → 只对 local 透传。"""
+    import llm_client as lc
+    seen = []
+
+    def fake(cfg, payload):
+        seen.append(payload)
+        return 200, {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(lc, "_post", fake)
+    online = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
+    lc.chat({**online, "num_ctx": 8192}, "s", "u", retries=1)
+    assert "options" not in seen[-1]
+    local = resolve_config(env={})
+    lc.chat({**local, "num_ctx": 8192}, "s", "u", retries=1)
+    assert seen[-1]["options"] == {"num_ctx": 8192}
+
+
+def test_no_sleep_after_final_attempt(monkeypatch):
+    """末次失败后不再空等退避：retries=2 只该睡 1 次。"""
+    import llm_client as lc
+    monkeypatch.setattr(lc, "_post", lambda cfg, payload: (0, {"error": "boom"}))
+    sleeps: list[float] = []
+    monkeypatch.setattr(lc.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(RuntimeError, match="boom"):
+        lc.chat(resolve_config(env={}), "s", "u", retries=2, sleep=1.0)
+    assert len(sleeps) == 1
+
+
 def test_chat_payload_num_ctx_passthrough(monkeypatch):
     """num_ctx 设置时 payload 带 options.num_ctx；None 时不带 options 键。"""
     import llm_client as lc

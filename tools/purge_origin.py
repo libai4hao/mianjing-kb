@@ -3,10 +3,14 @@
 
 判据（缺一不删）：
   ① 该文件 sha256 前 16 位在 `source_documents` 里有记录
-  ② 记录状态是**已入库**（`classified`，或 `superseded` 但有 .docx 接替）
+  ② 记录状态是**已入库**（`classified` 或 `superseded`；superseded 只认状态，
+     不校验 note 里的接替件——接替件缺失会记进 `superseded_no_replacement` 计数并照常列出）
   ③ 记录自己在磁盘上的那份（`src_path`）**真实存在**，且落在语料根内
   ④ 待删文件所在目录在 `--roots` 白名单内
 全部通过才删，并把 (源、hash、保留副本) 写进 `build/origin_deleted.csv`。
+
+注意：③ 才是真正的兜底——删的永远是"另有保留副本"的重复件；② 的 superseded 免检接替件
+是有意为之（转换后的 .docx 可能已被 reconvert 改名），只统计不拦截。
 
 用法：
     python tools/purge_origin.py --roots "<RESOURCE_ROOT>\\就业资料" "<DOC_ROOT>\\待分类"
@@ -46,6 +50,7 @@ def main(argv=None) -> int:
 
     conn = db.connect(args.db, create=False)
     plan, kept = [], []
+    no_repl = 0
     for root in roots:
         for dirpath, _dirnames, filenames in os.walk(root):
             for fn in filenames:
@@ -56,7 +61,8 @@ def main(argv=None) -> int:
                     kept.append((str(p), f"读失败:{type(ex).__name__}"))
                     continue
                 rows = conn.execute(
-                    "SELECT doc_hash, status, src_path, file_name FROM source_documents WHERE doc_hash=?",
+                    "SELECT doc_hash, status, src_path, file_name, note FROM source_documents "
+                    "WHERE doc_hash=?",
                     (h,),
                 ).fetchall()
                 if not rows:
@@ -81,6 +87,10 @@ def main(argv=None) -> int:
                     kept.append((str(p), "保留副本不在语料根内或不存在"))
                     continue
                 plan.append((p, h, keep, p.stat().st_size))
+                # 免检项：superseded 但 note 里没有接替去向（转换/退役口径没写清）→ 只统计提示
+                if any(r["status"] == "superseded" and "converted_to:" not in (r["note"] or "")
+                       for r in ok_rows):
+                    no_repl += 1
 
     print(json.dumps({
         "roots": [str(r) for r in roots],
@@ -88,6 +98,7 @@ def main(argv=None) -> int:
         "planned_bytes": sum(x[3] for x in plan),
         "kept": len(kept),
         "kept_reasons": {rr: sum(1 for _p, r2 in kept if r2 == rr) for _p, rr in kept},
+        "superseded_no_replacement": no_repl,
         "dry_run": not args.apply,
     }, ensure_ascii=False, indent=2))
     for p, _h, keep, _s in plan[:6]:

@@ -247,8 +247,9 @@ def main(argv=None) -> int:
                             else f"{action}_from:{rel}")
                     write_conn.execute(
                         "UPDATE source_documents SET dir_path=?, parent_dir=?, file_name=?, src_path=?, "
-                        "last_seen_at=?, note=? WHERE doc_hash=?",
-                        (dir_of(rel), parent_of(rel), p.name, str(p), now, note, doc_hash),
+                        "last_seen_at=?, note=CASE WHEN note IS NULL OR note='' THEN ? "
+                        "  ELSE ? || ' | ' || note END WHERE doc_hash=?",
+                        (dir_of(rel), parent_of(rel), p.name, str(p), now, note, note, doc_hash),
                     )
                     # F7 补遗（评审 Important#1，2026-11-19）：行被（重）指到新路径时，
                     # 该路径上不同 hash 的占用行同样要退役——移动/复制覆盖与原地改

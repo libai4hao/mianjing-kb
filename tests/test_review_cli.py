@@ -55,6 +55,33 @@ def test_gray_counts(tmp_env):
     assert g["lowconf"]["count"] == 1
 
 
+def test_resolve_escapes_like_wildcards(tmp_env):
+    """文件名里的 '_' 不能当 LIKE 通配符：A_B.pdf 不能连带命中 AXB.pdf。"""
+    corpus, conn = tmp_env
+    for h, name in (("aaa0000000000001", "A_B.pdf"), ("bbb0000000000002", "AXB.pdf")):
+        conn.execute(
+            "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+            "dir_path, status, batch_id, first_seen_at, last_seen_at) VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?)",
+            (h, h + "0" * 48, name, ".pdf", 1, f"c/{name}", "c", "classified", "t", "now", "now"))
+    conn.commit()
+    out = review_cli.resolve(conn, "A_B", "superseded", "退役")
+    assert out["ok"] is True and out["file_name"] == "A_B.pdf"
+
+
+def test_resolve_appends_note_instead_of_overwriting(tmp_env):
+    """converted_to / replaced_by / needs_convert 等留痕必须保留（G5 与人工都要看）。"""
+    corpus, conn = tmp_env
+    conn.execute("UPDATE source_documents SET note='needs_convert' "
+                 "WHERE file_name='Leetcode-Go.pdf'")
+    conn.commit()
+    review_cli.resolve(conn, "Leetcode-Go", "superseded", "测试退役")
+    note = conn.execute(
+        "SELECT note FROM source_documents WHERE file_name='Leetcode-Go.pdf'").fetchone()["note"]
+    assert note.startswith("needs_convert |")
+    assert "[review_cli" in note and "测试退役" in note
+
+
 def test_resolve_updates_status(tmp_env):
     corpus, conn = tmp_env
     out = review_cli.resolve(conn, "Leetcode-Go", "superseded", "测试退役")

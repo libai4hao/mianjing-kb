@@ -49,7 +49,9 @@ def build_select_sql(status: str, redo: bool, limit: int) -> tuple[str, list]:
     返回 (sql, params)。--redo 走固定 NOT IN 子句、忽略 status；limit 强转非负整数。
     """
     if redo:
-        where = "status NOT IN ('quarantined','absent','superseded')"
+        # 'processed' 不进重判范围：它表示"已入库有产物"，重判会被打回 classified、
+        # 把入库状态抹掉（2026-11-19 审核修复）。确需重判单件走 --status processed。
+        where = "status NOT IN ('quarantined','absent','superseded','processed')"
         params: list = []
     else:
         if status not in VALID_STATUSES:
