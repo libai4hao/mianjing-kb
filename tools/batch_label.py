@@ -49,7 +49,7 @@ def pick_targets(conn, limit: int = 0) -> list[dict]:
     优先级：文档级主题弱（空/综合/未分类）的题先打——价值最高（docs/15 §3.5 的
     "先做 4,011 综合级"精神）；文档级主题强的靠后（题级打标是锦上添花）。
     """
-    sql = ("SELECT q.qid, q.q_text, q.a_text FROM questions q "
+    sql = ("SELECT q.qid, q.q_text, q.a_text, q.q_norm_hash FROM questions q "
            "LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash "
            "WHERE q.topic IS NULL OR q.topic='' "
            "ORDER BY (sd.topic IS NULL OR sd.topic='' OR sd.topic='综合' OR sd.topic='未分类') DESC, "
@@ -67,7 +67,8 @@ def label_one(cfg: dict, q: dict) -> dict:
     obj = r.get("obj")
     if obj is None:
         raise RuntimeError("JSON 解析失败")
-    return {"qid": q["qid"], "topic": str(obj.get("topic") or "").strip()[:40],
+    return {"qid": q["qid"], "q_norm_hash": q.get("q_norm_hash"),
+            "topic": str(obj.get("topic") or "").strip()[:40],
             "qtype": obj.get("qtype"), "difficulty": obj.get("difficulty"),
             "tags": json.dumps(obj.get("tags") or [], ensure_ascii=False),
             "provider": cfg["provider"], "model": cfg["model"],
@@ -78,10 +79,12 @@ def label_one(cfg: dict, q: dict) -> dict:
 def write_staging(conn, rows: list[dict]) -> int:
     conn.executemany(
         "INSERT OR REPLACE INTO labels_staging "
-        "(qid, topic, qtype, difficulty, tags, provider, model, redacted, latency_ms, tokens, labeled_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        [[r[k] for k in ("qid", "topic", "qtype", "difficulty", "tags", "provider", "model",
-                         "redacted", "latency_ms", "tokens", "labeled_at")] for r in rows])
+        "(qid, q_norm_hash, topic, qtype, difficulty, tags, provider, model, "
+        "redacted, latency_ms, tokens, labeled_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        [[r[k] for k in ("qid", "q_norm_hash", "topic", "qtype", "difficulty", "tags",
+                         "provider", "model", "redacted", "latency_ms", "tokens", "labeled_at")]
+         for r in rows])
     conn.commit()
     return len(rows)
 

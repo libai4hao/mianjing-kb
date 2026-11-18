@@ -21,7 +21,8 @@ def _fake_label(obj=None, fail_qids=()):
     def fake(cfg, q):
         if q["qid"] in fail_qids:
             raise RuntimeError("LLM 调用重试 3 次耗尽")
-        return {"qid": q["qid"], "topic": (obj or {}).get("topic", "Java基础"),
+        return {"qid": q["qid"], "q_norm_hash": q.get("q_norm_hash"),
+                "topic": (obj or {}).get("topic", "Java基础"),
                 "qtype": (obj or {}).get("qtype", "八股"),
                 "difficulty": (obj or {}).get("difficulty", 3),
                 "tags": json.dumps((obj or {}).get("tags", ["HashMap"]), ensure_ascii=False),
@@ -122,6 +123,16 @@ def test_merge_blocked_on_bad_schema(mini_db):
     out = bl.merge(mini_db)
     assert not out["ok"] and out["gate"] == "FAIL"
     assert mini_db.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0] == 1
+
+
+def test_staging_carries_q_norm_hash(mini_db, monkeypatch, tmp_path):
+    """F1：staging 行带 q_norm_hash 且与 questions 一致（merge 校验与事实落档的键）。"""
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    rows = mini_db.execute(
+        "SELECT s.q_norm_hash AS sh, q.q_norm_hash AS qh FROM labels_staging s "
+        "JOIN questions q ON q.qid=s.qid").fetchall()
+    assert rows and all(r["sh"] == r["qh"] and r["sh"] for r in rows)
 
 
 def test_redact_integration_in_label_one(monkeypatch):

@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """extract（P1-1 题块落表）回归测试：临时语料 + 临时库，端到端。"""
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -20,10 +19,8 @@ def tmp_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
     monkeypatch.setattr(config, "QUESTION_MD_DIR", corpus / "20-题库MD")
     (corpus / "20-题库MD").mkdir()
-    conn = sqlite3.connect(str(build / "kb.sqlite"))
-    conn.row_factory = sqlite3.Row
-    conn.executescript((config.META_DIR / "schema" / "001_init.sql").read_text(encoding="utf-8"))
-    conn.executescript((config.META_DIR / "schema" / "004_questions.sql").read_text(encoding="utf-8"))
+    from tools.kb import db as kbdb
+    conn = kbdb.connect(build / "kb.sqlite")   # 完整迁移（001-007，与生产 connect 同路径）
     yield corpus, conn
     conn.close()
 
@@ -90,6 +87,44 @@ def test_extract_end_to_end(tmp_env):
     extract.store(conn, h1, rows1)
     conn.commit()
     assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 4
+
+
+def test_store_reattaches_label_facts(tmp_env):
+    """B1 修复：重切（删了重插，qid 变）后按 q_norm_hash 重挂 label_facts 里的打标。"""
+    corpus, conn = tmp_env
+    h1, _ = _seed_doc(conn, corpus, "a.md", MD_A)
+    rows1 = extract.extract_doc(h1, corpus / "a.md")
+    n = extract.store(conn, h1, rows1)
+    conn.commit()
+    assert n == 0                                       # 首次落表无事实可挂
+    q = conn.execute("SELECT qid, q_norm_hash FROM questions WHERE doc_hash=?", (h1,)).fetchone()
+    conn.execute("INSERT INTO label_facts (q_norm_hash, topic, qtype, difficulty, tags, merged_at) "
+                 "VALUES (?,?,?,?,?,?)", (q["q_norm_hash"], "Redis", "八股", 3, '["缓存"]', "now"))
+    conn.commit()
+    old_qid = q["qid"]
+    # 模拟全量重切：同 doc 再 store（DELETE+INSERT，qid 换新，q_norm_hash 不变）
+    n2 = extract.store(conn, h1, rows1)
+    conn.commit()
+    assert n2 == 1                                      # 重挂 1 题
+    row = conn.execute("SELECT qid, topic, qtype, difficulty, tags FROM questions "
+                       "WHERE doc_hash=?", (h1,)).fetchone()
+    assert row["qid"] != old_qid                        # qid 确实漂移（B1 根因）
+    assert row["topic"] == "Redis" and row["qtype"] == "八股"
+    assert row["difficulty"] == 3 and row["tags"] == '["缓存"]'
+
+
+def test_main_reports_label_facts_lost(tmp_env, capsys):
+    """main 输出 label_reattached / label_facts_lost：重切后真正丢失的打标要可见。"""
+    corpus, conn = tmp_env
+    _seed_doc(conn, corpus, "a.md", MD_A)
+    conn.execute("INSERT INTO label_facts (q_norm_hash, topic, merged_at) "
+                 "VALUES ('deadbeefdeadbeef', 'X', 'now')")
+    conn.commit()
+    rc = extract.main(["--db", str(config.DB_PATH)])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["label_reattached"] == 0
+    assert out["label_facts_lost"] == 1                 # facts 里的 hash 已无对应题
 
 
 def test_extract_empty_doc(tmp_env):
