@@ -288,6 +288,31 @@ def _ensure_label_dimensions(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE labels_staging ADD COLUMN tag_norm_hits INTEGER")
 
 
+def _ensure_label_taxonomy(conn: sqlite3.Connection) -> None:
+    """013（T24）：标签配置表 label_taxonomy + 从 meta/tag_vocab.yaml 灌一二级预设。
+
+    配置表是运行时事实源（增删/停用走 `python -m mianjing_kb.taxonomy`）；
+    seed 只灌空表，已存在的 (level1, level2) 不覆盖，避免升级时冲掉人工调整。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS label_taxonomy (
+          id       INTEGER PRIMARY KEY AUTOINCREMENT,
+          level1   TEXT NOT NULL,
+          level2   TEXT NOT NULL,
+          synonyms TEXT NOT NULL DEFAULT '[]',
+          enabled  INTEGER NOT NULL DEFAULT 1,
+          sort     INTEGER NOT NULL DEFAULT 0,
+          UNIQUE (level1, level2)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tax_l1 ON label_taxonomy(level1, sort)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tax_l2 ON label_taxonomy(level2)")
+    from . import taxonomy
+    taxonomy.seed(conn)
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     """001：基础表（source_documents / batches 等）。脚本本身 IF NOT EXISTS，可直接重放。"""
     exec_script(conn, SCHEMA_FILE.read_text(encoding="utf-8"))
@@ -306,6 +331,7 @@ MIGRATIONS = [
     ("010_batches_state", _ensure_batch_state),
     ("011_document_events", _ensure_document_events),
     ("012_label_dimensions", _ensure_label_dimensions),
+    ("013_label_taxonomy", _ensure_label_taxonomy),
 ]
 
 
@@ -369,6 +395,7 @@ REQUIRED = {
     "golden_labels": ("q_norm_hash",),
     "batches": ("batch_id", "state", "updated_at"),
     "document_events": ("doc_hash", "kind", "payload", "at"),
+    "label_taxonomy": ("level1", "level2", "synonyms", "enabled", "sort"),
 }
 
 

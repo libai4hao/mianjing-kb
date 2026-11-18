@@ -46,6 +46,7 @@ COMMANDS = {
     "search": "search",
     "llm-smoke": "llm_smoke",
     "label": "batch_label",
+    "taxonomy": "kb.taxonomy",
     "probe": "probe_provider",
     "refresh": "refresh",
     "verify": "verify_ledger",

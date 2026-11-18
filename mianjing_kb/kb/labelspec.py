@@ -118,11 +118,12 @@ def recommended_tags() -> tuple[str, ...]:
         return ()
 
 
-def normalize_tags(raw, *, max_items: int | None = None, max_len: int | None = None) -> tuple[list[str], int]:
+def normalize_tags(raw, *, max_items: int | None = None, max_len: int | None = None,
+                   synonyms: dict[str, str] | None = None) -> tuple[list[str], int]:
     """标签归一：去空白/同义词映射/去重/截断。返回 (规范标签列表, 命中同义词的个数)。
 
-    归一目标是"合并同义写法"，不是"只允许词表内标签"——开放提取的新词保留原样，
-    等高频出现后再人工沉淀进 tag_vocab.yaml。
+    `synonyms` 可由调用方传入（batch_label 用数据库配置表的 aliases）；
+    不传则回退 `meta/tag_synonyms.yaml`。归一目标是"合并同义写法"，不是"只允许词表内标签"。
     """
     cap_items, cap_len = tag_limits()
     cap_items = max_items or cap_items
@@ -131,7 +132,7 @@ def normalize_tags(raw, *, max_items: int | None = None, max_len: int | None = N
         raw = [raw]
     if not isinstance(raw, (list, tuple)):
         return [], 0
-    syn = tag_synonyms()
+    syn = tag_synonyms() if synonyms is None else synonyms
     out: list[str] = []
     hits = 0
     seen: set[str] = set()
@@ -154,7 +155,8 @@ def normalize_tags(raw, *, max_items: int | None = None, max_len: int | None = N
     return out, hits
 
 
-def validate_label(obj: dict, vocab: tuple[str, ...] = (), q_text: str = "") -> dict:
+def validate_label(obj: dict, vocab: tuple[str, ...] = (), q_text: str = "", *,
+                   synonyms: dict[str, str] | None = None) -> dict:
     """LLM 输出 → 规范化字段 + issues + review_state。
 
     非法枚举（qtype / difficulty）直接抛 ValueError，让调用方落 failed 队列重试；
@@ -210,7 +212,7 @@ def validate_label(obj: dict, vocab: tuple[str, ...] = (), q_text: str = "") -> 
         canonical = (q_text or "").strip().replace("\n", " ")[: canonical_max_len()]
     out["canonical_q"] = canonical
 
-    tags, hits = normalize_tags(obj.get("tags") or [])
+    tags, hits = normalize_tags(obj.get("tags") or [], synonyms=synonyms)
     out["tags"] = tags
     out["tag_norm_hits"] = hits
     return out

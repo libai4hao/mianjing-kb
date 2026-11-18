@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import inspect
 import json
 import os
 import random
@@ -34,7 +35,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, labelspec, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, labelspec, taxonomy, wlock  # noqa: E402
 from mianjing_kb.kb.vocab import OTHER_TOPIC, topic_vocab  # noqa: E402
 from mianjing_kb.llm_client import ConfigError, chat, chat_json, redact, resolve_config  # noqa: E402
 
@@ -42,16 +43,18 @@ NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 QTYPES = labelspec.qtypes()          # T21：单一来源（meta/label_schema.yaml）
 
 
-def build_system_prompt(vocab: tuple[str, ...] = ()) -> str:
-    """按 label_schema.yaml 渲染标注 prompt（字段/枚举/上限都不再手写两份）。
+def build_system_prompt(vocab: tuple[str, ...] = (), tax: dict | None = None) -> str:
+    """按 label_schema.yaml + 标签配置表渲染标注 prompt（字段/枚举/上限都不再手写两份）。
 
     词表非空时锁定 topic 枚举（批次三 R2）；为空时退化为"自由主题"但不改变其它维度。
+    `tax` 来自 `kb.taxonomy.load(conn)`（配置表），不传则回退 YAML 预设。
     """
+    tax = tax or taxonomy.load()
     diff_lo, diff_hi = labelspec.difficulty_range()
     tag_max, tag_len = labelspec.tag_limits()
     pos = "、".join(labelspec.positions())
     quality = "、".join(labelspec.quality_flags())
-    rec = "、".join(labelspec.recommended_tags()[:24])
+    rec = taxonomy.prompt_lines(tax)
     topic_rule = (f"必须从词表中选恰好一个：{'、'.join(vocab)}；拿不准选其他"
                   if vocab else "2-8 字主题，如 Java基础/MySQL/Redis")
     return (
@@ -62,7 +65,7 @@ def build_system_prompt(vocab: tuple[str, ...] = ()) -> str:
         f'"position": <岗位，多选，从 {pos} 中选 0~2 个>, '
         f'"quality": <数据质量标记，多选，从 {quality} 中选 0~3 个；没问题给 []>, '
         f'"canonical_q": <标准化问句，≤{labelspec.canonical_max_len()} 字，去口语/去公司名>, '
-        f'"tags": <{tag_max} 个以内关键词，每个≤{tag_len} 字，优先二级词表：{rec}>'
+        f'"tags": <{tag_max} 个以内关键词，每个≤{tag_len} 字，优先二级标签：{rec}>'
         "}"
     )
 
@@ -90,7 +93,7 @@ def pick_targets(conn, limit: int = 0) -> list[dict]:
     return [dict(r) for r in conn.execute(sql).fetchall()]
 
 
-def label_one(cfg: dict, q: dict) -> dict:
+def label_one(cfg: dict, q: dict, tax: dict | None = None) -> dict:
     """单题打标：脱敏 → LLM → 校验/归一 → staging 行（失败抛异常，调用方落 failed 队列）。
 
     T21：字段校验交给 `kb.labelspec`（schema 单一来源）——
@@ -98,17 +101,20 @@ def label_one(cfg: dict, q: dict) -> dict:
       - position/quality 越界 → 丢弃非法值并标 pending；
       - tags 走同义词归一（tag_norm_hits 记录合并数）；
       - canonical_q 为空时回退题干前 60 字。
+    T24：`tax` 是标签配置表快照（一级/二级/别名），由 run_batch 一次性加载传入。
     qtype/difficulty 非法直接抛 ValueError（进 failed 队列重试，不污染 staging）。
     """
+    tax = tax or taxonomy.load()
     vocab = topic_vocab()
-    system = build_system_prompt(vocab)
+    system = build_system_prompt(vocab, tax)
     text = f"{q['q_text'][:300]}\n{q['a_text'][:300]}"
     clean, hit = redact(text)
     r = chat_json(cfg, system, f"题目与答案片段：\n{clean}", max_tokens=200)
     obj = r.get("obj")
     if obj is None:
         raise RuntimeError("JSON 解析失败")
-    spec = labelspec.validate_label(obj, vocab, q_text=q.get("q_text") or "")
+    spec = labelspec.validate_label(obj, vocab, q_text=q.get("q_text") or "",
+                                    synonyms=tax["aliases"])
     return {"qid": q["qid"], "q_norm_hash": q.get("q_norm_hash"),
             "topic": spec["topic"],
             "qtype": spec["qtype"], "difficulty": spec["difficulty"],
@@ -124,6 +130,81 @@ def label_one(cfg: dict, q: dict) -> dict:
             "completion_tokens": r.get("completion_tokens"),
             "review_state": spec["review_state"],
             "labeled_at": datetime.now().strftime(NOW_FMT)}
+
+
+def label_one_offline(q: dict, tax: dict | None = None) -> dict:
+    """离线规则打标（T24 测试库填充用）：不调 LLM，产出可复核的 staging 行。
+
+    provider='offline'、model='rules-v1'、review_state='pending'——明确标注"非模型结论"，
+    只用于测试库/冷启动预标，不能直接当生产打标结果 merge 进正式库。
+    """
+    import re
+
+    tax = tax or taxonomy.load()
+    text = f"{q['q_text'] or ''}\n{q['a_text'] or ''}"
+    low = text.lower()
+    q_text = re.sub(r"^\s*(\d+[.、)）]|[-*])\s*", "", (q["q_text"] or "").strip())
+    qtype = "八股"
+    if any(k in text for k in ("手撕", "手写", "实现一个", "写一个", "复杂度", "LeetCode", "算法题")):
+        qtype = "算法"
+    elif any(k in text for k in ("自我介绍", "职业规划", "离职", "优点", "缺点", "为什么选择")):
+        qtype = "HR"
+    elif any(k in text for k in ("项目", "难点", "负责")):
+        qtype = "项目"
+    elif any(k in text for k in ("场景", "如何设计", "怎么办", "线上")):
+        qtype = "场景"
+
+    difficulty = 3
+    if any(k in text for k in ("原理", "底层", "源码", "为什么", "如何实现")):
+        difficulty = 4
+    if any(k in text for k in ("区别", "是什么", "介绍一下", "概念")):
+        difficulty = 2
+
+    positions: list[str] = []
+    if any(k in low for k in ("react", "vue", "前端", "typescript", "浏览器")):
+        positions.append("前端")
+    if any(k in low for k in ("java", "jvm", "spring", "mysql", "redis", "后端", "并发")):
+        positions.append("后端")
+    if any(k in text for k in ("算法", "复杂度", "手撕")):
+        positions.append("算法")
+    positions = positions[:2]
+
+    quality: list[str] = []
+    a_text = q["a_text"] or ""
+    if len(a_text.strip()) < 20:
+        quality.append("残缺")
+    if any(k in text for k in ("公众号", "扫码", "加微信", "广告")):
+        quality.append("广告")
+
+    vocab = topic_vocab()
+    topic = "其他"
+    topic_hints = [
+        ("Java基础", ("java", "jvm", "gc", "spring", "hashmap", "集合")),
+        ("MySQL", ("mysql", "innodb", "索引", "事务")),
+        ("Redis", ("redis", "缓存")),
+        ("并发编程", ("并发", "线程池", "锁", "synchronized", "aqs")),
+        ("计算机网络", ("tcp", "http", "https", "dns", "udp", "网络")),
+        ("操作系统", ("进程", "内存", "死锁", "io", "文件系统")),
+        ("前端", ("react", "vue", "前端", "typescript", "浏览器")),
+    ]
+    for name, keys in topic_hints:
+        if name in vocab and any(k in low for k in keys):
+            topic = name
+            break
+
+    tags = [t for t in tax["tags"] if t and t.lower() in low]
+    if not tags:                                  # 题干没命中任何二级标签时退回主题名/兜底
+        tags = [x for x in (topic,) if x in tax["tags"]] or ["面试题"]
+    tags = tags[: labelspec.tag_limits()[0]]
+    return {"qid": q["qid"], "q_norm_hash": q.get("q_norm_hash"),
+            "topic": topic, "qtype": qtype, "difficulty": difficulty,
+            "position": labelspec.dump_multi(positions),
+            "quality": labelspec.dump_multi(quality),
+            "canonical_q": q_text[: labelspec.canonical_max_len()],
+            "tags": json.dumps(tags, ensure_ascii=False), "tag_norm_hits": 0,
+            "provider": "offline", "model": "rules-v1", "redacted": 0,
+            "latency_ms": 0, "tokens": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            "review_state": "pending", "labeled_at": datetime.now().strftime(NOW_FMT)}
 
 
 def write_staging(conn, rows: list[dict]) -> int:
@@ -197,20 +278,34 @@ def write_failed_csv(failed_path: Path) -> tuple[Path, int]:
 
 
 def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
-              dry_run: bool = False, failed_path: Path | None = None) -> dict:
-    """并发打标 → staging。resume：staging 已有 qid 跳过；budget：估算成本超限即停。"""
+              dry_run: bool = False, failed_path: Path | None = None,
+              label_fn=None) -> dict:
+    """并发打标 → staging。resume：staging 已有 qid 跳过；budget：估算成本超限即停。
+
+    `label_fn` 可替换单题打标实现（离线规则/手动印入的测试用）；缺省走 LLM。
+    标签配置表（taxonomy）在这里一次性加载，避免每题查库。
+    """
     targets = pick_targets(conn, limit)
     staged = {r[0] for r in conn.execute("SELECT qid FROM labels_staging").fetchall()}
     todo = [q for q in targets if q["qid"] not in staged]
     failed_path = failed_path or (Path(config.BUILD_DIR) / "label_failed.jsonl")
     failed_path.parent.mkdir(parents=True, exist_ok=True)
+    tax = taxonomy.load(conn)
+    fn = label_fn or label_one
+    try:
+        want_tax = "tax" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        want_tax = False
+
+    def call_one(cfg, q):
+        return fn(cfg, q, tax) if want_tax else fn(cfg, q)
 
     done, failed, tokens_total, in_total, out_total = [], [], 0, 0, 0
     started = time.perf_counter()
 
     def _worker(q):
         try:
-            return q, label_one(cfg, q), None
+            return q, call_one(cfg, q), None
         except Exception as ex:  # noqa: BLE001 —— 单题失败不阻塞整批（docs/15 §3.4）
             return q, None, ex
 
@@ -261,6 +356,113 @@ def sample_staging(conn, n: int) -> list[dict]:
         "FROM labels_staging s JOIN questions q ON q.qid=s.qid").fetchall()
     k = min(n, total)
     return [dict(r) for r in random.Random(42).sample(list(rows), k)]
+
+
+MANUAL_COLUMNS = ["qid", "doc_hash", "q_text", "a_text", "topic", "qtype", "difficulty",
+                  "position", "quality", "canonical_q", "tags", "note"]
+
+
+def manual_template(conn, n: int, path: Path, seed: int = 42) -> dict:
+    """生成手动打标模板（CSV，UTF-8 BOM，Excel 直接打开）：抽样 n 题 + 空标签列。
+
+    topic/qtype/difficulty 预填**当前库里的值**（通常为空），人工在此列上改；
+    position/quality/tags 多个值用 `|` 分隔。
+    """
+    rows = [dict(r) for r in conn.execute(
+        "SELECT qid, doc_hash, q_text, a_text, topic, qtype, difficulty "
+        "FROM questions ORDER BY qid").fetchall()]
+    # 只抽"能读"的题进模板：乱码/过短/超长的行人工也没法标（生产库实测有乱码题）
+    try:
+        from mianjing_kb.kb import textmetrics as tm
+        rows = [r for r in rows
+                if 8 <= len(r["q_text"] or "") <= 200
+                and tm.garbled_ratio(r["q_text"] or "") < 0.01
+                and (tm.cjk_ratio(r["q_text"] or "") >= 0.3 or (r["q_text"] or "").isascii())]
+    except Exception:  # noqa: BLE001 —— 度量不可用时不筛（模板仍可生成）
+        pass
+    k = min(n, len(rows))
+    picked = random.Random(seed).sample(rows, k)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=MANUAL_COLUMNS)
+        w.writeheader()
+        for r in picked:
+            w.writerow({"qid": r["qid"], "doc_hash": r["doc_hash"] or "",
+                        "q_text": (r["q_text"] or "")[:300],
+                        "a_text": (r["a_text"] or "")[:300],
+                        "topic": r["topic"] or "", "qtype": r["qtype"] or "",
+                        "difficulty": r["difficulty"] if r["difficulty"] is not None else "",
+                        "position": "", "quality": "", "canonical_q": "", "tags": "", "note": ""})
+    return {"path": str(path), "rows": k, "columns": MANUAL_COLUMNS}
+
+
+def _split_multi(raw: str) -> list[str]:
+    return [x.strip() for x in str(raw or "").replace("；", "|").replace(";", "|").split("|")
+            if x.strip()]
+
+
+def manual_import(conn, path: Path, annotator: str = "human", dry_run: bool = False) -> dict:
+    """回灌人工填好的 CSV 模板 → labels_staging（逐行校验，坏行单独拒绝并报行号）。
+
+    必填 qid/topic/qtype/difficulty；position/quality/tags 用 `|` 分隔；
+    qid 必须存在于 questions（防跨库/跨 extract 残留），canonical_q 空则回退题干。
+    """
+    p = Path(path)
+    if not p.exists():
+        return {"ok": False, "errors": [f"文件不存在: {p}"]}
+    tax = taxonomy.load(conn)
+    vocab = topic_vocab()
+    ok_rows, errs = [], []
+    with p.open("r", encoding="utf-8-sig", newline="") as fh:
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames or "qid" not in reader.fieldnames:
+            return {"ok": False, "errors": ["模板缺 qid 列（先用 --manual-template 生成）"]}
+        for i, row in enumerate(reader, start=2):      # 2 = Excel 行号（1 是表头）
+            try:
+                qid = int(str(row.get("qid") or "").strip())
+            except ValueError:
+                errs.append(f"第{i}行: qid 非法 {row.get('qid')!r}")
+                continue
+            q = conn.execute("SELECT qid, q_norm_hash, q_text, a_text FROM questions WHERE qid=?",
+                             (qid,)).fetchone()
+            if q is None:
+                errs.append(f"第{i}行: qid={qid} 在 questions 不存在")
+                continue
+            obj = {
+                "topic": (row.get("topic") or "").strip(),
+                "qtype": (row.get("qtype") or "").strip(),
+                "difficulty": (row.get("difficulty") or "").strip(),
+                "position": _split_multi(row.get("position")),
+                "quality": _split_multi(row.get("quality")),
+                "canonical_q": (row.get("canonical_q") or "").strip(),
+                "tags": _split_multi(row.get("tags")),
+            }
+            if not obj["topic"]:
+                errs.append(f"第{i}行: topic 为空")
+                continue
+            try:
+                spec = labelspec.validate_label(obj, vocab, q_text=q["q_text"] or "",
+                                                synonyms=tax["aliases"])
+            except ValueError as ex:
+                errs.append(f"第{i}行: {ex}")
+                continue
+            ok_rows.append({
+                "qid": qid, "q_norm_hash": q["q_norm_hash"],
+                "topic": spec["topic"], "qtype": spec["qtype"], "difficulty": spec["difficulty"],
+                "position": labelspec.dump_multi(spec["position"]),
+                "quality": labelspec.dump_multi(spec["quality"]),
+                "canonical_q": spec["canonical_q"],
+                "tags": json.dumps(spec["tags"], ensure_ascii=False),
+                "tag_norm_hits": spec["tag_norm_hits"],
+                "provider": "manual", "model": f"human:{annotator}", "redacted": 0,
+                "latency_ms": 0, "tokens": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                "review_state": spec["review_state"],
+                "labeled_at": datetime.now().strftime(NOW_FMT)})
+    if ok_rows and not dry_run:
+        write_staging(conn, ok_rows)
+    return {"ok": True, "imported": len(ok_rows), "rejected": len(errs),
+            "errors": errs[:10], "dry_run": dry_run, "path": str(p)}
 
 
 def golden_sample(conn, n: int) -> dict:
@@ -694,6 +896,15 @@ def main(argv=None) -> int:
     ap.add_argument("--resume", action="store_true",
                     help="兼容旗标：续跑是默认行为（staging 已有 qid 自动跳过），无需显式传")
     ap.add_argument("--db", default=str(config.DB_PATH))
+    # T24：离线规则打标 + 手动模板/回灌（不需要 LLM 配置，先于 resolve_config 处理）
+    ap.add_argument("--offline", action="store_true",
+                    help="离线规则打标（provider=offline，仅测试库/冷启动预标；不花钱）")
+    ap.add_argument("--manual-template", type=int, default=0, metavar="N",
+                    help="抽样 N 题生成手动打标 CSV 模板 → --manual-out（默认 db 同目录 manual_label_template.csv）")
+    ap.add_argument("--manual-out", default="", help="模板输出路径")
+    ap.add_argument("--manual-import", default="", metavar="PATH",
+                    help="回灌人工填好的 CSV 模板 → labels_staging（逐行校验、坏行报行号）")
+    ap.add_argument("--manual-dry-run", action="store_true", help="配合 --manual-import：只校验不写库")
     args = ap.parse_args(argv)
 
     if args.provider:
@@ -701,14 +912,40 @@ def main(argv=None) -> int:
     if args.concurrency:
         os.environ["LLM_CONCURRENCY"] = str(args.concurrency)
 
-    try:
-        cfg = resolve_config()
-    except ConfigError as ex:
-        print(json.dumps({"fatal": str(ex)}, ensure_ascii=False, indent=1))
-        return 2
-
     conn = db.connect(args.db)      # create=True：幂等跑 005 staging / 006 题级 topic 迁移
     try:
+        if args.manual_template:
+            out_path = Path(args.manual_out) if args.manual_out else (
+                Path(args.db).parent / "manual_label_template.csv")
+            print(json.dumps(manual_template(conn, args.manual_template, out_path),
+                             ensure_ascii=False, indent=1))
+            return 0
+        if args.manual_import:
+            out = manual_import(conn, Path(args.manual_import), annotator=args.annotator,
+                                dry_run=args.manual_dry_run)
+            print(json.dumps(out, ensure_ascii=False, indent=1))
+            return 0 if out.get("ok") else 1
+        if args.offline:
+            cfg = {"provider": "offline", "model": "rules-v1", "base": "", "key": "",
+                   "concurrency": 4, "timeout": 1, "json_mode": False, "price": (0.0, 0.0)}
+            tax = taxonomy.load(conn)
+            try:
+                with wlock.write_lock("kb", tool="batch_label",
+                                      build_dir=Path(args.db).parent):
+                    out = run_batch(cfg, conn, limit=args.limit, budget=0.0,
+                                    label_fn=lambda c, q: label_one_offline(q, tax))
+            except wlock.LockHeld as ex:
+                print(json.dumps({"ok": False, "err": str(ex)}, ensure_ascii=False, indent=1))
+                return 2
+            print(json.dumps(out, ensure_ascii=False, indent=1))
+            return 0
+
+        try:
+            cfg = resolve_config()
+        except ConfigError as ex:
+            print(json.dumps({"fatal": str(ex)}, ensure_ascii=False, indent=1))
+            return 2
+
         if args.check:
             print(json.dumps(health(cfg, conn), ensure_ascii=False, indent=1))
             return 0
