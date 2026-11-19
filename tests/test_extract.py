@@ -219,6 +219,57 @@ def test_incremental_skips_unchanged_and_picks_new(tmp_env, capsys):
     assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 4
 
 
+def test_incremental_reextracts_changed_mapped_md_after_mapping_sync(tmp_env, capsys):
+    """映射扫描不能抢先覆盖成功抽取指纹；即使 size/mtime 不变，也要识别 MD 内容变化。"""
+    import hashlib
+    import os
+    from mianjing_kb.kb import products
+
+    corpus, conn = tmp_env
+    source = corpus / "a.pdf"
+    source.write_bytes(b"source-placeholder")
+    doc_hash = "a1b2c3d4e5f60718"
+    conn.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+        "dir_path, status, batch_id, first_seen_at, last_seen_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (doc_hash, hashlib.sha256(b"source-placeholder").hexdigest(), "a.pdf", ".pdf",
+         source.stat().st_size, str(source), "", "classified", "t", "now", "now"))
+    md = config.QUESTION_MD_DIR / "题库" / "a.md"
+    md.parent.mkdir(parents=True)
+    md.write_text(MD_A, encoding="utf-8")
+    conn.commit()
+
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    capsys.readouterr()
+    before = products.get(conn, doc_hash)
+    assert before["text_source"] == "md"
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash=?", (doc_hash,)).fetchone()[0] == 2
+
+    # 保持字节长度与 mtime 不变，验证 md_hash 才是最终兜底指纹。
+    old_stat = md.stat()
+    md.write_text(MD_A.replace("Redis", "Kafka"), encoding="utf-8")
+    assert md.stat().st_size == old_stat.st_size
+    os.utime(md, (old_stat.st_atime, old_stat.st_mtime))
+
+    # 与 extract.main 的映射同步阶段相同：不能把“待处理的新指纹”写成“上次成功指纹”。
+    from mianjing_kb.kb import mdmap
+    mapping = mdmap.build(conn, config.QUESTION_MD_DIR)
+    products.sync_mapping(conn, mapping)
+    conn.commit()
+    after_sync = products.get(conn, doc_hash)
+    assert after_sync["md_hash"] == before["md_hash"]
+    assert after_sync["input_size"] == before["input_size"]
+    assert products.needs_work(conn, doc_hash, md) is True
+
+    assert extract.main(["--db", str(config.DB_PATH), "--incremental"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["docs"] == 1 and out["skipped_unchanged"] == 0
+    questions = conn.execute("SELECT q_text FROM questions WHERE doc_hash=?", (doc_hash,)).fetchall()
+    assert questions and any("Kafka" in r["q_text"] for r in questions)
+    assert products.get(conn, doc_hash)["md_hash"] != before["md_hash"]
+
+
 def test_exclusion_source_rel_suppresses_mapped_md(tmp_env, tmp_path, monkeypatch):
     """源文件 rel 命中排除表就整篇不抽，即使 md 产物本身未被排除。"""
     corpus, conn = tmp_env

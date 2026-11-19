@@ -115,7 +115,20 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
     # ---- doc_contents：20-题库MD 正文（检索原文）——先于 questions 落库 ----
     # 身份口径统一走 `kb/mdmap.py`（P0-1）：md 是"产物"，doc_hash 取源身份；
     # 同一源多份产物时只把主产物当 identity，但**所有** md 都要进 doc_contents（G2 要求磁盘 md 全覆盖）。
-    mapping = mdmap.build(src, md_root)
+    # source_documents 题目会在下方按 INGESTED 状态过滤；doc_pool 用于校验无
+    # source_documents 记录的 md-mirror 身份，以及旧版主映射 MD 的可追溯镜像题。
+    # 这样排除表/退役源防复活规则仍与抽题池一致，不能把所有 LEFT JOIN 未命中的
+    # questions 都当成合法孤儿，否则历史失效题会重新发布。
+    from mianjing_kb.extract import doc_pool
+    eligible_pool, mapping = doc_pool(src, md_root=md_root)
+    eligible_pool_keys = {doc_hash for doc_hash, _path in eligible_pool}
+    eligible_source_hashes = eligible_pool_keys - set(mapping.orphans)
+    # 旧版单身份收敛前可能留有以 md-mirror hash 记账的题：当前有效的映射 MD
+    # 仍可追溯这些历史题；有效孤儿则继续使用自己的 md-mirror 身份。
+    eligible_mirrors = (eligible_pool_keys & set(mapping.orphans)) | {
+        mdmap.mirror_hash(rel) for doc_hash, (rel, _path) in mapping.by_doc.items()
+        if doc_hash in eligible_source_hashes
+    }
     mirror_topic: dict[str, str] = {}
     mirror_cat: dict[str, str] = {}
     n_docs_content = 0
@@ -143,11 +156,14 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
     # ---- questions ----
     # 题级 topic 优先（006 列，batch_label merge 的事实源落点）→ 文档级 → 镜像继承兜底
     # T22：difficulty/tags/position/quality 只存在于 kb.sqlite，必须下沉到检索库才能过滤。
-    qs = src.execute(
+    q_rows = src.execute(
         "SELECT q.qid, q.doc_hash, q.seq, q.q_text, q.a_text, q.qtype, q.conf, q.q_norm_hash, "
         "       COALESCE(q.topic, sd.topic, ''), COALESCE(sd.category, ''), "
-        "       q.difficulty, q.tags, q.position, q.quality, q.q_key "
+        "       q.difficulty, q.tags, q.position, q.quality, q.q_key, sd.status AS source_status "
         "FROM questions q LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash").fetchall()
+    qs = [r for r in q_rows if
+          r["source_status"] in status.INGESTED
+          or (r["source_status"] is None and r["doc_hash"] in eligible_mirrors)]
     out.executemany(
         "INSERT INTO questions(qid, doc_hash, seq, q_text, a_text, qtype, conf, "
         "  q_norm_hash, topic, category, difficulty, tags_json, position, quality, q_key) "

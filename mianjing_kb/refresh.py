@@ -181,7 +181,7 @@ def _snapshot_gc(online: Path, keep: int = ROLLBACK_KEEP) -> list[str]:
 
 
 def _remove_sidecars(online: Path) -> list[str]:
-    """清理被废弃旧库的 -wal/-shm；失败只记警告（非致命，不能谎报切换失败）。"""
+    """清理被废弃旧库的 -wal/-shm；返回失败列表，由调用方决定是否视为回滚失败。"""
     warns = []
     for p in _sidecars(online):
         try:
@@ -330,6 +330,9 @@ def _mark_publish_status(build_dir: Path, manifest_path: Path, status: str,
     elif status == "rolled_back":
         m["publishable"] = False
         m["rolled_back_at"] = datetime.now().isoformat(timespec="seconds")
+    elif status == "rollback_failed":
+        m["publishable"] = False
+        m["rollback_failed_at"] = datetime.now().isoformat(timespec="seconds")
     _atomic_write_json(Path(manifest_path), m)
     build_id = str(m.get("build_id") or Path(manifest_path).stem)
     hist = _publish_history_path(build_dir, build_id)
@@ -378,10 +381,35 @@ def _verify_publish_manifest(build_dir: Path, shadow: Path) -> tuple[bool, str]:
 
 
 def _restore(snapshot: Path, online: Path) -> str:
-    """用快照覆盖线上库（快照本身保留，供人工回滚）。"""
-    _remove_sidecars(online)
-    shutil.copy2(snapshot, online)
+    """用快照原子覆盖线上库（快照本身保留，供人工回滚）。"""
+    # 先把快照完整复制到同目录临时文件，再替换线上库，避免复制中断留下半个 db。
+    # 旧线上库的 WAL/SHM 必须清干净；删不掉就不能声称已成功回滚。
+    tmp = online.with_name(online.name + ".restore.tmp")
+    try:
+        shutil.copy2(snapshot, tmp)
+        # Windows 上对只读句柄 fsync 会报 EBADF（Errno 9），必须用可写句柄。
+        with tmp.open("rb+") as stream:
+            os.fsync(stream.fileno())
+        warns = _remove_sidecars(online)
+        if warns:
+            raise OSError("无法清理线上库侧车：" + "; ".join(warns))
+        os.replace(tmp, online)
+    finally:
+        tmp.unlink(missing_ok=True)
     return f"已从快照 {snapshot.name} 回滚线上库"
+
+
+def _rollback_swap(snapshot: Path | None, online: Path) -> str:
+    """恢复切换前状态；首次发布前没有线上库时，删除本次异常发布的数据库。"""
+    if snapshot is not None:
+        return _restore(snapshot, online)
+    warns = _remove_sidecars(online)
+    if warns:
+        raise OSError("无法清理异常发布库侧车：" + "; ".join(warns))
+    online.unlink(missing_ok=True)
+    if online.exists():
+        raise OSError(f"无法移除异常发布库：{online}")
+    return "切换前不存在线上库，已移除本次异常发布的数据库"
 
 
 def build_shadow(shadow: Path) -> dict:
@@ -668,6 +696,8 @@ def main(argv=None) -> int:
         return 2
 
     swapped = False
+    published = False
+    snapshot: Path | None = None
     summary: dict = {}
     vec: dict | str = "skip"
     manifest: Path | None = None
@@ -805,10 +835,11 @@ def main(argv=None) -> int:
         })
         history = None
         if bad:
-            rollback = _restore(snapshot, online) if snapshot else "无快照可回滚"
+            rollback = _rollback_swap(snapshot, online)
             if manifest:
                 _mark_publish_status(build_dir, manifest, "rolled_back",
-                                     rollback=rollback, why=bad)
+                                     rollback=rollback, why=bad,
+                                     snapshot=snapshot.name if snapshot else None)
             summary.update({"verdict": "ROLLED_BACK", "why": bad, "rollback": rollback})
             summary["elapsed_sec"] = round(time.perf_counter() - started, 1)
             _log(build_dir, summary)
@@ -818,6 +849,7 @@ def main(argv=None) -> int:
             history = _mark_publish_status(
                 build_dir, manifest, "published",
                 snapshot=snapshot.name if snapshot else None)
+            published = True
         summary["publish_status"] = "published"
         summary["publish_history"] = (str(history.relative_to(build_dir))
                                       if history else None)
@@ -837,14 +869,49 @@ def main(argv=None) -> int:
         print(json.dumps(summary, ensure_ascii=False, indent=1, default=str))
         return 0
     except Exception as ex:  # noqa: BLE001 —— 刷新失败必须保住线上库
+        if swapped and not published:
+            # 原子替换已经发生，但发布尚未完成（包括 counts/quick_check 自身抛异常）：
+            # 必须恢复切换前状态，不能仅报告 ERROR_AFTER_SWAP 后把新库留在线上。
+            try:
+                rollback = _rollback_swap(snapshot, online)
+                rollback_ok = True
+            except Exception as rollback_ex:  # noqa: BLE001
+                rollback = (f"回滚失败 {type(rollback_ex).__name__}: "
+                            f"{str(rollback_ex)[:200]}")
+                rollback_ok = False
+            final_status = "rolled_back" if rollback_ok else "rollback_failed"
+            if manifest:
+                try:
+                    _mark_publish_status(
+                        build_dir, manifest, final_status,
+                        rollback=rollback,
+                        snapshot=snapshot.name if snapshot else None,
+                        why=f"{type(ex).__name__}: {str(ex)[:200]}")
+                except Exception as mark_ex:  # noqa: BLE001
+                    rollback += (f"；发布清单状态写入失败 {type(mark_ex).__name__}: "
+                                 f"{str(mark_ex)[:120]}")
+            result = {
+                "verdict": "ROLLED_BACK" if rollback_ok else "ROLLBACK_FAILED",
+                "why": f"{type(ex).__name__}: {str(ex)[:200]}",
+                "rollback": rollback,
+                "snapshot": snapshot.name if snapshot else None,
+                "note": ("切换后验证/发布阶段异常，已恢复切换前数据库"
+                         if rollback_ok else "严重：切换后异常且自动回滚失败，必须人工恢复"),
+                "elapsed_sec": round(time.perf_counter() - started, 1),
+            }
+            summary.update(result)
+            _log(build_dir, summary)
+            print(json.dumps(result, ensure_ascii=False, indent=1, default=str))
+            return 1
+
         leftover = _cleanup(shadow) if not swapped else []
         keep = shadow.exists() and not swapped
-        print(json.dumps({"verdict": "ABORT" if not swapped else "ERROR_AFTER_SWAP",
+        print(json.dumps({"verdict": "ABORT" if not swapped else "ERROR_AFTER_PUBLISH",
                           "why": f"{type(ex).__name__}: {str(ex)[:200]}",
                           "leftover_locked": leftover,
                           "shadow_kept": keep,
                           "note": ("线上 面经库.db 未动" if not swapped
-                                   else "切换已发生，请核对线上库与侧车")},
+                                   else "数据库已通过切换后验证并标记发布；后续收尾失败，请检查日志")},
                          ensure_ascii=False, indent=1))
         return 1
     finally:

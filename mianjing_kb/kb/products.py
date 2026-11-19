@@ -34,8 +34,15 @@ def get(conn, doc_hash: str):
 def upsert(conn, doc_hash: str, *, md_rel: str | None, md_hash: str | None,
            text_source: str, input_path: Path | None, questions_n: int | None = None,
            gate_verdict: str | None = None, extracted_at: str | None = None,
-           indexed_at: str | None = None) -> None:
-    """写/更新一行产物；input_path 用于取 size/mtime（增量判据）。"""
+           indexed_at: str | None = None,
+           preserve_input_fingerprint: bool = False) -> None:
+    """写/更新一行产物；input_path 用于取 size/mtime（增量判据）。
+
+    `preserve_input_fingerprint=True` 用于扫描映射阶段：如果该文档已经成功抽取，
+    只更新映射元数据，不得提前覆盖上次成功抽取的 md_hash / size / mtime。否则
+    `needs_work()` 会看到刚写入的新指纹，误判已修改的输入为未变化。新建/未抽取行
+    仍可初始化指纹；真正抽取成功后由调用方用默认参数提交新指纹。
+    """
     if text_source not in ("md", "source", "orphan"):
         raise ValueError(f"未知 text_source：{text_source}")
     size = mtime = None
@@ -51,18 +58,27 @@ def upsert(conn, doc_hash: str, *, md_rel: str | None, md_hash: str | None,
         " input_size, input_mtime, extracted_at, indexed_at, updated_at) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(doc_hash) DO UPDATE SET "
-        " md_rel=excluded.md_rel, md_hash=excluded.md_hash, text_source=excluded.text_source, "
+        " md_rel=excluded.md_rel, "
+        " md_hash=CASE WHEN ? AND document_products.extracted_at IS NOT NULL "
+        "              THEN document_products.md_hash ELSE excluded.md_hash END, "
+        " text_source=excluded.text_source, "
         " gate_verdict=COALESCE(excluded.gate_verdict, document_products.gate_verdict), "
         " questions_n=CASE WHEN ? IS NULL THEN document_products.questions_n "
         "                   ELSE excluded.questions_n END, "
-        " input_size=COALESCE(excluded.input_size, document_products.input_size), "
-        " input_mtime=COALESCE(excluded.input_mtime, document_products.input_mtime), "
+        " input_size=CASE WHEN ? AND document_products.extracted_at IS NOT NULL "
+        "                 THEN document_products.input_size "
+        "                 ELSE COALESCE(excluded.input_size, document_products.input_size) END, "
+        " input_mtime=CASE WHEN ? AND document_products.extracted_at IS NOT NULL "
+        "                  THEN document_products.input_mtime "
+        "                  ELSE COALESCE(excluded.input_mtime, document_products.input_mtime) END, "
         " extracted_at=COALESCE(excluded.extracted_at, document_products.extracted_at), "
         " indexed_at=COALESCE(excluded.indexed_at, document_products.indexed_at), "
         " updated_at=excluded.updated_at",
         (doc_hash, md_rel, md_hash, text_source, gate_verdict,
          questions_n if questions_n is not None else 0,
-         size, mtime, extracted_at, indexed_at, _now(), questions_n))
+         size, mtime, extracted_at, indexed_at, _now(),
+         int(preserve_input_fingerprint), questions_n,
+         int(preserve_input_fingerprint), int(preserve_input_fingerprint)))
 
 
 def needs_work(conn, doc_hash: str, input_path: Path) -> bool:
@@ -76,7 +92,18 @@ def needs_work(conn, doc_hash: str, input_path: Path) -> bool:
         return False            # 文件没了，留给 G5 / purge 处理，不在这里报错
     if row["input_size"] is None or row["input_mtime"] is None:
         return True
-    return st.st_size != row["input_size"] or abs(st.st_mtime - row["input_mtime"]) > 1e-6
+    if st.st_size != row["input_size"] or abs(st.st_mtime - row["input_mtime"]) > 1e-6:
+        return True
+    # 对 md/orphan 再用内容 hash 兜底：同大小、mtime 被保留/回拨时仍能识别内容变化。
+    # 只在 stat 指纹相同的情况下读取文件，常见的未变化增量扫描不会多读大文件。
+    if row["text_source"] in ("md", "orphan"):
+        if not row["md_hash"]:
+            return True
+        try:
+            return hashing.doc_hash(input_path) != row["md_hash"]
+        except OSError:
+            return False
+    return False
 
 
 def sync_mapping(conn, mapping) -> int:
@@ -87,11 +114,13 @@ def sync_mapping(conn, mapping) -> int:
     n = 0
     for doc_hash, (rel, path) in mapping.by_doc.items():
         upsert(conn, doc_hash, md_rel=rel, md_hash=hashing.doc_hash(path),
-               text_source="md", input_path=path)
+               text_source="md", input_path=path,
+               preserve_input_fingerprint=True)
         n += 1
     for mh, (rel, path) in mapping.orphans.items():
         upsert(conn, mh, md_rel=rel, md_hash=hashing.doc_hash(path),
-               text_source="orphan", input_path=path)
+               text_source="orphan", input_path=path,
+               preserve_input_fingerprint=True)
         n += 1
     return n
 

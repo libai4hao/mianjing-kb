@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 
-from mianjing_kb.kb import db as kbdb
+from mianjing_kb.kb import db as kbdb, hashing
 from mianjing_kb.kb import mdmap, products
 
 
@@ -56,10 +56,10 @@ def test_needs_work_detects_new_and_changed(tmp_path):
     md = tmp_path / "a.md"
     md.write_text("原文", encoding="utf-8")
     assert products.needs_work(conn, "h1", md) is True          # 无产物行
-    products.upsert(conn, "h1", md_rel="a.md", md_hash="x", text_source="md",
+    products.upsert(conn, "h1", md_rel="a.md", md_hash=hashing.doc_hash(md), text_source="md",
                     input_path=md)                              # 没有 extracted_at
     assert products.needs_work(conn, "h1", md) is True
-    products.upsert(conn, "h1", md_rel="a.md", md_hash="x", text_source="md",
+    products.upsert(conn, "h1", md_rel="a.md", md_hash=hashing.doc_hash(md), text_source="md",
                     input_path=md, extracted_at="now")
     assert products.needs_work(conn, "h1", md) is False
     time.sleep(0.01)

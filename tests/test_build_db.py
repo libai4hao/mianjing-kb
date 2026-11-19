@@ -126,6 +126,69 @@ def test_question_tags_and_label_columns_sink(tmp_path, monkeypatch):
     assert tags == [("JVM GC", "jvm gc"), ("类加载", "类加载")]
 
 
+def test_build_publishes_only_ingested_questions_and_valid_orphan_md(tmp_path, monkeypatch):
+    """REJECTED/SUPERSEDED 旧题不得泄漏；合法 md-mirror 孤儿仍保留。"""
+    from mianjing_kb import build_db as bdb
+    from mianjing_kb.kb import config, db as kbdb, mdmap
+
+    corpus = tmp_path / "corpus"
+    build = corpus / "21-面经数据库" / "build"
+    md_root = corpus / "20-题库MD" / "题库"
+    src_root = corpus / "sources"
+    for p in (build, md_root, src_root):
+        p.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
+    monkeypatch.setattr(config, "BUILD_DIR", build)
+    monkeypatch.setattr(config, "CORPUS_ROOT", corpus)
+    monkeypatch.setattr(config, "QUESTION_MD_DIR", corpus / "20-题库MD")
+
+    kb = kbdb.connect(build / "kb.sqlite")
+    sources = [
+        ("a" * 16, "active.pdf", "classified"),
+        ("b" * 16, "rejected.pdf", "rejected"),
+        ("c" * 16, "superseded.pdf", "superseded"),
+    ]
+    for h, name, state in sources:
+        source = src_root / name
+        source.write_bytes(b"source")
+        kb.execute(
+            "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, "
+            "src_path, dir_path, status, batch_id, first_seen_at, last_seen_at, topic) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (h, h + "0" * 48, name, ".pdf", 6, str(source), "sources", state,
+             "t", "now", "now", state))
+
+    (md_root / "active.md").write_text("active content", encoding="utf-8")
+    (md_root / "rejected.md").write_text("rejected content", encoding="utf-8")
+    (md_root / "superseded.md").write_text("superseded content", encoding="utf-8")
+    orphan_rel = "题库/independent-orphan.md"
+    orphan_path = corpus / "20-题库MD" / orphan_rel
+    orphan_path.parent.mkdir(parents=True, exist_ok=True)
+    orphan_path.write_text("orphan content", encoding="utf-8")
+    orphan_hash = mdmap.mirror_hash(orphan_rel)
+
+    for qid, doc_hash, q_text in (
+        (1, "a" * 16, "active question"),
+        (2, "b" * 16, "rejected stale question"),
+        (3, "c" * 16, "superseded stale question"),
+        (4, orphan_hash, "valid orphan question"),
+    ):
+        kb.execute(
+            "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, "
+            "q_norm, q_norm_hash, simhash, span_start, span_end, extracted_at, q_key) "
+            "VALUES (?,?,1,?,'answer','八股','high',?,'hash',0,0,1,'now',?)",
+            (qid, doc_hash, q_text, q_text, f"{doc_hash}:hash"))
+    kb.commit()
+    kb.close()
+
+    out_db = build / "面经库.db"
+    bdb.build(out_db=out_db)
+    out = sqlite3.connect(str(out_db))
+    rows = out.execute("SELECT qid, q_text FROM questions ORDER BY qid").fetchall()
+    out.close()
+    assert rows == [(1, "active question"), (4, "valid orphan question")]
+
+
 def test_mirror_topic_inheritance(tmp_path, monkeypatch):
     """G3/K12 修复：镜像题（无台账行）topic 落空串 → 继承链 源文档 topic → md_rel 目录段。"""
     from mianjing_kb import build_db as bdb

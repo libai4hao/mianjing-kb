@@ -263,6 +263,68 @@ def test_swap_failure_keeps_shadow_for_retry(mini_env, monkeypatch, capsys):
     assert not (mini_env["build"] / rf.LOCK_NAME).exists()    # 锁已释放
 
 
+@pytest.mark.parametrize("failing_check", ["_counts", "_quick_check"])
+def test_post_swap_validation_exception_restores_online_snapshot(
+        mini_env, monkeypatch, capsys, failing_check):
+    """切换后 counts/quick_check 自身抛异常也必须恢复旧线上库并消费发布授权。"""
+    online = mini_env["online"]
+    old = sqlite3.connect(str(online))
+    old.execute("UPDATE questions SET q_text='OLD_ONLINE_SENTINEL' WHERE qid=1")
+    old.commit()
+    old.close()
+
+    monkeypatch.setattr(rf, "run_gates", _all_pass)
+    monkeypatch.setattr(rf, "copy_vec", lambda *_args, **_kwargs: {
+        "ok": True, "kind": "absent", "detail": "test fixture has no vectors"})
+    original = getattr(rf, failing_check)
+
+    def fail_only_after_swap(path):
+        if Path(path) == online:
+            raise RuntimeError(f"injected {failing_check} failure after replace")
+        return original(path)
+
+    monkeypatch.setattr(rf, failing_check, fail_only_after_swap)
+    assert rf.main([]) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["verdict"] == "ROLLED_BACK"
+    assert "已恢复切换前数据库" in output["note"]
+
+    restored = sqlite3.connect(str(online))
+    q_text = restored.execute("SELECT q_text FROM questions WHERE qid=1").fetchone()[0]
+    restored.close()
+    assert q_text == "OLD_ONLINE_SENTINEL"
+
+    manifest = json.loads((mini_env["build"] / rf.PUBLISH_MANIFEST).read_text(encoding="utf-8"))
+    assert manifest["publish_status"] == "rolled_back"
+    assert manifest["publishable"] is False
+
+
+def test_post_swap_exception_removes_database_when_first_publish_has_no_snapshot(
+        mini_env, monkeypatch, capsys):
+    """首次发布前没有旧库时，切换后验证异常应恢复为“线上库不存在”。"""
+    online = mini_env["online"]
+    online.unlink()
+    monkeypatch.setattr(rf, "run_gates", _all_pass)
+    monkeypatch.setattr(rf, "copy_vec", lambda *_args, **_kwargs: {
+        "ok": True, "kind": "absent", "detail": "test fixture has no vectors"})
+    original = rf._counts
+
+    def fail_after_swap(path):
+        if Path(path) == online:
+            raise RuntimeError("injected counts failure on first publish")
+        return original(path)
+
+    monkeypatch.setattr(rf, "_counts", fail_after_swap)
+    assert rf.main([]) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["verdict"] == "ROLLED_BACK"
+    assert not online.exists()
+
+    manifest = json.loads((mini_env["build"] / rf.PUBLISH_MANIFEST).read_text(encoding="utf-8"))
+    assert manifest["publish_status"] == "rolled_back"
+    assert manifest["snapshot"] is None
+
+
 def test_swap_only_rejects_unvalidated_shadow(mini_env):
     """没有发布清单的影子库不能凭"--swap-only"直接上线。"""
     import shutil

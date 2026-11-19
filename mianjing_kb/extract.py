@@ -34,7 +34,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, mdmap, products, status, textio, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, hashing, mdmap, products, status, textio, wlock  # noqa: E402
 from mianjing_kb.question_freq import close_word, extract, normalize, simhash  # noqa: E402
 from mianjing_kb.chunker import chunk_v2  # noqa: E402
 
@@ -135,7 +135,7 @@ def _orphan_owned_by_retired_source(rel: str, source_rels: dict) -> bool:
     return False
 
 
-def doc_pool(conn) -> tuple[list[tuple[str, Path]], "mdmap.Mapping"]:
+def doc_pool(conn, md_root: Path | None = None) -> tuple[list[tuple[str, Path]], "mdmap.Mapping"]:
     """(doc_hash, path) 题池 —— **一文档一身份**。
 
     1. 有 md 产物：用 md 正文，身份 = 源 doc_hash（P0-1 单身份）；
@@ -146,7 +146,7 @@ def doc_pool(conn) -> tuple[list[tuple[str, Path]], "mdmap.Mapping"]:
     ex_src, ex_md = _excluded_rels()
     source_rels = _source_rels(conn)
     ing = set(status.INGESTED)
-    mapping = mdmap.build(conn, Path(config.QUESTION_MD_DIR))
+    mapping = mdmap.build(conn, Path(md_root or config.QUESTION_MD_DIR))
     pool: dict[str, Path] = {}
 
     for doc_hash, (md_rel, p) in mapping.by_doc.items():
@@ -191,12 +191,18 @@ def write_identity_report(mapping) -> Path:
 
 
 def _product_loc(conn, doc_hash: str, mapping) -> tuple[str | None, str | None, str]:
-    """(md_rel, md_hash, text_source)：产物行已有的 hash 直接复用，不做二次读盘。"""
+    """(md_rel, md_hash, text_source)：返回本次成功抽取所用 Markdown 的当前 hash。
+
+    映射同步阶段刻意保留上次成功抽取的 hash 供增量比较，因此不能从台账复用旧值；
+    只有本次抽取成功后，才将当前文件 hash 提交为新的成功指纹。
+    """
     prod = products.get(conn, doc_hash)
     if doc_hash in mapping.by_doc:
-        return mapping.by_doc[doc_hash][0], prod["md_hash"] if prod else None, "md"
+        rel, path = mapping.by_doc[doc_hash]
+        return rel, hashing.doc_hash(path), "md"
     if doc_hash in mapping.orphans:
-        return mapping.orphans[doc_hash][0], prod["md_hash"] if prod else None, "orphan"
+        rel, path = mapping.orphans[doc_hash]
+        return rel, hashing.doc_hash(path), "orphan"
     return None, prod["md_hash"] if prod else None, "source"
 
 
