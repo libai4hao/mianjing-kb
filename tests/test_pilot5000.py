@@ -108,6 +108,14 @@ def test_label_requires_key(tmp_path, monkeypatch):
         P.label(cfg)
 
 
+def test_main_returns_nonzero_when_label_fails(tmp_path, monkeypatch):
+    """子进程失败不能伪装成 rc=0；pilot 入口必须把 stopped_on_failure 传出去。"""
+    monkeypatch.setattr(P, "ensure_config", lambda _p: {"pilot_root": str(tmp_path)})
+    monkeypatch.setattr(P, "label", lambda _cfg, dry_run=False: {
+        "stages": [{"stage": "label_write", "rc": 1}], "stopped_on_failure": True})
+    assert P.main(["label", "--config", str(tmp_path / "c.json")]) == 1
+
+
 def test_label_writes_to_pilot_db_by_default(tmp_path, monkeypatch):
     """默认必须写试跑库 staging；--dry-run 才只试输出。"""
     root = tmp_path / "pilot"

@@ -7,10 +7,10 @@
 - `run` 依次执行 extract → canonical → refresh → 检索冒烟；打标只在配置了 key 时可选执行。
 
 用法：
-    python -m mianjing_kb.pilot5000 prepare --config D:\\pilot\\5000\\config.json
-    python -m mianjing_kb.pilot5000 run --config D:\\pilot\\5000\\config.json
-    python -m mianjing_kb.pilot5000 label --config D:\\pilot\\5000\\config.json
-    python -m mianjing_kb.pilot5000 report --config D:\\pilot\\5000\\config.json
+    python -m mianjing_kb.pilot5000 prepare --config <config.json>
+    python -m mianjing_kb.pilot5000 run --config <config.json>
+    python -m mianjing_kb.pilot5000 label --config <config.json>
+    python -m mianjing_kb.pilot5000 report --config <config.json>
 """
 from __future__ import annotations
 
@@ -473,6 +473,8 @@ def main(argv: list[str] | None = None) -> int:
                          ensure_ascii=False, indent=1))
         return 2
     print(json.dumps(out, ensure_ascii=False, indent=1))
+    if out.get("stopped_on_failure"):
+        return 1
     return 0
 
 
