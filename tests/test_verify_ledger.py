@@ -568,3 +568,11 @@ def test_audit_converted_cli_exit_code_only_counts_real_targets(tmp_path, monkey
     assert vl.main(["--audit-converted"]) == 0
     out = _json.loads(capsys.readouterr().out)
     assert out["unresolved_with_target"] == 0 and out["no_target_rows"] == 2
+
+def test_g7_flags_missing_doc_link(tmp_path):
+    """README 引用的 docs 路径被归档/改名后必须报警（2026-11-19 R3 归档踩过）。"""
+    (tmp_path / "README.md").write_text("# t\n\n- `docs/99-missing.md`\n", encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    g = vl.g7_docs(tmp_path, actual_tests=0)
+    assert g["state"] == "WARN"
+    assert [x["kind"] for x in g["fails"]] == ["readme_doc_missing"]

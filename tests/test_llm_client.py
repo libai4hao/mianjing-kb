@@ -266,3 +266,24 @@ def test_chat_payload_num_ctx_passthrough(monkeypatch):
     assert seen[-1]["options"] == {"num_ctx": 8192}
     lc.chat({**base, "num_ctx": None}, "s", "u", retries=1)
     assert "options" not in seen[-1]
+
+# ---------------- 密钥脱敏（README 承诺：日志/重试/异常不留 LLM_KEY） ----------------
+def test_scrub_secret_masks_config_key_and_patterns():
+    from mianjing_kb.llm_client import scrub_secret
+    cfg = {"key": "sk-live-abcdef123456"}
+    assert scrub_secret("bad key sk-live-abcdef123456 here", cfg) == "bad key [LLM_KEY] here"
+    assert "sk-othersecret" not in scrub_secret("got sk-othersecret", cfg)
+    assert "Authorization: Bearer [LLM_KEY]" == scrub_secret(
+        "Authorization: Bearer abc.def-123456", cfg)
+
+
+def test_runtime_error_never_contains_key(monkeypatch):
+    """重试耗尽的 RuntimeError 必须清洗服务端回显的 key。"""
+    from mianjing_kb import llm_client as lc
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "sk-live-abcdef123456"})
+    monkeypatch.setattr(lc, "_post", lambda c, p: (
+        500, {"error": "invalid Authorization: Bearer sk-live-abcdef123456"}))
+    with pytest.raises(RuntimeError) as ei:
+        lc.chat(cfg, "s", "u", retries=1)
+    assert "sk-live-abcdef123456" not in str(ei.value)
+    assert "[LLM_KEY]" in str(ei.value)

@@ -6,6 +6,26 @@ on:
   pull_request:
 
 jobs:
+  linux-deps:
+    # 只验证依赖可解析 + 包可导入：证明 pywin32 的平台标记没把 Linux 安装拖死。
+    # 不跑 pytest（测试与 Word COM/Windows 路径强相关，正式回归在 windows-latest）。
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安装依赖（Linux）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e . --no-deps
+          python -m pip check
+      - name: 包可导入（不得顶层依赖 win32com）
+        run: python -c "import mianjing_kb.cli, mianjing_kb.search, mianjing_kb.llm_client"
+
   test:
     # 顶层 win32com / Word COM 只在 Windows 有意义；测试里也直接依赖 pywin32
     runs-on: windows-latest

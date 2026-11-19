@@ -294,3 +294,23 @@ def test_keep_copy_in_quarantine_is_refused(env):
     rc = _run(env, victim.parent, "--apply", "--yes", "--no-backup")
     assert rc == 0                 # 计划 0 件、实删 0 件：一致
     assert victim.exists()
+
+def test_short_hash_collision_is_refused(env, capsys):
+    """16 位短指纹撞上另一份内容的登记行：不得删原件（完整 sha256 是最终判据）。"""
+    victim = _victim(env)
+    digest = hashing.sha256_file(victim)
+    conn = db.connect(env["db"])
+    conn.execute(
+        "INSERT OR REPLACE INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes,"
+        " src_path, dir_path, status, batch_id, first_seen_at, last_seen_at, note)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (digest[:16], "0" * 64, "other.pdf", ".pdf", 1, str(_keep(env)),
+         "x", "classified", "t", "now", "now", ""),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = _run(env, victim.parent, "--apply", "--yes", "--no-backup")
+    assert rc == 0
+    assert victim.exists()
+    assert "未收入（短指纹无记录或完整 sha256 不符）" in capsys.readouterr().out

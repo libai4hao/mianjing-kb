@@ -156,6 +156,27 @@ _RE_WECHAT = re.compile(r"(微信|weixin|wx|qq)\s*[:：号]?\s*[A-Za-z0-9_-]{5,2
 _RE_IDCARD = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
 _RE_URL = re.compile(r"https?://[^\s，。；）)】]+")
 REDACT_MARK = "[联系方式]"
+KEY_MARK = "[LLM_KEY]"
+
+
+def scrub_secret(text: str, cfg: dict | None = None) -> str:
+    """异常/日志出口统一清洗密钥：配置里的原值、`sk-...`、Bearer 头都不留。
+
+    key 只应出现在 Authorization 请求头里；HTTPError 响应体、URLError 文本、重试
+    汇总都可能把它带回来（有的网关会把请求头回显到错误 JSON），所以在**拼错误
+    字符串时**清洗，而不是指望调用方记得脱敏。
+    """
+    if text is None:
+        return ""
+    s = str(text)
+    key = (cfg or {}).get("key") or ""
+    if key:
+        s = s.replace(key, KEY_MARK)
+    s = re.sub(r"sk-[A-Za-z0-9_\-]{6,}", KEY_MARK, s)
+    s = re.sub(r"(?i)(authorization\s*:\s*bearer\s*)\S+", r"\1" + KEY_MARK, s)
+    s = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{6,}", r"\1" + KEY_MARK, s)
+    return s
+
 
 
 def redact(text: str) -> tuple[str, bool]:
@@ -190,10 +211,12 @@ def _post(cfg: dict, payload: dict) -> tuple[int, dict]:
         try:
             body = json.loads(e.read().decode("utf-8", "replace"))
         except Exception:  # noqa: BLE001
-            body = {"raw": str(e)}
+            body = {"raw": scrub_secret(str(e), cfg)}
+        if isinstance(body, dict) and body.get("error"):
+            body["error"] = scrub_secret(body["error"], cfg)
         return e.code, body
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return 0, {"error": f"{type(e).__name__}: {e}"}
+        return 0, {"error": scrub_secret(f"{type(e).__name__}: {e}", cfg)}
 
 
 def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
@@ -243,12 +266,13 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
                     "prompt_tokens": int(u.get("prompt_tokens") or 0),
                     "completion_tokens": int(u.get("completion_tokens") or 0),
                     "tokens": int(u.get("prompt_tokens") or 0) + int(u.get("completion_tokens") or 0)}
-        last_err = f"status={st} {str(resp.get('error') or resp)[:160]}"
+        last_err = scrub_secret(
+            f"status={st} {str(resp.get('error') or resp)[:160]}", cfg)
         if st and st not in (429, 500, 502, 503, 504) and st != 0:
             break               # 4xx（鉴权/参数）重试无意义，快速失败
         if attempt < retries:   # 末次失败不再空等（随后就 raise）
             time.sleep(sleep * (2 ** (attempt - 1)) + random.uniform(0, sleep / 2))
-    raise RuntimeError(f"LLM 调用重试 {retries} 次耗尽: {last_err}")
+    raise RuntimeError(scrub_secret(f"LLM 调用重试 {retries} 次耗尽: {last_err}", cfg))
 
 
 def chat_json(cfg: dict, system: str, user: str, **kw) -> dict:

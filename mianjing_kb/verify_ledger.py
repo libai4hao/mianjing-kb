@@ -632,7 +632,7 @@ def g8_single_identity(out_conn) -> dict:
 
 # ---------------- G7 文档一致性（软） ----------------
 def g7_docs(repo_root: Path, actual_tests: int) -> dict:
-    """README 测试数 vs 实际；尚未实现清单不得列已存在脚本；docs 编号范围 vs 实际。"""
+    """README 测试数 vs 实际；尚未实现清单不得列已存在脚本；README 引用的 docs 路径必须存在。"""
     warns = []
     readme_p = repo_root / "README.md"
     readme = readme_p.read_text(encoding="utf-8") if readme_p.exists() else ""
@@ -640,6 +640,10 @@ def g7_docs(repo_root: Path, actual_tests: int) -> dict:
     if m and int(m.group(1)) != actual_tests:
         warns.append({"kind": "tests_count_stale",
                       "readme": int(m.group(1)), "actual": actual_tests})
+    # README 里的 `docs/...md` 必须真实存在：归档/改名后最容易留下死链（2026-11-19 R3 归档）
+    for ref in sorted(set(re.findall(r"`?(docs/[\w./\-]+\.md)`?", readme))):
+        if not (repo_root / ref).exists():
+            warns.append({"kind": "readme_doc_missing", "path": ref})
     # 「尚未实现」节的列表项不得列 mianjing_kb/ 已存在的脚本（`- ~~` 删除线=已落地条目，跳过；
     # 正文括号里的脚本引用不在行首列表项上，不构成"声称未实现"）
     sec = re.search(r"## 尚未实现.*?(?=\n## |\Z)", readme, re.S)

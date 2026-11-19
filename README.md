@@ -4,8 +4,9 @@
 
 仓库只放可版本化的代码、规则与文档；语料原文、SQLite 库留在本机语料根（已被 `.gitignore` 排除）。
 
-**平台现状：仅在 Windows 上实测。** 核心管线（intake / classify / chunker / build_db / search）
-的跨平台支持仍属**计划中**，没有 CI 验证；`.doc` 转换与 OCR 依赖 Word COM、PaddleOCR-json，仅 Windows 可用。
+**平台现状：仅在 Windows 上实测。** 核心管线（intake / classify / chunker / build_db / search）理论可跨平台，
+但 CI 只在 `windows-latest` 跑（`.github/workflows/ci.yml`，Python 3.11/3.12）；`.doc` 转换与 OCR
+依赖 Word COM、PaddleOCR-json，仅 Windows 可用。
 
 ## 安装
 
@@ -49,14 +50,18 @@ python -m pytest tests -q                # 全量测试（含 e2e demo、聚类�
 
 **先看 `docs/README.md`（文档索引：哪份现行、哪份历史、每个数字属于哪个时点）。** 常用入口：
 
-- `docs/06-部署方案_v2-R3.md` — 唯一正式方案入口（R1/R2 已归档至 `docs/archive/`）
+- `docs/32-当前口径总表-2026-11-19.md` — **唯一口径索引**（方案 / 门禁 / 阈值 / 基线 / 稳定键 / 未实现清单）
 - `docs/19-功能流程图.md` — 现状流程唯一入口（11 张 Mermaid 图，不另设文字流程）
-- `docs/29-数据基线与统计口径-2026-11-19.md` — 现行数据基线（快照时间 + 统计 SQL）
+- `docs/29-数据基线与统计口径-2026-11-19.md` — 现行数据基线（快照时间 + 统计 SQL；不手改数字）
 - `docs/27-方案与流程评审-2026-11-19.md` / `docs/28-六阶段流水线与编排层设计-2026-11-19.md` — 方案缺陷与六阶段编排层
 - `docs/00-决策记录.md` — 关键取舍（含"仓库放在 vibe-work 下"的偏离说明 D-09）
 - `docs/04-工具链SOP.md` — 日常操作手册
 - `docs/22-工程细节.md` — 完整目录、与语料内既有管线的分工、未实现清单
+- `docs/CHANGELOG.md` — 工程变更日志（按日期，不写会漂移的数据快照）
 - `docs/项目审核报告/待办清单-2026-11-19.md` — 外部 review 意见的落地台账
+
+`docs/archive/06-部署方案_v2-R3.md` 已归档，只作版本留痕，不再是执行入口；
+现行方案口径以 `docs/32` 为准。
 
 ## 许可
 

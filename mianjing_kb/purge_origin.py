@@ -197,12 +197,15 @@ def main(argv=None) -> int:
                 kept.append((str(p), f"读失败:{type(ex).__name__}"))
                 continue
             rows = conn.execute(
-                "SELECT doc_hash, status, src_path, file_name, note FROM source_documents "
+                "SELECT doc_hash, sha256, status, src_path, file_name, note FROM source_documents "
                 "WHERE doc_hash=?",
                 (digest[:16],),
             ).fetchall()
+            # 16 位短指纹只用于定位行；是否“已收入”必须由**完整 sha256**背书。
+            # 撞车时宁可保留（拒绝删除），也不能把另一份内容的登记行当成本件。
+            rows = [r for r in rows if r["sha256"] == digest]
             if not rows:
-                kept.append((str(p), "未收入"))
+                kept.append((str(p), "未收入（短指纹无记录或完整 sha256 不符）"))
                 continue
             # 同一 hash 可能有多行（隔离副本 / 99 区待删副本）；只有出现"已入库"行才算收入
             ok_rows = [r for r in rows if r["status"] in OK_STATUS]
