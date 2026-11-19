@@ -358,3 +358,37 @@ Java 内存模型。
     assert len(v2["items"]) == 2
     assert "JVM" in v2["items"][0]["q"] and "JMM" in v2["items"][1]["q"]
     assert "字节码" in v2["items"][0]["a"]
+
+
+def test_is_code_fragment_blocks_docx_code_lines():
+    """docx 转文本无围栏时，代码行不能当题干。"""
+    code = [
+        "#include <stdio.h>",
+        "char * result = NULL ;",
+        "int top = 0 ;",
+        "index = 0 ,",
+        "/ ** <check * /",
+        "if (NULL == path )",
+        "返回 NULL ;",
+        "while (- top > 0 && result [ top ] != '/' );",
+        "++ point_cnt ,++ index );",
+        "printf (\"x\");",
+    ]
+    for q in code:
+        assert chunker.is_code_fragment(q) is True, q
+
+
+def test_is_code_fragment_keeps_normal_questions():
+    normal = [
+        "有哪些排序算法?",
+        "C++ 中 i++ 和 ++i 的区别?",
+        "什么是虚函数?",
+        "请介绍 TCP 三次握手",
+        "写一个函数,可以遍历文件夹下的所有文件和文件夹。",
+        "一段 php 代码,写出输出结果,不难,但设了小小的陷阱。",
+        "reqiure 的 include 都可包含文件,二者的区别何在?",
+        "返回结果给用户",
+        "三年五年计划",
+    ]
+    for q in normal:
+        assert chunker.is_code_fragment(q) is False, q

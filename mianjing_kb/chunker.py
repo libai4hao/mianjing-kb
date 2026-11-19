@@ -87,6 +87,37 @@ RE_PROBLEM_N = re.compile(r'^\s*(?:#{1,6}\s+)?问题\s*([一二三四五六七�
 # `*` 分支负向前瞻：`**粗体行**` 不再被误判为列表项（曾挡住粗体问句信号）
 RE_LIST_ITEM = re.compile(r'^\s*(?:[-+•]|(?!\*)\*|[>|\]]|#{1,6}\s|\d{1,3}\s*[.、．)）]|[（(]\d{1,3}[)）])')
 
+# docx 转文本没有 ``` 围栏时，代码会被当正文切成一题一行；这里做兜底识别。
+RE_CJK = re.compile(r'[\u4e00-\u9fff]')
+RE_CODE_HEAD = re.compile(r'^\s*(?:#\s*(?:include|define|ifdef|ifndef|endif|pragma)\b|//|/\s*\*)')
+RE_CODE_CALL = re.compile(
+    r'\b(?:printf|fprintf|malloc|calloc|realloc|free|strlen|strcpy|memcpy)\s*\(')
+RE_CODE_ASSIGN = re.compile(r'^[A-Za-z_]\w*(?:\s*\[[^\]]*\])?\s*=\s*[^=]')
+
+
+def is_code_fragment(q: str) -> bool:
+    """判断一行是否代码/代码碎片（只拦短行，带问句特征的不拦）。"""
+    s = (q or "").strip()
+    if not s or len(s) > 160:
+        return False
+    if re.search(r'[?？]', s) or RE_INTERROGATIVE.search(s[:12]):
+        return False
+    if RE_CODE_HEAD.match(s):
+        return True
+    if re.match(r'^\s*(?:if|for|while|switch|return)\s*\(', s):
+        return True
+    if RE_CODE_CALL.search(s):
+        return True
+    if RE_CODE_ASSIGN.match(s):
+        return True
+    if re.match(r'^[A-Za-z_][\w\s\*]*\([^)]*\)\s*$', s) and not RE_CJK.search(s):
+        return True
+    if re.search(r'[;{}]\s*$', s) and s.count(';') >= 1:
+        return True
+    if re.search(r'(?:\+\+|->)', s) and not re.search(r'[，。；：]', s):
+        return True
+    return False
+
 
 def strip_bold(s: str) -> str:
     """整行粗体剥壳：`**xxx**` → xxx（含尾冒号容差）；非整行粗体返回原文。"""
