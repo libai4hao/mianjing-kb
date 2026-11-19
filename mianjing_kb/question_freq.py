@@ -21,6 +21,7 @@ import hashlib
 import os
 import re
 import sys
+import unicodedata
 import zipfile
 from collections import Counter, defaultdict
 from contextlib import contextmanager
@@ -48,6 +49,9 @@ Q_WORD = re.compile(r"(什么|如何|为什么|怎么|区别|原理|简述|请�
 ANSWER_CUT = re.compile(r"(参考答案|答案\s*[:：]|答\s*[:：]|解析\s*[:：]|说明\s*[:：])")
 PAGE_NOISE = re.compile(r"^(?:第?\s*\d+\s*页?|-\s*\d+\s*-|\d{1,4})$")
 CLEAN = re.compile(r"[^\u4e00-\u9fa5a-z0-9]+")
+# 归一逻辑版本：NFKC、清洗规则或大小写策略变化时递增；label_facts 用它标记存量标签的
+# 可迁移口径，并可用 q_norm_sample 在升级后重算 hash 而不是整批废弃。
+NORMALIZER_VERSION = config.NORMALIZER_VERSION
 
 
 # ---------------- 文本抽取 ----------------
@@ -215,7 +219,7 @@ def split_questions(text: str) -> list[str]:
 
 
 def normalize(q: str) -> str:
-    return CLEAN.sub("", q.lower())
+    return CLEAN.sub("", unicodedata.normalize("NFKC", q).lower())
 
 
 # ---------------- 近重复聚类 ----------------

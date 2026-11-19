@@ -14,10 +14,34 @@ def test_007_label_facts_migration(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "label_facts" in tables
     assert _cols(conn, "label_facts") >= {
-        "q_norm_hash", "topic", "qtype", "difficulty", "tags", "merged_at"}
+        "q_norm_hash", "topic", "qtype", "difficulty", "tags", "merged_at",
+        "normalizer_version", "q_norm_sample", "source", "labeled_at", "confidence"}
     assert "q_norm_hash" in _cols(conn, "labels_staging")
     assert {"prompt_tokens", "completion_tokens"} <= _cols(conn, "labels_staging")
     assert {"difficulty", "tags"} <= _cols(conn, "questions")
+    idx = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='label_facts'")}
+    assert "ux_label_facts_q_norm_hash" in idx
+    conn.close()
+
+
+def test_017_dedupes_legacy_label_facts_and_adds_unique_index(tmp_path):
+    """旧库 label_facts 无主键且重复：017 留最新 merged_at 一行，再建唯一索引。"""
+    import sqlite3
+    p = tmp_path / "legacy.sqlite"
+    raw = sqlite3.connect(str(p))
+    raw.execute("CREATE TABLE label_facts (q_norm_hash TEXT, topic TEXT NOT NULL, "
+                "qtype TEXT, difficulty INTEGER, tags TEXT, merged_at TEXT NOT NULL)")
+    raw.executemany("INSERT INTO label_facts VALUES (?,?,?,?,?,?)",
+                    [("h1", "old", None, None, None, "2026-01-01"),
+                     ("h1", "new", None, None, None, "2026-11-01")])
+    raw.commit()
+    raw.close()
+    conn = db.connect(p)
+    assert conn.execute("SELECT COUNT(*) FROM label_facts WHERE q_norm_hash='h1'"
+                        ).fetchone()[0] == 1
+    assert conn.execute("SELECT topic FROM label_facts WHERE q_norm_hash='h1'"
+                        ).fetchone()[0] == "new"
     conn.close()
 
 

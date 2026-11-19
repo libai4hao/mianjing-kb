@@ -842,10 +842,13 @@ def merge(conn, drop_orphans: bool = False) -> dict:
         "WHERE qid IN (SELECT qid FROM labels_staging WHERE review_state IS NOT 'disagree')")
     conn.execute(
         "INSERT OR REPLACE INTO label_facts "
-        "SELECT q.q_norm_hash, s.topic, s.qtype, s.difficulty, s.tags, ? "
+        "(q_norm_hash, topic, qtype, difficulty, tags, normalizer_version, q_norm_sample, "
+        " source, labeled_at, confidence, merged_at) "
+        "SELECT q.q_norm_hash, s.topic, s.qtype, s.difficulty, s.tags, ?, q.q_norm, "
+        "       'model', s.labeled_at, NULL, ? "
         "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
         "WHERE COALESCE(s.topic, '') != '' AND s.review_state IS NOT 'disagree'",
-        (datetime.now().strftime(NOW_FMT),))
+        (config.NORMALIZER_VERSION, datetime.now().strftime(NOW_FMT)))
     conn.execute("DELETE FROM labels_staging WHERE review_state IS NOT 'disagree'")
     conn.commit()
     holds = conn.execute("SELECT COUNT(*) FROM labels_staging "

@@ -8,6 +8,10 @@
 
 ## 2026-11-19
 
+- **label_facts 加固（主键不变）**：保留 `q_norm_hash`，不迁 `q_key`；017 迁移补唯一索引、
+  `normalizer_version`、`q_norm_sample`、`source/labeled_at/confidence`，`merge` 写归一版本与题干快照；
+  同一归一题干跨文档共享标签，`extract.store` 重挂逻辑不动。按决策纪要未建 `label_overrides`：
+  生产 `label_facts` 0 行、重复 0、跨 topic 冲突 0；冲突量上来再单独建表。
 - **chunker v2 召回修复**：`extract.text_of` 保留 `## 2.`/`问题N`/`一、` 等结构性标题、只对非题目型
   PDF 断句标题去 `#`；`_match_question` 先剥整行粗体；推广过滤改成强特征直剔/弱词仅在不像题目时剔；
   水印候选排除 `答案：/优点：` 等冒号标签；页码/OCR 分页标记不消费 prev_blank，标题/文档头视为块边界；

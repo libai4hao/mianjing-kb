@@ -210,10 +210,15 @@ def test_merge_writes_four_columns_and_facts(mini_db, monkeypatch, tmp_path):
     assert row["difficulty"] == 4 and row["tags"] == '["缓存"]'
     assert row["position"] == '["后端"]' and row["quality"] == '["残缺"]'
     assert row["canonical_q"] == "Redis 的持久化方式有哪些"
-    facts = mini_db.execute("SELECT q_norm_hash, topic, difficulty FROM label_facts").fetchall()
+    facts = mini_db.execute(
+        "SELECT q_norm_hash, topic, difficulty, normalizer_version, q_norm_sample, source, "
+        "labeled_at FROM label_facts").fetchall()
     assert len(facts) == 3                                  # qid 1-3 各一条（hash 互异）
     assert {r["topic"] for r in facts} == {"Redis"}
     assert {r["q_norm_hash"] for r in facts} == {"hash1", "hash2", "hash3"}
+    assert {r["normalizer_version"] for r in facts} == {config.NORMALIZER_VERSION}
+    assert all(r["q_norm_sample"] and r["source"] == "model" for r in facts)
+    assert all(r["labeled_at"] for r in facts)
 
 
 def test_merge_empty_topic_keeps_existing(mini_db, monkeypatch, tmp_path):

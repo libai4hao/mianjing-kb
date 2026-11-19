@@ -47,8 +47,10 @@ def test_close_word_noop_without_instance():
 
 
 
+def test_normalize_handles_spacing_and_nfkc():
     assert normalize("什么 是 JVM ？") == normalize("什么是JVM？")
     assert normalize("1、MySQL 索引：B+树") != normalize("B+树")
+    assert normalize("⼤⼚缓存") == normalize("大厂缓存")
 
 
 def test_near_duplicates_hash_close_far_ones_apart():

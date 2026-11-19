@@ -452,6 +452,41 @@ def _ensure_stable_question_keys(conn: sqlite3.Connection) -> None:
 
 
 
+def _ensure_label_facts_hardening(conn: sqlite3.Connection) -> None:
+    """017：label_facts 加固——唯一约束、归一版本/快照、标注溯源。
+
+    主键仍是 q_norm_hash（内容键，跨文档复用）；不迁移到 q_key。历史事实保持可用，
+    只补元数据；q_norm_sample 为归一后题干快照，归一器升级时可据此重算 hash 并迁移。
+    """
+    for col, decl in (("normalizer_version", "TEXT"), ("q_norm_sample", "TEXT"),
+                      ("source", "TEXT"), ("labeled_at", "TEXT"),
+                      ("confidence", "REAL")):
+        if not _column_exists(conn, "label_facts", col):
+            conn.execute(f"ALTER TABLE label_facts ADD COLUMN {col} {decl}")
+    # 历史行：版本记为当前口径，快照尽量从现存题目回填，来源/时间可按既有 merge 事实补齐。
+    conn.execute(
+        "UPDATE label_facts SET normalizer_version=? WHERE normalizer_version IS NULL",
+        (config.NORMALIZER_VERSION,))
+    conn.execute(
+        "UPDATE label_facts SET q_norm_sample=("
+        " SELECT q.q_norm FROM questions q WHERE q.q_norm_hash=label_facts.q_norm_hash LIMIT 1"
+        ") WHERE q_norm_sample IS NULL")
+    conn.execute("UPDATE label_facts SET source=COALESCE(source,'model') WHERE source IS NULL")
+    conn.execute("UPDATE label_facts SET labeled_at=COALESCE(labeled_at, merged_at) "
+                 "WHERE labeled_at IS NULL")
+    # 旧库若没在主键上约束，先按"merged_at 最新"留一行，再建唯一索引；有主键时查询为空。
+    dup = conn.execute(
+        "SELECT q_norm_hash FROM label_facts GROUP BY q_norm_hash HAVING COUNT(*) > 1").fetchall()
+    for r in dup:
+        conn.execute(
+            "DELETE FROM label_facts WHERE q_norm_hash=? AND rowid NOT IN ("
+            " SELECT rowid FROM label_facts WHERE q_norm_hash=? "
+            " ORDER BY merged_at DESC, rowid DESC LIMIT 1)",
+            (r[0], r[0]))
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_label_facts_q_norm_hash "
+                 "ON label_facts(q_norm_hash)")
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     """001：基础表（source_documents / batches 等）。脚本本身 IF NOT EXISTS，可直接重放。"""
     exec_script(conn, SCHEMA_FILE.read_text(encoding="utf-8"))
@@ -474,6 +509,7 @@ MIGRATIONS = [
     ("014_witness_collection", _ensure_question_freq_view),
     ("015_document_products", _ensure_document_products),
     ("016_stable_question_keys", _ensure_stable_question_keys),
+    ("017_label_facts_hardening", _ensure_label_facts_hardening),
 ]
 
 
@@ -533,7 +569,8 @@ REQUIRED = {
     "labels_staging": ("q_norm_hash", "prompt_tokens", "completion_tokens",
                        "review_state", "review_model", "review_note",
                        "position", "quality", "canonical_q", "tag_norm_hits"),
-    "label_facts": ("q_norm_hash", "topic"),
+    "label_facts": ("q_norm_hash", "topic", "normalizer_version", "q_norm_sample",
+                    "source", "labeled_at", "confidence"),
     "golden_labels": ("q_norm_hash",),
     "batches": ("batch_id", "state", "updated_at"),
     "document_events": ("doc_hash", "kind", "payload", "at"),
