@@ -161,6 +161,12 @@ def _is_codeish(text: str) -> bool:
     s = _strip_all_numbering(text)
     if not s:
         return False
+    # 行尾空括号是选择题题干占位（带中文内容）；`int main （）` 这类无中文代码行不在此列。
+    if re.search(r'[（(]\s*[)）]\s*$', s) and CJK.search(s):
+        return False
+    # 右括号+问号收尾是题干续段（`class）？`），不是代码。
+    if re.search(r'[？?]\s*$', s) and re.search(r'[）)]', s):
+        return False
     if s in ("{", "}", "};", "});", ");"):
         return True
     if RE_CODE_HEAD.match(s) or RE_CODE_CALL.search(s):
@@ -573,13 +579,135 @@ def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
     return None
 
 
+RE_INLINE_HIER = re.compile(r'(?<![\w./])(\d{1,4}(?:[.、．]\d{1,3}){2,})[ \t]+')
+
+
+def _split_inline_hierarchical_lines(md_text: str) -> Tuple[List[str], List[int]]:
+    """把正文行内粘连的层级题号拆成虚拟行，同时保留原文字符偏移（review2）。
+
+    `使用命令 ... 11.3.1 什么是复制？` 中命令属于前一答案，`11.3.1` 才是新题起点。
+    拆分不改动 md_text：虚拟行的 starts 仍指向原文，source_span/a_segs 可精确回溯。
+    """
+    source_lines = md_text.splitlines(keepends=True)
+    lines: List[str] = []
+    starts: List[int] = [0]
+    pos = 0
+    for raw in source_lines:
+        split_at = None
+        plain = raw.strip()
+        if plain and not plain.startswith(("#", "```", "~~~", ">")):
+            for m in RE_INLINE_HIER.finditer(plain):
+                suffix = plain[m.end():].strip()
+                prefix = plain[:m.start()].strip()
+                if (prefix and len(suffix) >= 4 and not _is_codeish(suffix)
+                        and not suffix.startswith(("的", "了", "是", "在", "和", "与"))
+                        and (_is_question_heading(suffix)
+                             or re.match(r'^(?:什么|如何|怎么|为什么|为何|哪些|哪几|请|简述|说说|介绍|解释|描述|实现|编写|设计|给定|求)', suffix))):
+                    split_at = raw.find(plain) + m.start()
+                    break
+        end = pos + len(raw)
+        if split_at is None:
+            lines.append(raw)
+            starts.append(end)
+        else:
+            prefix, suffix = raw[:split_at], raw[split_at:]
+            if prefix:
+                lines.append(prefix)
+                starts.append(pos + len(prefix))
+            if suffix:
+                lines.append(suffix)
+                starts.append(end)
+        pos = end
+    return lines, starts[:len(lines) + 1]
+
+
+def _reclaim_stem_continuation(q_text: str, a_text: str, a_segs: list | None):
+    """将因 Markdown/OCR 换行落入答案区的题干续行收回题目（review2）。
+
+    仅处理强续接证据：题干末尾未完成，且下一非空答案行以括号内容或代码标识符
+    续接（`（implements）` / `class）？`）。普通答案句、答案标签和新题标题不消费；
+    a_segs 同步裁剪，保留原文偏移。
+    """
+    q = str(q_text or "").rstrip()
+    if not q or not a_text:
+        return q_text, a_text, a_segs
+    if re.search(r"[。！？?!；;:]$", q):
+        return q_text, a_text, a_segs
+    lines = a_text.splitlines(keepends=True)
+    if not lines:
+        return q_text, a_text, a_segs
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        return q_text, a_text, a_segs
+    first = lines[i].strip()
+    if re.match(r"^(?:答(?:案)?[：:]|解析[：:]|A[：:]|答案如下)", first, re.I):
+        return q_text, a_text, a_segs
+    q_nfkc = unicodedata.normalize("NFKC", q)
+    first_nfkc = unicodedata.normalize("NFKC", first)
+    open_parens = q_nfkc.count("(") - q_nfkc.count(")")
+    strong_start = bool(re.match(
+        r"^(?:[（(](?:implements|extends|concrete|abstract|interface|class|void|int|char|String|[A-Za-z_][\w .<>]*)[）)]"
+        r"|[A-Za-z_][\w]*[）)]|class[）)])", first_nfkc, re.I))
+    incomplete_suffix = bool(re.search(
+        r"(?:是否可|是否能|是否会|可实现|可继承|具体类\s*[（(][^）)]*|接口\s*[（(][^）)]*)$", q_nfkc))
+    if not (strong_start and (open_parens > 0 or incomplete_suffix
+                              or not re.search(r"[。！？?!]$", q))):
+        return q_text, a_text, a_segs
+    consumed = i
+    parts = [q.strip()]
+    max_lines = 3
+    while consumed < len(lines) and max_lines > 0:
+        piece = lines[consumed].strip()
+        if not piece:
+            # OCR 常在英文类型名中间插空行（`(concrete` ↔ `class)？`）；
+            # 仅当下一非空行明确补齐标识符/括号时才跨过。
+            look = consumed + 1
+            while look < len(lines) and not lines[look].strip():
+                look += 1
+            next_piece = unicodedata.normalize("NFKC", lines[look].strip()) if look < len(lines) else ""
+            if (next_piece
+                    and re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_]*[)）][?？]?|[)）][?？]?)", next_piece)):
+                consumed += 1
+                continue
+            if consumed == i:
+                consumed += 1
+                continue
+            break
+        if re.match(r"^(?:答(?:案)?[：:]|解析[：:]|\d{1,4}[.、．]|#{1,6}\s)", piece, re.I):
+            break
+        if _is_codeish(piece):
+            break
+        parts.append(piece)
+        consumed += 1
+        max_lines -= 1
+        joined = " ".join(parts)
+        normalized = unicodedata.normalize("NFKC", joined)
+        if (re.search(r"[？?。]$", joined)
+                and normalized.count("(") <= normalized.count(")")):
+            break
+        if consumed < len(lines):
+            nxt = lines[consumed].strip()
+            if nxt and re.match(r"^(?:答(?:案)?[：:]|解析[：:]|#{1,6}\s|\d{1,4}[.、．])", nxt):
+                break
+            nxt_nfkc = unicodedata.normalize("NFKC", nxt)
+            if nxt and not (re.match(r"^(?:[）)]|[A-Za-z_][\w]*[）)]|class[）)])", nxt_nfkc, re.I)
+                            or re.match(r"^[（(][A-Za-z_][\w .<>]*[）)]", nxt_nfkc)):
+                break
+    if len(parts) == 1:
+        return q_text, a_text, a_segs
+    remainder_start = consumed
+    while remainder_start < len(lines) and not lines[remainder_start].strip():
+        remainder_start += 1
+    new_answer = "".join(lines[remainder_start:])
+    new_segs = list(a_segs[remainder_start:]) if a_segs else a_segs
+    return " ".join(parts), new_answer, new_segs
+
+
 def chunk(md_text: str, *, split_long: bool = True) -> Dict:
-    lines = md_text.splitlines(keepends=True)
+    lines, starts = _split_inline_hierarchical_lines(md_text)
     n = len(lines)
-    starts = [0]
-    for ln in lines:
-        starts.append(starts[-1] + len(ln))
-    starts = starts[:n + 1]
     total = starts[n]
 
     # ---- 第一遍：行分类 ----
@@ -978,6 +1106,10 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         # 行级原文偏移：a_text 剔掉噪声行后长度会变，span 必须按"行 → 原文"映射（不能累计长度）
         a_segs = [(starts[j], starts[j + 1] if j + 1 < n else total) for j in inc_idx]
         a_text = "".join(inc).rstrip("\n")
+        # review2：强证据题干续行从答案区收回题干（a_segs 同步裁剪）。
+        if bd["parts"]:
+            rq, a_text, a_segs = _reclaim_stem_continuation(bd["parts"][-1][1], a_text, a_segs)
+            bd["parts"][-1] = (bd["parts"][-1][0], rq)
         seg = md_text[b_start:b_end]
         for j, (qid, qtext) in enumerate(bd["parts"]):
             blocks.append({
