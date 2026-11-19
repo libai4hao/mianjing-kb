@@ -105,6 +105,14 @@ RE_NESTED_NUM = re.compile(
 RE_HIER_NUM = re.compile(
     r'^\s*(?:#{1,6}\s+)?(\d{1,3}(?:\.\d{1,3}){2,3})\s+(.+)$')
 
+# D3 大题说明行（「综合大题（五道选两道，每题 10 分）」）：考试说明不是题干。
+RE_EXAM_SECTION = re.compile(
+    r'(?:大题|综合题|选做题|简答题|论述题|编程题|问答题)'
+    r'.{0,12}[（(][^）)]*(?:选|任选|每题|每道|共\s*\d+\s*分|\d+\s*分)[^）)]*[）)]')
+# D3 强提问语义行首：答案列表状态不能吞掉这类编号子题。
+RE_STRONG_QSTART = re.compile(
+    r'^(?:什么是|什么|如何|怎么|为什么|为何|哪些|哪几|谈谈|说说|简述|简答|请解释|请描述|请说明|是否|能否)')
+
 
 def _strip_all_numbering(text: str) -> str:
     """去掉行首一层或多层题号/列表号，用于代码判定（不改动题干）。"""
@@ -561,6 +569,14 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             if not (nxt_is_list or prev_open):
                 list_active = False
             continue
+        # D3 大题说明行：重置题号上下文，整行不产题（带问号收尾的真题目除外）
+        if RE_EXAM_SECTION.search(s) and not re.search(r'[?？]\s*$', s):
+            last_qid = None
+            list_active = False
+            list_pending = False
+            prev_blank = True
+            last_problem_mark = False
+            continue
         q = _match_question(ln)
         if q is None:
             # OCR/网页题库常见的“题号独占一行”：`1.` 下一行才是题干。
@@ -683,8 +699,12 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                          and not _is_list_item_question(qtext))
         # 已进入编号列表：后续编号行默认是答案列表项；
         # 只有明确以问号收尾（“2. 什么是…？”）才保留为题。
+        # D3 例外：空行前置 + 强提问语义行首的编号子题不被列表状态吞掉。
+        strong_subq = (prev_blank and RE_STRONG_QSTART.match(qtext)
+                       and not qtext.rstrip().endswith(("：", ":"))
+                       and _qnorm_len(qtext) >= 6)
         if (list_active and RE_LIST_ITEM.match(s) and not md_num_heading
-                and not qtext.rstrip().endswith(("?", "？"))):
+                and not qtext.rstrip().endswith(("?", "？")) and not strong_subq):
             list_active = True
             list_pending = False
             prev_blank = False
