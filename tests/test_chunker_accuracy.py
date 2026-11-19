@@ -82,7 +82,6 @@ D2_CODE_LINES = """1. 比较两个字符串的不同
 """
 
 
-@pytest.mark.xfail(strict=True, reason="D2 未修复：编号代码行漏过行级判定成为题（阶段2 转绿）")
 def test_d2_numbered_code_lines_do_not_become_questions():
     items = chunker.chunk_v2(D2_CODE_LINES)["items"]
     qs = [it["q"] for it in items]
