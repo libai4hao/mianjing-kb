@@ -38,6 +38,16 @@ D2 代码碎片出口终检：chunk_v2 items 出口过 is_code_fragment，漏过
 D3 大题说明行（「综合大题（五道选两道，每题 10 分）」）→ 不产题、重置题号；
    答案列表状态不吞「空行前置 + 强提问语义行首（什么是/如何/为什么…）」的编号子题。
 
+review2 结构修复移植（2026-11-20，tests/test_chunker_structure_regression.py）
+------------------------------------------------------------------------------
+S1 问句/任务语义（行首问词、句尾 吗/呢/哪N个方面、选择题空括号占位）优先于
+   题号连续性；显式 Markdown 编号题头即使无问词也判题（答案小节/章节除外）。
+S2 TOC：NFKC 兼容 ⽬录；无页码目录靠短大纲条目证据、遇正文 H1/H2 截断；
+   层级题号首现后无答案且后文重复 → 局部目录 leftovers。
+S3 真章节标题是硬边界：结束答案、重置题号，leftovers(章节标题) 参与 coverage 扣除。
+S4 行内粘连层级题号拆虚拟行：前缀留父答案，新题从编号处开始，span 精确回溯。
+S5 强证据题干续行（（implements）/class）？）从答案区收回题干，a_segs 同步裁剪。
+
 chunk_v2(md_text) —— 切题器 v2 规范（2026-11-17 拍板，放宽判题信号 + 自检）
 ------------------------------------------------------------------
 什么算一题（满足任一，不要求有题号）：
@@ -1375,7 +1385,11 @@ def chunk_v2(md_text: str) -> Dict:
     probe = []
     for l in res["leftovers"]:
         if l["why"] == "块前代码" and l["span"][1] - l["span"][0] >= 80:
-            probe.append({"span": l["span"], "why": "孤立代码区"})
+            region_lines = [x.strip() for x in md_text[l["span"][0]:l["span"][1]].splitlines() if x.strip()]
+            # 整段都是编号代码行（docx/OCR 无围栏形态）→ 代码碎片，而非一般孤立代码区。
+            numbered_code = bool(region_lines) and all(
+                re.match(r'^\d{1,3}\s*[.、．)）]', x) and _is_codeish(x) for x in region_lines)
+            probe.append({"span": l["span"], "why": "代码碎片" if numbered_code else "孤立代码区"})
             if len(probe) >= 3:
                 break
     if not items:
@@ -1395,7 +1409,8 @@ def chunk_v2(md_text: str) -> Dict:
                 continue
             if (_match_question(ln) or RE_KPOINT.match(s)
                     or ((RE_QEND.search(s) or RE_INTERROGATIVE.search(s)) and len(s) <= 160)):
-                why = ("题号行" if _match_question(ln) else
+                why = ("代码碎片" if _is_codeish(s) else
+                       "题号行" if _match_question(ln) else
                        "考点行" if RE_KPOINT.match(s) else "问句行")
                 probe.append({"span": [starts[i], starts[i + 1]], "why": why})
                 if len(probe) >= 3:
