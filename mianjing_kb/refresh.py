@@ -73,6 +73,14 @@ def _counts(p: Path) -> dict:
             except sqlite3.OperationalError:
                 out[t] = None
         try:
+            # vec0 是虚拟表，必须加载 sqlite-vec 才能 COUNT；否则会误判"无向量表"
+            import sqlite_vec
+            con.enable_load_extension(True)
+            sqlite_vec.load(con)
+            con.enable_load_extension(False)
+        except Exception:                                  # noqa: BLE001 —— 没装扩展时按无表处理
+            pass
+        try:
             out["vec_questions"] = con.execute("SELECT COUNT(*) FROM vec_questions").fetchone()[0]
         except sqlite3.OperationalError:
             out["vec_questions"] = None
@@ -451,6 +459,8 @@ def main(argv=None) -> int:
                 "vec": vec,
                 "gates": {g["id"]: g["state"] for g in gates},
                 "gate_problems": problems,
+                "gate_fail_samples": {g["id"]: g["fails"][:5]
+                                      for g in gates if g["state"] in ("FAIL", "SKIP")},
             }
             if problems:
                 _cleanup(shadow)
