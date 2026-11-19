@@ -96,7 +96,7 @@ RE_CODE_ASSIGN = re.compile(r'^[A-Za-z_]\w*(?:\s*\[[^\]]*\])?\s*=\s*[^=]')
 
 # ---- 文档结构识别（2026-11-20 切题回归修复）----
 RE_TOC_HEADER = re.compile(r'^\s*(?:目\s*录|contents|table\s+of\s+contents)\s*$', re.I)
-RE_MD_NUM_HEADING = re.compile(r'^\s*#{2,6}\s+\d{1,3}(?:\s*[.、．]|\s*[)）])')
+RE_MD_NUM_HEADING = re.compile(r'^\s*#{1,6}\s+\d{1,3}(?:\s*[.、．]|\s*[)）])')
 RE_MD_H12 = re.compile(r'^\s*#{1,2}\s+\S')
 RE_LIST_LEAD = re.compile(
     r'(?:如下|以下|下列|包括|包含|分为|分成|分别是|基本要素|几个方面|哪几种|哪些|几种|四种|三种)')
@@ -163,6 +163,7 @@ def _toc_mask(lines: List[str]) -> set[int]:
     if start is None:
         return set()
     leaders = pages = 0
+    saw_entry = False
     end = n
     for j in range(start + 1, n):
         s = lines[j].strip()
@@ -170,9 +171,11 @@ def _toc_mask(lines: List[str]) -> set[int]:
             continue
         if RE_PAGE.match(s):
             pages += 1
+            saw_entry = True
             continue
         if RE_TOC.search(s):
             leaders += 1
+            saw_entry = True
             continue
         if re.fullmatch(r'[-=_—–\s]{3,}', s):
             continue
@@ -180,13 +183,23 @@ def _toc_mask(lines: List[str]) -> set[int]:
         if RE_MD_H12.match(s) and not RE_TOC.search(s) and leaders >= 2:
             end = j
             break
+        # 有目录条目、但后面没有 H1/H2 时，遇到第一个真正题目行就结束，
+        # 避免把正文全部当作目录。
+        if (saw_entry and not RE_TOC.search(s)
+                and (_match_question(s) or _is_qline(s))
+                and not any(RE_MD_H12.match(x.strip()) for x in lines[j:j + 5000])):
+            end = j
+            break
         # 无 Markdown 标题的 PDF 目录：连续页码后，首个不缩进、非目录样式行视为正文。
-        # 但若后面 2000 行内还有 H1/H2，优先等真正的正文标题，避免目录页脚提前截断。
-        future_h12 = any(RE_MD_H12.match(x.strip()) for x in lines[j:j + 2000])
+        # 但若后面 5000 行内还有 H1/H2，优先等真正的正文标题，避免目录页脚提前截断。
+        future_h12 = any(RE_MD_H12.match(x.strip()) for x in lines[j:j + 5000])
         if (pages >= 3 and not future_h12 and not s.startswith((" ", "\t"))
                 and not RE_TOC.search(s) and len(CJK.findall(s)) >= 4):
             end = j
             break
+    if not saw_entry:
+        # 只有“目录”标题、后面没有点线/页码条目：不能把全文当目录。
+        return {start}
     return set(range(start, end))
 
 
@@ -231,7 +244,9 @@ def _looks_section_line(s: str) -> bool:
         return False
     if RE_LIST_ITEM.match(s) or RE_KPOINT.match(s):
         return False
-    return bool(re.search(r'(?:面经|面试|一面|二面|三面|四面|HR面|总监面|交叉面|基础篇|进阶篇|总结篇|数据结构篇|算法篇)', s))
+    return bool(re.search(
+        r'(?:面经|面试|一面|二面|三面|四面|HR面|总监面|交叉面|基础篇|进阶篇|总结篇|'
+        r'数据结构篇|算法篇|第[一二三四五六七八九十0-9]+[章部分节])', s))
 
 
 
@@ -356,7 +371,10 @@ def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
         if hm.start() <= 0:
             continue
         body = line[hm.end():].strip()
-        if len(body) >= 4 and not _is_codeish(body):
+        if (len(body) >= 4 and not _is_codeish(body)
+                and not body.startswith(("的", "了", "是", "在", "和", "与"))
+                and (_is_question_heading(body)
+                     or re.match(r'^(?:什么|如何|怎么|为什么|为何|哪些|哪几|请|简述|说说|介绍|解释|描述|实现|编写|设计|给定|求)', body))):
             return None, body, "标题"
     nested = _match_nested_number(line)
     if nested and (re.search(r'[?？]', nested[1]) or len(nested[1]) >= 4):
@@ -429,7 +447,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         if RE_PAGE.match(s) and len(s) <= 30:
             kinds[i] = "page"
             continue
-        if re.match(r'^#\s+\S', ln):
+        if re.match(r'^#\s+\S', ln) and not RE_MD_NUM_HEADING.match(s):
             kinds[i] = "doc_header"
         # 配图段标题（convert 派生的结构段）：非文档头也非题，整段落 leftovers
         if re.match(r'^#{1,6}\s+配图', ln):

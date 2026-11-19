@@ -304,3 +304,44 @@ mongod 是处理 MongoDB 系统的主要进程。
     assert not any("11.1.7" in q for q in qs)
 
 
+def test_toc_header_without_entries_does_not_mask_body():
+    """只有“目录”标题、没有点线/页码条目时，不能把全文当目录。"""
+    md = """# 文档
+
+目录
+
+1、什么是A？
+
+答案A
+"""
+    v2 = chunker.chunk_v2(md)
+    assert [it["q"] for it in v2["items"]] == ["什么是A？"]
+
+
+def test_version_number_is_not_treated_as_embedded_heading():
+    """`Java 8.0.0 的新特性是什么` 里的版本号不是章节层级编号。"""
+    md = """Java 8.0.0 的新特性是什么？
+
+Lambda 和 Stream。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [it["q"] for it in v2["items"]]
+    assert any("Java 8.0.0 的新特性是什么" in q for q in qs)
+    assert not any(q.startswith("的新特性") for q in qs)
+
+
+def test_h1_numbered_heading_is_a_question_boundary():
+    md = """# 1、什么是A？
+
+答案A。
+
+# 2、什么是B？
+
+答案B。
+"""
+    v2 = chunker.chunk_v2(md)
+    assert [it["q"] for it in v2["items"]] == ["什么是A？", "什么是B？"]
+
+
+
+
