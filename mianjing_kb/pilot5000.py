@@ -340,8 +340,7 @@ def run(cfg: dict, with_label: bool = False) -> dict:
             raise RuntimeError("with_label 需要先填配置 llm.key 或设置环境变量 LLM_KEY")
         steps += [
             ("label_check", [py, "-m", "mianjing_kb.cli", "label", "--check"]),
-            ("label_dry_run", [py, "-m", "mianjing_kb.cli", "label", "--dry-run",
-                               "--limit", "100"]),
+            ("label_write", [py, "-m", "mianjing_kb.cli", "label", "--limit", "100"]),
         ]
     results = []
     for name, cmd in steps:
@@ -356,8 +355,8 @@ def run(cfg: dict, with_label: bool = False) -> dict:
     return summary
 
 
-def label(cfg: dict) -> dict:
-    """只跑 100 题打标冒烟；填好 llm.key 后可单独执行，不重跑核心链路。"""
+def label(cfg: dict, dry_run: bool = False) -> dict:
+    """只跑 100 题打标冒烟；默认写试跑库 staging（测试库），dry_run 仅试输出。"""
     root = Path(cfg["pilot_root"])
     db = root / "build" / "kb.sqlite"
     if not db.exists():
@@ -367,10 +366,13 @@ def label(cfg: dict) -> dict:
     env = _env(cfg)
     log = root / "build" / "pilot_run.log"
     py = cfg["python"]
+    label_cmd = [py, "-m", "mianjing_kb.cli", "label"]
+    if dry_run:
+        label_cmd.append("--dry-run")
+    label_cmd += ["--limit", "100"]
     steps = [
         ("label_check", [py, "-m", "mianjing_kb.cli", "label", "--check"]),
-        ("label_dry_run", [py, "-m", "mianjing_kb.cli", "label", "--dry-run",
-                           "--limit", "100"]),
+        ("label_dry_run" if dry_run else "label_write", label_cmd),
     ]
     results = []
     for name, cmd in steps:
@@ -446,9 +448,15 @@ def report(cfg: dict) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="5,000 题小排量预生产试跑")
     ap.add_argument("stage", choices=["prepare", "run", "label", "report"])
-    ap.add_argument("--config", default=r"D:\pilot\5000\config.json")
+    ap.add_argument("--config", default=os.environ.get("PILOT_CONFIG", ""))
     ap.add_argument("--with-label", action="store_true", help="run 时额外跑 100 题打标冒烟")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="label 阶段只试输出、不写试跑库（默认写 staging）")
     args = ap.parse_args(argv)
+    if not args.config:
+        print(json.dumps({"ok": False, "error": "请用 --config 或环境变量 PILOT_CONFIG 指定配置路径"},
+                         ensure_ascii=False))
+        return 2
     path = Path(args.config)
     cfg = ensure_config(path)
     try:
@@ -457,7 +465,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.stage == "run":
             out = run(cfg, with_label=args.with_label)
         elif args.stage == "label":
-            out = label(cfg)
+            out = label(cfg, dry_run=args.dry_run)
         else:
             out = report(cfg)
     except Exception as ex:  # noqa: BLE001

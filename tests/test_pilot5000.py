@@ -108,6 +108,30 @@ def test_label_requires_key(tmp_path, monkeypatch):
         P.label(cfg)
 
 
+def test_label_writes_to_pilot_db_by_default(tmp_path, monkeypatch):
+    """默认必须写试跑库 staging；--dry-run 才只试输出。"""
+    root = tmp_path / "pilot"
+    (root / "build").mkdir(parents=True)
+    (root / "build" / "kb.sqlite").write_bytes(b"")
+    cfg = {
+        "pilot_root": str(root), "repo_root": str(tmp_path), "python": "py",
+        "llm": {"key": "k", "provider": "online", "base": "http://x",
+                "model": "m", "price": "1,4", "rpm": 5},
+    }
+    seen = []
+
+    def fake_run(cmd, env, log, cwd):
+        seen.append(cmd)
+        return {"cmd": cmd, "rc": 0, "seconds": 0.1}
+
+    monkeypatch.setattr(P, "_run", fake_run)
+    P.label(cfg)
+    assert "--dry-run" not in seen[-1]
+    assert seen[-1][-2:] == ["--limit", "100"]
+    P.label(cfg, dry_run=True)
+    assert "--dry-run" in seen[-1]
+
+
 
 
 
