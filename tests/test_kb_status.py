@@ -44,7 +44,8 @@ def test_collect_reports_pipeline_counts(mini_env):
     assert data["kb"]["source"]["ingested"] == 1
     assert data["kb"]["products"]["not_extracted"] == 1
     assert data["kb"]["pipeline"]["pending_extract"] == 1
-    assert data["kb"]["questions"]["missing_topic"] == 1
+    assert data["kb"]["questions"]["missing_topic"] == 0
+    assert data["kb"]["questions"]["with_topic"] == 1
     assert data["kb"]["labels"]["review_pending"] == 1
     assert data["gates"]["state"] == "MISSING"
     assert any("门禁" in x for x in data["attention"])

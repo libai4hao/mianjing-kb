@@ -34,7 +34,7 @@ def _unsigned64(v: int) -> int:
 def load_questions(conn) -> list[dict]:
     rows = conn.execute(
         "SELECT q.doc_hash, q.seq, q.q_text, q.q_norm, q.q_norm_hash, q.simhash, q.qtype, "
-        "       sd.file_name, sd.topic, sd.collection "
+        "       q.q_key, sd.file_name, sd.topic, sd.collection "
         "FROM questions q LEFT JOIN source_documents sd ON sd.doc_hash = q.doc_hash"
     ).fetchall()
     out = []

@@ -340,7 +340,7 @@ def g4_index(out_conn) -> dict:
         cols = {r[1] for r in out_conn.execute("PRAGMA table_info(vec_questions)")}
     except Exception:  # noqa: BLE001
         cols = set()
-    need = {"topic", "qtype", "difficulty"}
+    need = {"topic", "qtype", "difficulty", "q_key"}
     if not need <= cols:
         fails.append({"kind": "vec_metadata_missing", "columns": sorted(cols),
                       "required": sorted(need),
@@ -350,17 +350,20 @@ def g4_index(out_conn) -> dict:
             "SELECT COUNT(*) FROM vec_questions v JOIN questions q ON q.qid=v.rowid "
             "WHERE COALESCE(v.topic,'') != COALESCE(q.topic,'') "
             "   OR COALESCE(v.qtype,'') != COALESCE(q.qtype,'') "
+            "   OR COALESCE(v.q_key,'') != COALESCE(q.q_key,'') "
             "   OR COALESCE(CAST(v.difficulty AS TEXT),'') "
-            "      != COALESCE(CAST(q.difficulty AS TEXT),'')").fetchone()[0]
+            "      != COALESCE(CAST(COALESCE(q.difficulty,-1) AS TEXT),'')").fetchone()[0]
         empty_topic = out_conn.execute(
             "SELECT COUNT(*) FROM vec_questions WHERE COALESCE(topic,'')=''").fetchone()[0]
         empty_qtype = out_conn.execute(
             "SELECT COUNT(*) FROM vec_questions WHERE COALESCE(qtype,'')=''").fetchone()[0]
+        empty_key = out_conn.execute(
+            "SELECT COUNT(*) FROM vec_questions WHERE COALESCE(q_key,'')=''").fetchone()[0]
         if meta_bad:
             fails.append({"kind": "vec_metadata_mismatch", "rows": meta_bad})
-        if empty_topic or empty_qtype:
+        if empty_topic or empty_qtype or empty_key:
             fails.append({"kind": "vec_metadata_empty", "topic": empty_topic,
-                          "qtype": empty_qtype})
+                          "qtype": empty_qtype, "q_key": empty_key})
     if n_fts != n_q or fts_ids != q_ids:
         fails.append({"kind": "fts_mismatch", "questions": n_q, "fts": n_fts,
                       "rowid_diff": len(q_ids ^ fts_ids)})

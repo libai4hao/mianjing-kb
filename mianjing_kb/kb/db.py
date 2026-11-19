@@ -371,6 +371,87 @@ def _ensure_document_products(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dp_md     ON document_products(md_rel)")
 
 
+def _ensure_stable_question_keys(conn: sqlite3.Connection) -> None:
+    """016（T29）：稳定键 `q_key=(doc_hash,q_norm_hash)` + 增量依赖/候选表。
+
+    现状 `qid` 是 AUTOINCREMENT 行号，extract 重切就漂移；T29 把跨库引用改为 q_key。
+    历史库存在同文档同题重复（chunker 重复产出），先按"答案最长"保留一条，再建唯一索引；
+    这是身份收口的前置条件，否则 q_key 不唯一，向量/标签外键无法成立。
+    """
+    if not _column_exists(conn, "questions", "q_key"):
+        conn.execute("ALTER TABLE questions ADD COLUMN q_key TEXT")
+    conn.execute(
+        "UPDATE questions SET q_key = doc_hash || ':' || "
+        "CASE WHEN COALESCE(q_norm_hash,'')='' THEN 'seq:' || seq ELSE q_norm_hash END "
+        "WHERE COALESCE(q_key,'')=''")
+    conn.execute(
+        "DELETE FROM questions WHERE qid IN ("
+        " SELECT qid FROM ("
+        "  SELECT qid, ROW_NUMBER() OVER (PARTITION BY q_key "
+        "         ORDER BY LENGTH(COALESCE(a_text,'')) DESC, qid) AS rn"
+        "  FROM questions"
+        " ) WHERE rn > 1"
+        ")")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_questions_qkey ON questions(q_key)")
+
+    if not _column_exists(conn, "question_variants", "q_key"):
+        conn.execute("ALTER TABLE question_variants ADD COLUMN q_key TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_var_qkey ON question_variants(q_key)")
+    conn.execute(
+        "UPDATE question_variants SET q_key = ("
+        " SELECT q.q_key FROM questions q WHERE q.doc_hash=question_variants.doc_hash "
+        " AND CAST(q.seq AS TEXT)=question_variants.question_no LIMIT 1"
+        ") WHERE COALESCE(q_key,'')=''")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS canonical_dependents (
+          canonical_id TEXT NOT NULL,
+          q_key        TEXT NOT NULL,
+          doc_hash     TEXT NOT NULL,
+          collection   TEXT,
+          PRIMARY KEY (canonical_id, q_key)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cd_canon ON canonical_dependents(canonical_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cd_doc ON canonical_dependents(doc_hash)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS merge_candidates (
+          q_key        TEXT PRIMARY KEY,
+          canonical_id TEXT NOT NULL,
+          similarity   REAL NOT NULL,
+          status       TEXT NOT NULL DEFAULT 'pending',
+          created_at   TEXT NOT NULL,
+          updated_at   TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mc_canon ON merge_candidates(canonical_id)")
+    # 全量 canonical 已存在时，把现有 variant 回填成 dependent（witness 的增量来源）。
+    conn.execute(
+        "INSERT OR IGNORE INTO canonical_dependents(canonical_id,q_key,doc_hash,collection) "
+        "SELECT v.canonical_id, v.q_key, v.doc_hash, COALESCE(v.collection,'') "
+        "FROM question_variants v WHERE COALESCE(v.q_key,'')!=''")
+    # 去重会删掉重复题行；它们的 variant 已成为孤儿，必须一起收口，
+    # 否则 variant 仍指向不存在的 q_key，manifest 回滚/witness 会算错。
+    conn.execute(
+        "DELETE FROM question_variants WHERE COALESCE(q_key,'')='' "
+        "OR q_key NOT IN (SELECT q_key FROM questions)")
+    conn.execute(
+        "DELETE FROM canonical_dependents WHERE q_key NOT IN (SELECT q_key FROM questions)")
+    conn.execute(
+        "DELETE FROM canonical_questions WHERE canonical_id NOT IN "
+        "(SELECT DISTINCT canonical_id FROM question_variants)")
+    conn.execute(
+        "UPDATE canonical_questions SET witness=("
+        " SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(collection),''),"
+        "        'doc:'||doc_hash)) FROM canonical_dependents cd "
+        " WHERE cd.canonical_id=canonical_questions.canonical_id)")
+
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     """001：基础表（source_documents / batches 等）。脚本本身 IF NOT EXISTS，可直接重放。"""
     exec_script(conn, SCHEMA_FILE.read_text(encoding="utf-8"))
@@ -392,6 +473,7 @@ MIGRATIONS = [
     ("013_label_taxonomy", _ensure_label_taxonomy),
     ("014_witness_collection", _ensure_question_freq_view),
     ("015_document_products", _ensure_document_products),
+    ("016_stable_question_keys", _ensure_stable_question_keys),
 ]
 
 
@@ -447,7 +529,7 @@ REQUIRED = {
     "source_documents": ("doc_hash", "sha256", "src_path", "dir_path", "status",
                          "parent_dir", "source_count", "sources_json"),
     "questions": ("qid", "doc_hash", "topic", "difficulty", "tags",
-                  "position", "quality", "canonical_q"),
+                  "position", "quality", "canonical_q", "q_key"),
     "labels_staging": ("q_norm_hash", "prompt_tokens", "completion_tokens",
                        "review_state", "review_model", "review_note",
                        "position", "quality", "canonical_q", "tag_norm_hits"),
@@ -458,6 +540,8 @@ REQUIRED = {
     "label_taxonomy": ("level1", "level2", "synonyms", "enabled", "sort"),
     "document_products": ("doc_hash", "md_rel", "md_hash", "text_source", "questions_n",
                           "input_size", "input_mtime", "extracted_at", "updated_at"),
+    "canonical_dependents": ("canonical_id", "q_key", "doc_hash", "collection"),
+    "merge_candidates": ("q_key", "canonical_id", "similarity", "status"),
 }
 
 

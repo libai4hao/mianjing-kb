@@ -118,13 +118,16 @@ def _kb_summary(con) -> dict:
     }
 
     if _table_exists(con, "questions"):
+        # 有效主题：题级 topic 为空时继承文档 topic（G3 同款口径），否则会把 20k 题全算待打标。
+        eff = ("COALESCE(NULLIF(q.topic,''), NULLIF(sd.topic,''), '')")
         out["questions"] = {
             "total": _scalar(con, "SELECT COUNT(*) FROM questions"),
             "with_topic": _scalar(
-                con, "SELECT COUNT(*) FROM questions WHERE COALESCE(topic,'') != ''"),
+                con, "SELECT COUNT(*) FROM questions q LEFT JOIN source_documents sd "
+                     f"ON sd.doc_hash=q.doc_hash WHERE {eff} NOT IN ('', '{config.UNCLASSIFIED}')"),
             "missing_topic": _scalar(
-                con, f"SELECT COUNT(*) FROM questions WHERE COALESCE(topic,'') = '' "
-                     f"OR topic='{config.UNCLASSIFIED}'"),
+                con, "SELECT COUNT(*) FROM questions q LEFT JOIN source_documents sd "
+                     f"ON sd.doc_hash=q.doc_hash WHERE {eff} IN ('', '{config.UNCLASSIFIED}')"),
             "with_difficulty": _scalar(
                 con, "SELECT COUNT(*) FROM questions WHERE difficulty IS NOT NULL"),
             "with_tags": _scalar(
@@ -163,6 +166,14 @@ def _retrieval_summary(path: Path) -> dict:
     if con is None:
         return {"present": False, "path": str(path)}
     try:
+        # vec0 是虚拟表：只读连接也要加载扩展，否则 COUNT 会报 no such module。
+        try:
+            import sqlite_vec
+            con.enable_load_extension(True)
+            sqlite_vec.load(con)
+            con.enable_load_extension(False)
+        except Exception:  # noqa: BLE001
+            pass
         out: dict = {"present": True, "path": str(path)}
         out["questions"] = _scalar(con, "SELECT COUNT(*) FROM questions", None) \
             if _table_exists(con, "questions") else None
@@ -217,9 +228,9 @@ def _cluster_summary(build_dir: Path) -> dict:
         return {"present": False}
     return {"present": True,
             "complete": data.get("complete"),
-            "pool_docs": data.get("stats", {}).get("pool_docs"),
-            "questions_99": data.get("stats", {}).get("questions_99"),
-            "verdict99": data.get("stats", {}).get("verdict99"),
+            "pool_docs": data.get("stats", {}).get("docs"),
+            "questions_99": data.get("stats", {}).get("q99_questions"),
+            "verdict99": data.get("verdict99"),
             "elapsed_sec": data.get("elapsed_sec")}
 
 

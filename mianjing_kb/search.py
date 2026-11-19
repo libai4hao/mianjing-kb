@@ -42,7 +42,7 @@ _JOIN = (
     " LEFT JOIN documents d ON d.doc_hash=q.doc_hash "
     " LEFT JOIN doc_contents dc ON dc.mirror_hash=q.doc_hash "
 )
-_SELECT = ("SELECT q.qid, q.q_text, q.qtype, q.topic, q.difficulty, q.tags_json, "
+_SELECT = ("SELECT q.qid, q.q_key, q.q_text, q.qtype, q.topic, q.difficulty, q.tags_json, "
            "q.position, q.quality, COALESCE(d.file_name, dc.md_rel) AS source, q.a_text ")
 VEC_OVERSAMPLE = 4          # 多选/标签只能在 KNN 后过滤，先过采样再截断
 VEC_MAX_CANDIDATES = 512    # 过采样上限，防止极端过滤把 k 放大到全表

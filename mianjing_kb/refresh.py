@@ -32,7 +32,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, wlock  # noqa: E402
+from mianjing_kb.kb import config, db as kbdb, wlock  # noqa: E402
 
 SHADOW_NAME = "面经库_shadow.db"
 ONLINE_NAME = "面经库.db"
@@ -201,6 +201,13 @@ def copy_vec(src_db: Path, dst_db: Path) -> dict:
     con = sqlite3.connect(f"file:{dst_db.as_posix()}?mode=rwc", uri=True)
     try:
         con.execute("ATTACH DATABASE ? AS cur", (_ro_uri(src_db),))
+        try:
+            import sqlite_vec
+        except ImportError:
+            return {"ok": False, "kind": "no_sqlite_vec", "detail": "sqlite_vec 不可用"}
+        con.enable_load_extension(True)
+        sqlite_vec.load(con)
+        con.enable_load_extension(False)
         has = con.execute("SELECT COUNT(*) FROM cur.sqlite_master "
                           "WHERE type='table' AND name='vec_questions'").fetchone()[0]
         if not has:
@@ -209,7 +216,7 @@ def copy_vec(src_db: Path, dst_db: Path) -> dict:
             from mianjing_kb.embed_questions import create_vec_table, vec_metadata_ready
             if not vec_metadata_ready(con, "vec_questions", schema="cur"):
                 return {"ok": False, "kind": "vec_schema_old",
-                        "detail": "现行向量表没有 topic/qtype/difficulty 元数据列；"
+                        "detail": "现行向量表没有 topic/qtype/difficulty/q_key 元数据列；"
                                   "请用 --reembed 重建"}
         except Exception as ex:  # noqa: BLE001
             return {"ok": False, "kind": "error",
@@ -242,17 +249,27 @@ def copy_vec(src_db: Path, dst_db: Path) -> dict:
         if orphan:
             return {"ok": False, "kind": "orphan_vectors",
                     "detail": f"现行库有 {orphan} 条孤立向量（rowid 无对应题目）"}
+        # T29：题集指纹必须一致，否则向量是旧的，切过去会静默错配。
         try:
-            import sqlite_vec
-        except ImportError:
-            return {"ok": False, "kind": "no_sqlite_vec", "detail": "sqlite_vec 不可用"}
-        con.enable_load_extension(True)
-        sqlite_vec.load(con)
-        con.enable_load_extension(False)
+            src_hash = con.execute(
+                "SELECT value FROM cur.vec_meta WHERE key='question_set_hash'").fetchone()
+        except Exception:  # noqa: BLE001
+            src_hash = None
+        if not src_hash or not src_hash[0]:
+            return {"ok": False, "kind": "vec_meta_missing",
+                    "detail": "现行向量表没有题集指纹（T29 前旧库）；请用 --reembed 重建"}
+        from mianjing_kb.embed_questions import question_set_hash, write_vec_meta
+        dst_hash = question_set_hash(con)
+        if src_hash[0] != dst_hash:
+            return {"ok": False, "kind": "vec_set_mismatch",
+                    "detail": f"向量题集指纹不一致 src={src_hash[0][:12]} dst={dst_hash[:12]}；"
+                              "请用 --reembed 重建"}
         from mianjing_kb.embed_questions import create_vec_table
         create_vec_table(con)
-        con.execute("INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty) "
-                    "SELECT rowid, embedding, topic, qtype, difficulty FROM cur.vec_questions")
+        con.execute("INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty, q_key) "
+                    "SELECT rowid, embedding, topic, qtype, difficulty, q_key "
+                    "FROM cur.vec_questions")
+        write_vec_meta(con, src_hash[0])
         n_dst = con.execute("SELECT COUNT(*) FROM vec_questions").fetchone()[0]
         n_src = con.execute("SELECT COUNT(*) FROM cur.vec_questions").fetchone()[0]
         con.commit()
@@ -344,6 +361,23 @@ def _disk_guard(online: Path, build_dir: Path) -> str | None:
     return None
 
 
+def _mark_indexed(kb_path: Path) -> str | None:
+    """切换成功后回写 document_products.indexed_at，供 kb status 判断"未入索引"。
+
+    只标有产物且已抽过的行；0 题件也算处理完并已进检索库。
+    """
+    try:
+        con = kbdb.connect(kb_path, create=False)
+        now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        con.execute("UPDATE document_products SET indexed_at=? WHERE extracted_at IS NOT NULL",
+                    (now,))
+        con.commit()
+        con.close()
+        return None
+    except Exception as ex:  # noqa: BLE001 —— 回写失败不影响已完成的切换
+        return f"{type(ex).__name__}: {ex}"
+
+
 def _log(build_dir: Path, summary: dict) -> None:
     try:
         with (build_dir / LOG_NAME).open("a", encoding="utf-8") as fh:
@@ -356,7 +390,9 @@ def _log(build_dir: Path, summary: dict) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="检索库影子重建 + G1-G5 门禁 + 原子切换")
     ap.add_argument("--reembed", action="store_true",
-                    help="影子重建后重跑向量化（新题入库后必用；默认只拷现行库向量）")
+                    help="强制重跑向量化（题集结构变更后使用）")
+    ap.add_argument("--copy-vec", action="store_true",
+                    help="强制拷现行向量；指纹/结构不匹配则中止（默认自动判断）")
     ap.add_argument("--swap-only", action="store_true",
                     help="跳过重建/门禁，只对已建好的影子库重试切换")
     args = ap.parse_args(argv)
@@ -452,14 +488,31 @@ def main(argv=None) -> int:
             else:
                 res = copy_vec(online, shadow) if online.exists() else {
                     "ok": True, "kind": "absent", "detail": "线上库不存在"}
-                if not res.get("ok"):
+                # T29：默认 auto——结构/指纹不匹配时自动 reembed；misaligned/orphan 等
+                # 源数据问题仍中止，不能拿错位向量兜底。
+                if (not args.copy_vec and not res.get("ok")
+                        and res.get("kind") in ("vec_schema_old", "vec_meta_missing",
+                                                "vec_set_mismatch")):
+                    from mianjing_kb.embed_questions import run as embed_run
+                    emb = embed_run(out_db=shadow)
+                    err = check_reembed(shadow, emb)
+                    if err:
+                        _cleanup(shadow)
+                        print(json.dumps({"verdict": "ABORT", "why": f"自动重嵌入校验失败：{err}",
+                                          "note": "线上 面经库.db 未动"},
+                                         ensure_ascii=False, indent=1))
+                        return 1
+                    vec = {"kind": "auto_reembed", "vectors": emb.get("vectors"),
+                           "reason": res.get("kind")}
+                elif not res.get("ok"):
                     _cleanup(shadow)
                     print(json.dumps({"verdict": "ABORT",
                                       "why": f"向量回填失败: {res.get('kind')}: {res.get('detail', '')}",
                                       "note": "线上 面经库.db 未动；可 --reembed 重跑向量化后重试"},
                                      ensure_ascii=False, indent=1))
                     return 1
-                vec = {k: v for k, v in res.items() if k != "ok"}
+                else:
+                    vec = {k: v for k, v in res.items() if k != "ok"}
 
             gates = run_gates(shadow)
             problems = check_gates(gates)
@@ -524,6 +577,9 @@ def main(argv=None) -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=1, default=str))
             return 1
 
+        mark_warn = _mark_indexed(Path(config.DB_PATH))
+        if mark_warn:
+            warns.append(f"indexed_at 回写失败：{mark_warn}")
         removed = _snapshot_gc(online)
         summary.update({
             "verdict": "PASS",

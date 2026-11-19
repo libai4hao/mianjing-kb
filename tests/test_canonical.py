@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 from mianjing_kb import canonical as cn  # noqa: E402
-from mianjing_kb.kb import config  # noqa: E402
+from mianjing_kb.kb import config, db as kbdb  # noqa: E402
 
 REAL_META = config.META_DIR
 
@@ -45,6 +45,7 @@ def mini_db(tmp_path, monkeypatch):
             "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
             "q_norm_hash, simhash, span_start, span_end, extracted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (i, h, seq, norm, f"答案{i}", "八股", "high", norm, norm[:16], 0, 0, 1, "now"))
+    kbdb._ensure_stable_question_keys(conn)   # T29：测试库补 q_key/依赖表（与正式迁移同函数）
     conn.commit()
     yield conn
     conn.close()
@@ -103,3 +104,43 @@ def test_idempotent_and_dry_run(mini_db):
     mini_db.commit()
     cn.main(["--dry-run"])
     assert mini_db.execute("SELECT COUNT(*) FROM canonical_questions").fetchone()[0] == 0
+
+
+def test_incremental_attach_create_and_manifest_rollback(mini_db, tmp_path):
+    """T29：同题吸附、新题建簇，都只写增量；manifest apply 回滚到原状。"""
+    from mianjing_kb import manifests
+    cn.main([])
+    # 新增两题：h6 与 JVM 同 norm（吸附），h7 全新（建簇）
+    mini_db.executemany(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+        "dir_path, status, batch_id, first_seen_at, last_seen_at, topic, collection) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [("h6", "h6" + "0" * 48, "己.pdf", ".pdf", 1, "x/己.pdf", "02", "classified", "t",
+          "now", "now", "JVM", "c6"),
+         ("h7", "h7" + "0" * 48, "庚.pdf", ".pdf", 1, "x/庚.pdf", "02", "classified", "t",
+          "now", "now", "JVM", "c7")])
+    mini_db.execute(
+        "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
+        "q_norm_hash, simhash, span_start, span_end, extracted_at, q_key) "
+        "VALUES (7,'h6',1,?,'答案7','八股','high',?,?,0,0,1,'now',?)",
+        (N_JVM, N_JVM, N_JVM[:16], f"h6:{N_JVM[:16]}"))
+    mini_db.execute(
+        "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
+        "q_norm_hash, simhash, span_start, span_end, extracted_at, q_key) "
+        "VALUES (8,'h7',1,?,'答案8','八股','high',?,?,0,0,1,'now',?)",
+        ("什么是垃圾回收", "什么是垃圾回收", "gc" * 8, "h7:" + "gc" * 8))
+    mini_db.commit()
+    assert cn.main(["--incremental", "--batch-id", "t1"]) == 0
+    assert mini_db.execute("SELECT COUNT(*) FROM canonical_questions").fetchone()[0] == 4
+    assert mini_db.execute("SELECT COUNT(*) FROM question_variants").fetchone()[0] == 8
+    jvm = mini_db.execute(
+        "SELECT canonical_id,witness FROM canonical_questions WHERE title_norm=?", (N_JVM,)).fetchone()
+    assert jvm["witness"] == 3                     # c1/c2/c6 三个 collection
+    mf = manifests.load("t1", tmp_path / "build")
+    assert mf and mf["status"] == "committed"
+    assert len(mf["created_canonicals"]) == 1 and len(mf["attached"]) == 1
+
+    out = manifests.rollback(mini_db, "t1", apply=True, build_dir=tmp_path / "build")
+    assert out["ok"] and out["status"] == "rolled_back"
+    assert mini_db.execute("SELECT COUNT(*) FROM canonical_questions").fetchone()[0] == 3
+    assert mini_db.execute("SELECT COUNT(*) FROM question_variants").fetchone()[0] == 6

@@ -88,9 +88,10 @@ CREATE TABLE questions(
   qid INTEGER PRIMARY KEY, doc_hash TEXT, seq INTEGER,
   q_text TEXT, a_text TEXT, qtype TEXT, conf TEXT,
   q_norm_hash TEXT, topic TEXT, category TEXT,
-  difficulty INTEGER, tags_json TEXT, position TEXT, quality TEXT);
+  difficulty INTEGER, tags_json TEXT, position TEXT, quality TEXT, q_key TEXT);
 CREATE INDEX IF NOT EXISTS idx_qdoc ON questions(doc_hash);
 CREATE INDEX IF NOT EXISTS idx_qnorm ON questions(q_norm_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_qkey ON questions(q_key);
 CREATE TABLE question_tags(
   qid INTEGER NOT NULL, tag TEXT NOT NULL, tag_norm TEXT NOT NULL,
   PRIMARY KEY(qid, tag_norm));
@@ -145,15 +146,16 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
     qs = src.execute(
         "SELECT q.qid, q.doc_hash, q.seq, q.q_text, q.a_text, q.qtype, q.conf, q.q_norm_hash, "
         "       COALESCE(q.topic, sd.topic, ''), COALESCE(sd.category, ''), "
-        "       q.difficulty, q.tags, q.position, q.quality "
+        "       q.difficulty, q.tags, q.position, q.quality, q.q_key "
         "FROM questions q LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash").fetchall()
     out.executemany(
         "INSERT INTO questions(qid, doc_hash, seq, q_text, a_text, qtype, conf, "
-        "  q_norm_hash, topic, category, difficulty, tags_json, position, quality) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "  q_norm_hash, topic, category, difficulty, tags_json, position, quality, q_key) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(r[0], r[1], r[2], r[3], (r[4] or "")[:8000], r[5], r[6], r[7],
           r[8] or mirror_topic.get(r[1], ""), r[9] or mirror_cat.get(r[1], ""),
-          r[10], _tags_json(r[11]), r[12], r[13]) for r in qs])
+          r[10], _tags_json(r[11]), r[12], r[13],
+          r[14] or f"{r[1]}:{r[7]}") for r in qs])
     out.executemany(
         "INSERT INTO questions_fts(rowid, q_text, a_text) VALUES(?,?,?)",
         [(r[0], r[3], (r[4] or "")[:8000]) for r in qs])

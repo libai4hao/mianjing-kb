@@ -8,6 +8,20 @@
 
 ## 2026-11-19
 
+- **T31 `kb status`**（`fde9542`）：只读汇总源状态、产物/待抽题、题与标签覆盖、检索库向量/标签行、
+  门禁报告指纹是否过期、99 区结果、写锁与最近批次；`kb status --json` 可脚本消费。门禁报告
+  与当前 kb/面经库大小+mtime 不一致时标 `STALE`，不重跑门禁。
+- **T1+T22 检索过滤下沉**（`e962b94`）：`vec_questions` 增 `topic/qtype/difficulty` vec0 metadata，
+  `--topic/--qtype/--difficulty` 在 KNN 阶段过滤；检索库 `questions` 下沉 `difficulty/tags_json/
+  position/quality`，新增 `question_tags(qid,tag,tag_norm)` 索引；`search` 增
+  `--difficulty/--position/--quality/--tag`（多 tag 为 AND）。G4 校验 vec 元数据逐行一致，
+  旧裸表 FAIL 要求 `--reembed`。
+- **T29 稳定键与增量**：迁移 `016_stable_question_keys` 增 `questions.q_key` 唯一索引
+  （`(doc_hash,q_norm_hash)` 重复题按答案最长保留，生产 20,984 → 20,010），`question_variants`
+  增 `q_key`，新增 `canonical_dependents` / `merge_candidates`；`extract` 同步去重。
+  `canonical --incremental` 实现 0.92 吸附 / 0.85–0.92 候选 / 新簇三路，只重算受影响 witness；
+  `manifests.py` 提供 `kb manifest --list / --rollback [--apply]`。`refresh` 增题集指纹：
+  自动拷贝前校验 `vec_meta.question_set_hash`，结构/指纹不匹配自动重嵌入，`--copy-vec` 显式失败即止。
 - **待办收口（T6 / 遗留两项）**：`skip_log` 明确留在 `meta/`、个人数据永不入库；G1 对
   `duplicate_of` 增加目标存在性回查；`cluster --lsh-recall-sample N` 抽样暴力比对测候选召回
   （生产抽 30 条、227 真匹配，召回 1.0）。

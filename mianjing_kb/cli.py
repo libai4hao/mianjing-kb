@@ -50,6 +50,7 @@ COMMANDS = {
     "probe": "probe_provider",
     "refresh": "refresh",
     "status": "status",
+    "manifest": "manifests",
     "verify": "verify_ledger",
     "purge": "purge_origin",
     "demo": "demo",

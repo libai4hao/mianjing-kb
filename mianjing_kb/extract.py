@@ -153,7 +153,11 @@ def _signed64(v: int) -> int:
 
 
 def extract_doc(doc_hash: str, path: Path) -> list[dict]:
-    """单文档 → questions 行列表（不落库）。"""
+    """单文档 → questions 行列表（不落库）。
+
+    T29：q_key=(doc_hash,q_norm_hash) 是跨库稳定键；同一文档内同题重复（chunker
+    重复产出）先按"答案最长"保留一条，保证 q_key 唯一。
+    """
     text = text_of(path)
     if not text:
         return []
@@ -163,6 +167,7 @@ def extract_doc(doc_hash: str, path: Path) -> list[dict]:
         qn = normalize(it["q"])
         if len(qn) < MIN_NORM:
             continue
+        q_norm_hash = hashlib.sha256(qn.encode("utf-8")).hexdigest()[:16]
         rows.append({
             "doc_hash": doc_hash,
             "seq": it["seq"],
@@ -173,11 +178,18 @@ def extract_doc(doc_hash: str, path: Path) -> list[dict]:
             "qtype": it["qtype"],
             "conf": it["conf"],
             "q_norm": qn[:500],
-            "q_norm_hash": hashlib.sha256(qn.encode("utf-8")).hexdigest()[:16],
+            "q_norm_hash": q_norm_hash,
+            "q_key": f"{doc_hash}:{q_norm_hash}",
             "simhash": _signed64(simhash(qn)),
             "extracted_at": datetime.now().strftime(NOW_FMT),
         })
-    return rows
+    # 同 q_key 只留答案最长的一条（并列取先出现的 seq）；顺序按 seq 保持题号稳定。
+    keep: dict[str, dict] = {}
+    for r in rows:
+        old = keep.get(r["q_key"])
+        if old is None or len(r["a_text"]) > len(old["a_text"]):
+            keep[r["q_key"]] = r
+    return sorted(keep.values(), key=lambda r: r["seq"])
 
 
 def store(conn, doc_hash: str, rows: list[dict]) -> int:

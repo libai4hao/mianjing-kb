@@ -28,7 +28,7 @@ DIM = 512
 BATCH = 256
 # T1/T22：可下推的过滤字段进 vec0 metadata；position/quality/tags 是多选/自由文本，
 # 不能做等值 metadata，留在 questions/question_tags 侧做过采样后的 SQL 过滤。
-VEC_META_COLUMNS = ("topic", "qtype", "difficulty")
+VEC_META_COLUMNS = ("topic", "qtype", "difficulty", "q_key")
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")  # fastembed 走国内镜像
 
 _MODEL = None
@@ -37,7 +37,7 @@ _MODEL = None
 def vec_schema() -> str:
     """vec0 建表 DDL 的唯一来源（embed / refresh.copy_vec / 测试共用）。"""
     return (f"embedding float[{DIM}], "
-            "topic text, qtype text, difficulty integer")
+            "topic text, qtype text, difficulty integer, q_key text")
 
 
 def create_vec_table(con) -> None:
@@ -55,6 +55,34 @@ def vec_columns(con, name: str = "vec_questions", schema: str = "main") -> set[s
 
 def vec_metadata_ready(con, name: str = "vec_questions", schema: str = "main") -> bool:
     return set(VEC_META_COLUMNS) <= vec_columns(con, name, schema)
+
+
+def question_set_hash(con) -> str:
+    """题集指纹：按稳定键排序后 sha256。copy_vec 用它拒绝"向量旧、题集新"的错配。"""
+    import hashlib
+    rows = [str(r[0] or "") for r in con.execute(
+        "SELECT COALESCE(NULLIF(q_key,''), doc_hash || ':' || q_norm_hash) AS k "
+        "FROM questions ORDER BY k")]
+    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+
+
+def write_vec_meta(con, qhash: str | None = None) -> None:
+    """记录向量表身份：模型 / 维数 / 题集指纹 / 构建时间（普通表，不属于 vec0）。"""
+    from datetime import datetime
+    con.execute("CREATE TABLE IF NOT EXISTS vec_meta("
+                " key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    vals = {"model": MODEL, "dim": str(DIM),
+            "question_set_hash": qhash or question_set_hash(con),
+            "built_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")}
+    con.executemany("INSERT INTO vec_meta(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", list(vals.items()))
+
+
+def read_vec_meta(con) -> dict[str, str]:
+    try:
+        return {r[0]: r[1] for r in con.execute("SELECT key,value FROM vec_meta")}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def get_model():
@@ -85,24 +113,28 @@ def run(out_db: Path = OUT_DB, batch: int = BATCH) -> dict:
     model = get_model()
     while done < total:
         rows = con.execute(
-            "SELECT qid, q_text, topic, qtype, difficulty FROM questions "
+            "SELECT qid, q_text, topic, qtype, difficulty, q_key FROM questions "
             "ORDER BY qid LIMIT ? OFFSET ?",
             (batch, done)).fetchall()
         if not rows:
             break
         vecs = model.embed([r[1][:500] for r in rows])
         con.executemany(
-            "INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty, q_key) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             [(r[0], sqlite_vec.serialize_float32(list(v)),
-              r[2] or "", r[3] or "", r[4]) for r, v in zip(rows, vecs)])
+              r[2] or "", r[3] or "", r[4] if r[4] is not None else -1,
+              r[5] or "") for r, v in zip(rows, vecs)])
         done += len(rows)
         print(f"[embed] {done}/{total}", file=sys.stderr, flush=True)
+    write_vec_meta(con)
     con.commit()
     n = con.execute("SELECT COUNT(*) FROM vec_questions").fetchone()[0]
     elapsed = round(time.perf_counter() - started, 1)
+    qhash = read_vec_meta(con).get("question_set_hash")
     con.close()
     return {"model": MODEL, "dim": DIM, "vectors": n, "questions": total,
+            "question_set_hash": qhash,
             "elapsed_sec": elapsed, "db": str(out_db)}
 
 

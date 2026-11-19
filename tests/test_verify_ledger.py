@@ -204,15 +204,17 @@ def test_g4_vec_metadata_pass_and_mismatch():
     sqlite_vec.load(con)
     con.enable_load_extension(False)
     con.executescript(
-        "CREATE TABLE questions(qid INTEGER PRIMARY KEY, topic TEXT, qtype TEXT, difficulty INTEGER);"
+        "CREATE TABLE questions(qid INTEGER PRIMARY KEY, topic TEXT, qtype TEXT, difficulty INTEGER, q_key TEXT);"
         "CREATE VIRTUAL TABLE questions_fts USING fts5(q_text);"
-        "INSERT INTO questions VALUES (1,'JVM','八股',3),(2,'MySQL','八股',2);"
-        "INSERT INTO questions_fts(rowid, q_text) VALUES (1,'jvm'),(2,'mysql');")
+        "INSERT INTO questions VALUES (1,'JVM','八股',3,'h:jvm'),"
+        "(2,'MySQL','八股',2,'h:mysql'),(3,'Redis','八股',NULL,'h:redis');"
+        "INSERT INTO questions_fts(rowid, q_text) VALUES (1,'jvm'),(2,'mysql'),(3,'redis');")
     E.create_vec_table(con)
-    for qid, topic, diff in ((1, "JVM", 3), (2, "MySQL", 2)):
-        con.execute("INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty) "
-                    "VALUES (?,?,?,?,?)",
-                    (qid, sqlite_vec.serialize_float32([0.0] * E.DIM), topic, "八股", diff))
+    for qid, topic, diff, key in ((1, "JVM", 3, "h:jvm"), (2, "MySQL", 2, "h:mysql"),
+                                  (3, "Redis", -1, "h:redis")):
+        con.execute("INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty, q_key) "
+                   "VALUES (?,?,?,?,?,?)",
+                    (qid, sqlite_vec.serialize_float32([0.0] * E.DIM), topic, "八股", diff, key))
     con.commit()
     assert vl.g4_index(con)["state"] == "PASS"
     con.execute("UPDATE vec_questions SET topic='Redis' WHERE rowid=1")
