@@ -20,6 +20,16 @@
   与 `tests/fixtures/dev_ocr_numbered_code.md`。补丁中打标质量门禁（labelspec/verify_ledger 内联版）、
   llm_client/pilot5000/quality_rules 旧版改动**不移植**——仓库已有更新或等价实现
   （`label_quality.py`、URL 精洗、RPM 节流、行首问词守卫）。`cluster.CACHE_VERSION` 升 `v2-2026-11-20-r2`。
+- **review2 移植精度回收（R5）+ 80 文档独立重放**：用 review2 附带的 `cut1000-doc-replay-stats.csv`
+  对 80 篇生产 md 做只读重放（源件长度 80/80 与 zip 期一致，无漂移），发现 S1 的
+  `explicit_question_heading` 把"父题下重启编号的答案要点"（`## 1、只有一个文件 dump.rdb…`
+  紧跟 `## 38、…？`）误判为新题。新增 `answer_subpoint_restart` 判别（`qid<=last_qid` 且无
+  问句/任务语义 → 答案小节），首个题头/顺延编号仍按 Markdown 编号题头处理。Redis 42 道
+  72→50、JavaGuide 夜间模式 577→389、Java 并发合集 464→432，回收的误判题回到父答案。
+  新增 `test_numbered_answer_subpoints_under_parent_are_not_questions`。`CACHE_VERSION` 升
+  `v2-2026-11-20-r3`。残留：单条 OCR 粘连行（问 4 粘在问 3 答案尾，无 `## 4、` 题头）仍产
+  少量碎片，属源件缺陷非系统性回归；`cut1000-regression-results.csv` 的 qid 属 zip 期 DB
+  代际，与现生产库 qid 不互通，样本级状态无法逐条复核（已按文档级口径独立验证）。
 
 ## 2026-11-19
 

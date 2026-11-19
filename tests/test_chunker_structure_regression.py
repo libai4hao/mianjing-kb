@@ -306,3 +306,28 @@ class）？
     assert "接口可以继承接口" in a
     assert "implements" not in a
     assert "concrete" not in a
+
+
+def test_numbered_answer_subpoints_under_parent_are_not_questions():
+    """答案要点在父题下重启编号（## 1、/## 2、）不是新题；顺延编号的题头仍是题。"""
+    md = """## 38、Redis 相比 Memcached 有哪些优势？
+
+## 1、只有一个文件 dump.rdb，方便持久化。
+
+## 2、容灾性好，一个文件可以保存到安全的磁盘。
+
+## 3、队列
+
+Reids 提供 list 和 set 操作，能作为消息队列平台。
+
+## 39、使用过 Redis 做异步队列么，你是怎么用的？
+
+答：一般使用 list 结构作为队列。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [x["q"] for x in v2["items"]]
+    assert len(v2["items"]) == 2
+    assert "Redis 相比 Memcached" in qs[0]
+    assert "异步队列" in qs[1]
+    assert not any("dump.rdb" in q or "容灾性" in q or q.strip() == "队列" for q in qs)
+    assert "dump.rdb" in v2["items"][0]["a"]

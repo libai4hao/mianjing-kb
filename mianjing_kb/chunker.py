@@ -929,12 +929,18 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         # review2：明确问句/任务语义优先于题号连续性（跨章节跳号不再吞题）。
         explicit_question = _has_question_intent(qtext)
         # 显式 Markdown 编号题头（`## 11. Oracle JDK 和 OpenJDK 的对比`）即使没有
-        # 问词也是题；答案小节/章节标题除外。
+        # 问词也是题；答案小节/章节标题除外。答案要点会在父题下重启编号
+        # （`## 1、只有一个文件 dump.rdb…` 紧跟 `## 38、…？`），qid<=last_qid
+        # 且无问句/任务语义的是答案小节，不是新题；首个题头或顺延编号才按题头处理。
+        answer_subpoint_restart = (
+            last_qid is not None and qid is not None
+            and qid <= last_qid and not explicit_question)
         explicit_question_heading = (
             md_num_heading and len(qtext.strip()) >= 6
             and not answer_label
             and not RE_SECTION_TITLE.match(qtext.strip())
-            and not RE_LIST_INTRO.search(qtext.strip()))
+            and not RE_LIST_INTRO.search(qtext.strip())
+            and not answer_subpoint_restart)
         if (md_num_heading and not _is_question_heading(qtext)
                 and not explicit_question_heading
                 and not (sequential_heading and not answer_label)):
