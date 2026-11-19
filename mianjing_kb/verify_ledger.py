@@ -80,24 +80,32 @@ def mirror_hash_of(md_rel: str) -> str:
     return hashlib.sha256(("md-mirror:" + md_rel).encode("utf-8")).hexdigest()[:16]
 
 
+def load_skip_entries() -> dict[str, dict]:
+    """原始 skip 条目（含 note/target），供 duplicate_of 目标回查。"""
+    f = config.META_DIR / "skip_log.json"
+    if not f.exists():
+        return {}
+    data = json.loads(f.read_text(encoding="utf-8"))
+    out: dict[str, dict] = {}
+    for x in data.get("items", []):
+        rel = x["rel"].replace("\\", "/")
+        item = dict(x)
+        item["rel"] = rel
+        item["reason"] = (x.get("reason") or "").strip()
+        reason = item["reason"]
+        if reason == "duplicate_of" and not (x.get("target") or x.get("note")):
+            item["reason"] = "duplicate_of:no_target"
+        out[rel] = item
+    return out
+
+
 def load_skip_log() -> dict[str, str]:
     """meta/skip_log.json → {rel: reason}。rel 可填源相对路径或 md 相对路径（均 posix）。
 
     原因必须是 SKIP_REASONS 之一；`duplicate_of` 还必须带目标（note/target），否则记成
     `duplicate_of:no_target`，由 G1/G2 当无效豁免报 FAIL——空串/拼错原因不再静默放行。
     """
-    f = config.META_DIR / "skip_log.json"
-    if not f.exists():
-        return {}
-    data = json.loads(f.read_text(encoding="utf-8"))
-    out: dict[str, str] = {}
-    for x in data.get("items", []):
-        rel = x["rel"].replace("\\", "/")
-        reason = (x.get("reason") or "").strip()
-        if reason == "duplicate_of" and not (x.get("target") or x.get("note")):
-            reason = "duplicate_of:no_target"
-        out[rel] = reason
-    return out
+    return {rel: x["reason"] for rel, x in load_skip_entries().items()}
 
 
 def skip_reason_ok(reason: str | None, allowed: tuple[str, ...] = SKIP_REASONS) -> bool:
@@ -138,7 +146,8 @@ def _rel_to_md_map() -> dict[str, str]:
 
 
 # ---------------- G1 源-库全覆盖 ----------------
-def g1_coverage(kb_conn, out_conn, skip: dict[str, str]) -> dict:
+def g1_coverage(kb_conn, out_conn, skip: dict[str, str],
+                skip_entries: dict[str, dict] | None = None) -> dict:
     """内容池每篇（classified/processing/processed）：doc_contents 有行 且 有题；否则须在 skip_log 登记原因。
 
     md 镜像关联口径：源 file_name stem 剥 hash 后缀 ↔ doc_contents.md_rel stem 剥后缀
@@ -157,7 +166,11 @@ def g1_coverage(kb_conn, out_conn, skip: dict[str, str]) -> dict:
     for (rel,) in out_conn.execute("SELECT DISTINCT md_rel FROM doc_contents"):
         # base_stem 剥 __hash8/_hash8 后缀 + norm_stem 归一空白/大小写，缺一不可
         md_rels_by_stem.setdefault(norm_stem(base_stem(Path(rel).stem)), []).append(rel)
-    db_mds = {x for rels in md_rels_by_stem.values() for x in rels}
+    db_mds = {x.replace("\\", "/") for rels in md_rels_by_stem.values() for x in rels}
+    known_rels = {x.replace("\\", "/") for x in db_mds}
+    for r in rows:
+        rel = f"{r['dir_path']}/{r['file_name']}" if r["dir_path"] else r["file_name"]
+        known_rels.add(rel.replace("\\", "/"))
 
     fails, n_skip = [], 0
     exact_map = _rel_to_md_map()
@@ -189,6 +202,18 @@ def g1_coverage(kb_conn, out_conn, skip: dict[str, str]) -> dict:
         if rel in skip:
             why = skip[rel]
             if skip_reason_ok(why):
+                if why == "duplicate_of":
+                    item = (skip_entries or {}).get(rel.replace("\\", "/"), {})
+                    target = (item.get("target") or item.get("note") or "").strip()
+                    if target.startswith("duplicate_of:"):
+                        target = target.split(":", 1)[1].strip()
+                    target = target.replace("\\", "/")
+                    if not target or target not in known_rels:
+                        fails.append({"rel": rel, "file_name": r["file_name"], "ext": r["ext"],
+                                      "category": r["category"], "skip_reason": why,
+                                      "target": target,
+                                      "suggest": "duplicate_of 目标必须能在台账/md 中找到"})
+                        continue
                 n_skip += 1
                 continue
             fails.append({"rel": rel, "file_name": r["file_name"], "ext": r["ext"],
@@ -884,11 +909,12 @@ def main(argv=None) -> int:
         out_conn.enable_load_extension(False)
     except ImportError:
         pass
-    skip = load_skip_log()
+    skip_entries = load_skip_entries()
+    skip = {rel: x["reason"] for rel, x in skip_entries.items()}
     build_dir = Path(config.BUILD_DIR)
 
     gates = [
-        g1_coverage(kb_conn, out_conn, skip),
+        g1_coverage(kb_conn, out_conn, skip, skip_entries),
         g2_chain(out_conn, Path(config.QUESTION_MD_DIR), build_dir / "ocr_text", skip),
         g3_topic(out_conn),
         g4_index(out_conn),

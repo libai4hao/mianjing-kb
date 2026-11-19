@@ -175,3 +175,8 @@ def test_limit_without_existing_result_never_uses_full_name(tiny_corpus, tmp_pat
     assert cl.main(["--no-cache", "--limit", "1"]) == 0
     assert not (build / "cluster_result.json").exists()
     assert (build / "cluster_result_limit1.json").exists()
+
+def test_lsh_recall_estimate_finds_exact_match():
+    items = _items(Q_A, Q_C, Q_A2)
+    r = cl.lsh_recall_estimate(items, 2, 0.92, sample=1)
+    assert r["sampled"] == 1 and r["truth_pairs"] == 1 and r["recall"] == 1.0

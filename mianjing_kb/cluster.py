@@ -321,6 +321,42 @@ def direct_pool_matches(items, n_pool: int, answers, pool_status: dict,
                 rec["pending"].append({"pool_idx": p, "jac": round(jac, 4)})
         out[i] = rec
     return out
+def lsh_recall_estimate(items, n_pool: int, auto: float, sample: int = 50, seed: int = 42) -> dict:
+    """抽样暴力比对，估算 LSH 候选对"直接 Jaccard≥auto"真匹配的召回率。
+
+    只诊断、不改判定：漏召回在 gate 里表现为 none/manual（不删），不会误删。
+    """
+    if n_pool <= 0 or len(items) <= n_pool or sample <= 0:
+        return {"sampled": 0, "note": "没有 99 区题或样本为 0"}
+    hashes = [simhash(t) for t, _, _ in items]
+    gsets = [grams(t) for t, _, _ in items]
+    buckets = defaultdict(set)
+    for i in range(n_pool):
+        for band in range(8):
+            buckets[(band, (hashes[i] >> (band * 8)) & 0xFF)].add(i)
+    rng = random.Random(seed)
+    idxs = rng.sample(range(n_pool, len(items)), min(sample, len(items) - n_pool))
+    truth_pairs = recalled = 0
+    sampled_with_truth = 0
+    for i in idxs:
+        truth = {p for p in range(n_pool)
+                 if jaccard(gsets[i], gsets[p]) >= auto}
+        if not truth:
+            continue
+        sampled_with_truth += 1
+        cands = set()
+        for band in range(8):
+            cands |= buckets.get((band, (hashes[i] >> (band * 8)) & 0xFF), set())
+        truth_pairs += len(truth)
+        recalled += len(truth & cands)
+    return {
+        "sampled": len(idxs), "with_truth": sampled_with_truth,
+        "truth_pairs": truth_pairs, "recalled": recalled,
+        "recall": round(recalled / truth_pairs, 4) if truth_pairs else None,
+        "note": "候选召回；最终判定仍要求直接 Jaccard≥auto，漏召回只会落到 none/manual",
+    }
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="题级吸附 + 99 区 gate")
     ap.add_argument("--auto", type=float, default=0.92, help="强并 Jaccard 阈值")
@@ -329,6 +365,8 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, default=0,
                     help="每类最多处理 N 件（调试；结果标 complete=false，默认不覆盖全量结果）")
     ap.add_argument("--no-cache", action="store_true", help="忽略抽取缓存")
+    ap.add_argument("--lsh-recall-sample", type=int, default=0,
+                    help="抽样 N 条 99 题做暴力比对，只输出 LSH 候选召回率后退出")
     ap.add_argument("--out", default=None, help="结果路径（默认 build/cluster_result.json）")
     args = ap.parse_args(argv)
     out = Path(args.out) if args.out else config.BUILD_DIR / "cluster_result.json"
@@ -364,6 +402,11 @@ def main(argv=None) -> int:
     if items and answer_coverage < 0.3:
         print("[warn] 答案块覆盖不足 30%：跨库答案覆盖判定基本失效，99 区 strong 结论需人工复核",
               file=sys.stderr)
+
+    if args.lsh_recall_sample:
+        print(json.dumps(lsh_recall_estimate(
+            items, n_pool, args.auto, args.lsh_recall_sample), ensure_ascii=False, indent=1))
+        return 0
 
     pool_status = load_pool_status()
     direct = direct_pool_matches(items, n_pool, answers, pool_status, args.auto, args.manual)

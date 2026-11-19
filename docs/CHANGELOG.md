@@ -8,6 +8,9 @@
 
 ## 2026-11-19
 
+- **待办收口（T6 / 遗留两项）**：`skip_log` 明确留在 `meta/`、个人数据永不入库；G1 对
+  `duplicate_of` 增加目标存在性回查；`cluster --lsh-recall-sample N` 抽样暴力比对测候选召回
+  （生产抽 30 条、227 真匹配，召回 1.0）。
 - **自审复核修复（c09f6cc 后）**：`--no-cache` 不再清空缓存；`--limit` 在全量结果不存在时也不占用
   `cluster_result.json`；抽取任一件失败时结果标 `complete=false/failed=true` 并另写
   `cluster_result_incomplete.json`；G4 的 `questions_fts` 缺失/损坏改为 FAIL 而非抛栈；

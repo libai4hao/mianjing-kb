@@ -274,7 +274,7 @@ def check_reembed(shadow: Path, emb: dict) -> str | None:
 def run_gates(shadow: Path) -> list[dict]:
     """G1-G5 + G8 对影子库实跑（G6 打标、G7 文档一致性不在此跑）。"""
     from mianjing_kb.verify_ledger import (g1_coverage, g2_chain, g3_topic, g4_index, g5_disk,
-                               g8_single_identity, load_skip_log)
+                               g8_single_identity, load_skip_entries)
     kb_conn = sqlite3.connect(_ro_uri(Path(config.DB_PATH)), uri=True)
     kb_conn.row_factory = sqlite3.Row
     out_conn = sqlite3.connect(_ro_uri(shadow), uri=True)
@@ -286,9 +286,10 @@ def run_gates(shadow: Path) -> list[dict]:
         out_conn.enable_load_extension(False)
     except ImportError:
         pass
-    skip = load_skip_log()
+    skip_entries = load_skip_entries()
+    skip = {rel: x["reason"] for rel, x in skip_entries.items()}
     gates = [
-        g1_coverage(kb_conn, out_conn, skip),
+        g1_coverage(kb_conn, out_conn, skip, skip_entries),
         g2_chain(out_conn, Path(config.QUESTION_MD_DIR), Path(config.BUILD_DIR) / "ocr_text", skip),
         g3_topic(out_conn),
         g4_index(out_conn),

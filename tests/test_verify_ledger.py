@@ -605,3 +605,17 @@ def test_g6_schema_fail_is_hard_level(mini_env):
     kb.commit()
     g = vl.g6_label(kb)
     assert g["state"] == "FAIL" and g["level"] == vl.LEVEL_HARD
+
+def test_g1_duplicate_of_target_must_exist(mini_env):
+    """duplicate_of 带 target 且目标存在 → 可豁免；目标不存在 → FAIL。"""
+    out = mini_env["out"]
+    out.execute("DELETE FROM questions WHERE qid=2")
+    out.commit()
+    rel = "02-Java进阶/乙.pdf"
+    good = {rel: {"rel": rel, "reason": "duplicate_of", "target": "02-Java进阶/甲.pdf"}}
+    g = vl.g1_coverage(mini_env["kb"], out, {rel: "duplicate_of"}, good)
+    assert g["state"] == "PASS"
+    bad = {rel: {"rel": rel, "reason": "duplicate_of", "target": "02-Java进阶/不存在.pdf"}}
+    g2 = vl.g1_coverage(mini_env["kb"], out, {rel: "duplicate_of"}, bad)
+    assert g2["state"] == "FAIL"
+    assert any(f.get("target") == "02-Java进阶/不存在.pdf" for f in g2["fails"])
