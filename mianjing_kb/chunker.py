@@ -196,14 +196,16 @@ def _toc_mask(lines: List[str]) -> set[int]:
     n = len(lines)
     start = None
     for i in range(min(n, 240)):
-        if RE_TOC_HEADER.match(lines[i].strip()):
+        # NFKC：PDF 文字层常把「目录」输出为兼容字符 ⽬录（U+2F6C）。
+        if RE_TOC_HEADER.match(unicodedata.normalize("NFKC", lines[i].strip())):
             start = i
             break
     if start is None:
         return set()
-    leaders = pages = 0
+    leaders = pages = outline = 0
     saw_entry = False
     end = n
+    ended_at_heading = False
     for j in range(start + 1, n):
         s = lines[j].strip()
         if not s:
@@ -219,9 +221,14 @@ def _toc_mask(lines: List[str]) -> set[int]:
         if re.fullmatch(r'[-=_—–\s]{3,}', s):
             continue
         # 目录条目多为 #### / 缩进 / 带页码；H1-H2 且不带点线，视为正文开始。
-        if RE_MD_H12.match(s) and not RE_TOC.search(s) and leaders >= 2:
+        # 无点线/页码的目录（兼容字符 ⽬录）靠短大纲条目累积证据，
+        # 但必须真的遇到正文 Markdown 标题才截断，避免把全文当目录。
+        if RE_MD_H12.match(s) and not RE_TOC.search(s) and (leaders >= 2 or outline >= 3):
             end = j
+            ended_at_heading = True
             break
+        if not RE_MD_H12.match(s) and len(s) <= 60 and not re.search(r'[。！？!?]$', s):
+            outline += 1
         # 有目录条目、但后面没有 H1/H2 时，遇到第一个真正题目行就结束，
         # 避免把正文全部当作目录。
         if (saw_entry and not RE_TOC.search(s)
@@ -236,10 +243,50 @@ def _toc_mask(lines: List[str]) -> set[int]:
                 and not RE_TOC.search(s) and len(CJK.findall(s)) >= 4):
             end = j
             break
-    if not saw_entry:
-        # 只有“目录”标题、后面没有点线/页码条目：不能把全文当目录。
+    if not saw_entry and not (ended_at_heading and outline >= 3):
+        # 只有“目录”标题、后面没有点线/页码/大纲条目证据：不能把全文当目录。
         return {start}
     return set(range(start, end))
+
+
+def _local_outline_mask(lines: List[str], blocked: set[int]) -> set[int]:
+    """后文重复出现、且首现后无答案正文的层级题目首现 → 局部目录（review2）。
+
+    PDF 转 Markdown 常在章节开头插入局部大纲（无“目录”字样、无页码）。
+    只对层级/双层编号（4.1.13 / 42.3.）启用；要求同一规范化题干在后文再次出现，
+    且首现到下一道题之间没有实质答案正文，避免误删真正的无答案问题。
+    """
+    occurrences: Dict[str, List[int]] = {}
+    for i, line in enumerate(lines):
+        if i in blocked or not line.strip():
+            continue
+        if not (RE_NESTED_NUM.match(line) or RE_HIER_NUM.match(line)):
+            continue
+        q = _match_question(line)
+        if not q or not q[1].strip():
+            continue
+        key = _QNORM_CLEAN.sub("", q[1].lower())
+        if len(key) < 6:
+            continue
+        occurrences.setdefault(key, []).append(i)
+    out: set[int] = set()
+    for indices in occurrences.values():
+        if len(indices) < 2:
+            continue
+        for idx in indices[:-1]:
+            next_q = idx + 1
+            while next_q < len(lines) and not _match_question(lines[next_q]):
+                next_q += 1
+            if next_q >= len(lines):
+                continue
+            intervening = [x.strip() for x in lines[idx + 1:next_q] if x.strip()]
+            has_answer = any(
+                _qnorm_len(x) >= 18
+                and not RE_SECTION_TITLE.match(unicodedata.normalize("NFKC", x))
+                for x in intervening)
+            if not has_answer:
+                out.add(idx)
+    return out
 
 
 def _match_nested_number(line: str) -> Optional[Tuple[int, str]]:
@@ -538,6 +585,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
     # ---- 第一遍：行分类 ----
     kinds: List[str] = ["text"] * n
     toc_lines = _toc_mask(lines)
+    toc_lines |= _local_outline_mask(lines, toc_lines)
     in_code = False
     for i, ln in enumerate(lines):
         s = ln.strip()
@@ -598,8 +646,8 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             # 会把空行前置条件清掉，导致下一题被并进上一题。
             if not ln.strip():
                 prev_blank = True
-            elif kinds[i] == "doc_header":
-                prev_blank = True     # 标题/文档头也是块边界，下一行可新开题
+            elif kinds[i] in ("doc_header", "section"):
+                prev_blank = True     # 标题/文档头/章节也是块边界，下一行可新开题
             elif kinds[i] == "code":
                 # 代码区不重置题号：同一节里“函数代码 + 下一题”仍应连续可识别。
                 pass
@@ -702,8 +750,12 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             if (_is_codeish(qtext)
                     or re.match(r'^(?:有一点|注意|总结|如下|以下|主要|首先|其次|最后)', qtext)
                     or not _is_question_heading(qtext)):
-                last_qid = None if (s.startswith("# ") or _looks_section_line(qtext)
-                                    or "面试题" in qtext) else last_qid
+                # review2：真章节标题是硬边界——结束当前答案、重置题号，
+                # 并进 leftovers(章节标题) 参与 coverage 扣除；答案小节标题仍留答案区。
+                if (s.startswith("# ") or _looks_section_line(qtext)
+                        or "面试题" in qtext or RE_SECTION_TITLE.match(qtext)):
+                    kinds[i] = "section"
+                    last_qid = None
                 list_active = False
                 list_pending = False
                 prev_blank = True
@@ -876,6 +928,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                 runs[-1] = (runs[-1][0], runs[-1][1], i + 1)   # 空行并入当前 run
                 continue
             why = {"page": "页码", "toc": "目录行", "doc_header": "文档头",
+                   "section": "章节标题",
                    "quote": "引用块(来源)", "code": "块前代码", "table": "块前表格",
                    "ack": "致谢/广告"
                    }.get(k, None)
@@ -906,6 +959,8 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                 why = "页码"
             elif k == "toc":
                 why = "目录行"
+            elif k == "section":
+                why = "章节标题"
             elif k == "ack":
                 why = "致谢/广告"
             elif kinds[j] == "text" and lines[j].strip() in watermark:
