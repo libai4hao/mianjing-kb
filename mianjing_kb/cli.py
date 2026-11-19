@@ -56,6 +56,7 @@ COMMANDS = {
     "purge": "purge_origin",
     "demo": "demo",
     "eval": "eval_retrieval",
+    "pilot": "pilot5000",
     "privacy": "privacy_scan",
 }
 

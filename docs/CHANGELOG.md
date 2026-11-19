@@ -8,6 +8,10 @@
 
 ## 2026-11-19
 
+- **D-27 生产迁移完成**：生产 `kb.sqlite` 显式 apply 017（`017_label_facts_hardening`），
+  再 `migrate_norm --apply`（2,299/20,010 题键变化、0 删除、11,994 映射），全量重建 canonical
+  （11,074 簇 / 20,010 variants / 孤儿 0），最后 `refresh --reembed`（20,010 向量，G1–G8 PASS、
+  G9 WARN）原子切换 `面经库.db`。迁移前双库备份与 old→new 快照保留在 `build/backup/`。
 - **阶段 A 生产安全落地**：新增 `kb preflight` 只读基线核对（`schema_version`/迁移/完整性/关键计数）；
   `intake` 的 `hash_collision` 改为整批 `failed` 并落 `hash_collisions-<batch>.json`（双路径/双 SHA256）；
   `reconvert` 与 `purge_origin` 实际写盘接入 `kb.lock`。修复 `privacy_scan` 命中的文档绝对路径。
@@ -21,13 +25,19 @@
   审核后 Recall@5 低于 0.10 判 FAIL）。`search.rag_contexts` 增加精确 + 同簇软去重、来源聚合、
   `max_context_chars=6000` 全局预算并保留 `q_key`/来源。新增 BGE 单元契约测试与真实模型夜间集成
   工作流（`.github/workflows/bge-integration.yml`，模型缓存 + `RUN_BGE_INTEGRATION=1`）。
+- **5,000 题预生产一键试跑**：新增 `mianjing_kb/pilot5000.py`（`prepare`/`run`/`report`）
+  与 `scripts/pilot5000.ps1`，以 `D:\pilot\5000\config.json` 为唯一配置入口；`prepare` 只读生产库、
+  SQLite Backup API 复制副本并按目标题数估算抽 121 文档（4,544 题），`run` 串起
+  extract→canonical→refresh→检索冒烟/评估，`--with-label`/`label` 追加 100 题打标冒烟。首轮
+  副本实测 refresh PASS（4,544 题 / 4,544 向量）。新增 `tests/test_pilot5000.py`。同时更新
+  `docs/35` 口径（按目标题数截断，topic 为空不做分层）。
 - **5,000 题预生产方案 + 标签数据结构复核**：新增 `docs/35`（切片/配置/执行/校验，明确只能影子跑）
   与 `docs/36`（12 个一级领域、稳定 code、7 题型、3 难度 band、quality_state/flags 拆分、
   增量迁移 018 与双写方案）。结论是标签 v2 落库前不跑 5,000 全量打标。
 - **关键技术决策 ADR 冻结**：新增 `docs/34-关键技术决策ADR-2026-11-19.md`，把外部建议 D-01～D-11
   正式编为 D-27～D-37（避免覆盖既有 D-01～D-26）。覆盖生产迁移门禁、文件锁、hash_collision、
-  staging 清理、发布 manifest、Golden Query、RAG 去重/预算、BGE 集成回归；并标注生产 016/qnorm
-  未 apply，`docs/29`、`docs/32` 的快照数字不得直接当生产迁移依据。
+  staging 清理、发布 manifest、Golden Query、RAG 去重/预算、BGE 集成回归；D-27 已于 2026-11-19
+  完成生产 017/qnorm/canonical/检索重建。
 - **question_freq 归一器 v2 + 迁移工具**：NFKC 后做代码符号语义映射（`C++`/`C#`/`&&`/`&`/`i++`/`++i`），
   CJK 清洗范围扩到扩展 A/兼容区；`config.NORMALIZER_VERSION="nfkc-clean-v2"`。新增
   `mianjing_kb/migrate_norm.py`，dry-run 出 old→new 快照，`--apply` 同一事务更新 `questions` 与
