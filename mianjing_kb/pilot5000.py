@@ -22,16 +22,18 @@ import random
 import shutil
 import sqlite3
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
 DEFAULT_CONFIG = {
-    "prod_db": r"D:\my-resource\面经整理ing\21-面经数据库\build\kb.sqlite",
-    "prod_md_dir": r"D:\my-resource\面经整理ing\20-题库MD",
-    "pilot_root": r"D:\pilot\5000",
-    "python": r"D:\dev\python\python.exe",
+    # 仓库内只放占位/环境变量；真实路径一律由 --config 或环境变量提供
+    "prod_db": os.environ.get("MIANJING_PROD_DB", ""),
+    "prod_md_dir": os.environ.get("MIANJING_PROD_MD_DIR", ""),
+    "pilot_root": os.environ.get("PILOT_ROOT", ""),
+    "python": sys.executable,
     "repo_root": str(Path(__file__).resolve().parents[1]),
     "docs": 300,
     "seed": 7,
@@ -42,8 +44,10 @@ DEFAULT_CONFIG = {
         "base": "https://api.qnaigc.com/v1",
         "model": "deepseek-v4.1-flash-1017",
         "key": "",
-        "concurrency": 2,
+        "concurrency": 1,
         "price": "1,4",
+        "thinking": "disabled",
+        "rpm": 5,
     },
 }
 
@@ -290,6 +294,8 @@ def _env(cfg: dict) -> dict:
             "LLM_KEY": key,
             "LLM_CONCURRENCY": str(llm.get("concurrency") or 1),
             "LLM_PRICE": str(llm.get("price") or "0,0"),
+            "LLM_THINKING": str(llm.get("thinking") or ""),
+            "LLM_RPM": str(llm.get("rpm") or ""),
         })
     return env
 

@@ -11,6 +11,8 @@
     LLM_JSON_MODE    覆盖 provider 默认的 json_object 支持开关（1/0 true/false yes/no on/off）
     LLM_NUM_CTX      上下文窗口透传（正整数，如 8192；缺省不透传——docs/13 §5）
                      keep_alive 是服务端部署项（OLLAMA_KEEP_ALIVE），客户端不实现
+    LLM_THINKING     思考模式 enabled|disabled（缺省不传；V4 系列结构化输出需 disabled）
+    LLM_RPM          全局请求/分钟上限（正整数；缺省不限。网关限流时设 5 等低值）
 
 降级策略（docs/15 §3.4）：429/5xx/超时 → 指数退避重试 3 次；单题 3 次失败由
 batch_label 落 failed.jsonl 不阻塞整批。JSON 解析失败 → 重试时强化"只输出 JSON"。
@@ -27,6 +29,7 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -140,7 +143,15 @@ def resolve_config(env: dict | None = None) -> dict:
         # 批次三 R4：上下文窗口透传（docs/13 §5：批量打标 8192）；缺省 None 不透传
         "num_ctx": _parse_positive_int("LLM_NUM_CTX", e["LLM_NUM_CTX"])
         if e.get("LLM_NUM_CTX") else None,
+        # DeepSeek/Qiniu V4 系列默认开思考，会把 max_tokens 吃光并返回空 content；
+        # 显式 disabled 用于结构化打标。留空则不传，保持各家默认。
+        "thinking": _as_str("LLM_THINKING", e.get("LLM_THINKING") or "").strip().lower() or None,
+        # 网关 RPM 限流（七牛实测 5 次/分钟即触发 429）：>0 时按最小间隔 60/rpm 全局节流
+        "rpm": _parse_positive_float("LLM_RPM", e["LLM_RPM"]) if e.get("LLM_RPM") else 0.0,
     }
+    if cfg["thinking"] not in (None, "enabled", "disabled"):
+        raise ConfigError(
+            f"LLM_THINKING 只允许 enabled|disabled，当前: {cfg['thinking']!r}")
     if provider == "online" and not cfg["key"]:
         raise ConfigError(
             "online provider 需要 API key：请设用户级环境变量 LLM_KEY "
@@ -196,6 +207,25 @@ def redact(text: str) -> tuple[str, bool]:
 
 
 # ---------------- 网络层 ----------------
+_RATE_LOCK = threading.Lock()
+_RATE_NEXT = 0.0
+
+
+def _rate_wait(cfg: dict) -> None:
+    """按 cfg["rpm"] 全局节流（跨线程共享下一次可发时刻）。429 网关多为滑动窗口，
+    单纯并发 1 仍会超；必须保证相邻请求间隔 >= 60/rpm。"""
+    rpm = float(cfg.get("rpm") or 0)
+    if rpm <= 0:
+        return
+    global _RATE_NEXT
+    with _RATE_LOCK:
+        now = time.monotonic()
+        wait = max(0.0, _RATE_NEXT - now)
+        _RATE_NEXT = max(now, _RATE_NEXT) + 60.0 / rpm
+    if wait > 0:
+        time.sleep(wait)
+
+
 def _post(cfg: dict, payload: dict) -> tuple[int, dict]:
     """POST /chat/completions。返回 (status, resp)；网络层异常归一为 (0, {"error": ...})。"""
     req = urllib.request.Request(
@@ -247,12 +277,15 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
         }
         if json_mode and cfg.get("json_mode"):
             payload["response_format"] = {"type": "json_object"}
+        if cfg.get("thinking"):
+            payload["thinking"] = {"type": cfg["thinking"]}
         # R4：num_ctx 设置时透传（Ollama 上下文窗口）；keep_alive 是服务端部署项
         # （OLLAMA_KEEP_ALIVE），客户端不实现——docs/13:76
         # options 是 Ollama 原生字段，OpenAI 兼容端点遇未知键可能直接 400 → 只对 local 透传
         if cfg.get("num_ctx") and cfg.get("provider", "local") == "local":
             payload["options"] = {"num_ctx": cfg["num_ctx"]}
         t0 = time.perf_counter()
+        _rate_wait(cfg)
         st, resp = _post(cfg, payload)
         latency = round((time.perf_counter() - t0) * 1000)
         if st == 200:

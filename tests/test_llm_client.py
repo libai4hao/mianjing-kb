@@ -31,6 +31,26 @@ def test_config_bad_provider():
         resolve_config(env={"LLM_PROVIDER": "midway"})
 
 
+def test_config_thinking_disabled_for_structured_output():
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k",
+                              "LLM_THINKING": "disabled"})
+    assert cfg["thinking"] == "disabled"
+
+
+def test_config_thinking_invalid_rejected():
+    with pytest.raises(ConfigError, match="LLM_THINKING"):
+        resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k",
+                            "LLM_THINKING": "maybe"})
+
+
+def test_config_rpm_parsed_and_invalid_rejected():
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k", "LLM_RPM": "5"})
+    assert cfg["rpm"] == 5.0
+    assert resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})["rpm"] == 0.0
+    with pytest.raises(ConfigError, match="LLM_RPM"):
+        resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k", "LLM_RPM": "0"})
+
+
 # ---------------- P2：LLM_JSON_MODE 覆盖 ----------------
 def test_json_mode_override_off_for_compatible_endpoint():
     """换用不支持 response_format 的在线端点（vLLM/部分通义）→ 手动关掉 json_mode。"""
@@ -266,6 +286,41 @@ def test_chat_payload_num_ctx_passthrough(monkeypatch):
     assert seen[-1]["options"] == {"num_ctx": 8192}
     lc.chat({**base, "num_ctx": None}, "s", "u", retries=1)
     assert "options" not in seen[-1]
+
+
+def test_rate_wait_spaces_requests(monkeypatch):
+    """rpm=5 时第二次请求至少等 12 秒；rpm=0 不等待。"""
+    from mianjing_kb import llm_client as lc
+    sleeps = []
+    lc._RATE_NEXT = 0.0
+    monkeypatch.setattr(lc.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(lc.time, "sleep", lambda s: sleeps.append(s))
+    lc._rate_wait({"rpm": 5})
+    lc._rate_wait({"rpm": 5})
+    assert sleeps == [12.0]
+    sleeps.clear()
+    lc._rate_wait({"rpm": 0})
+    lc._rate_wait({"rpm": 0})
+    assert sleeps == []
+    lc._RATE_NEXT = 0.0
+
+
+def test_chat_payload_thinking_disabled_passthrough(monkeypatch):
+    """DeepSeek/Qiniu V4 默认思考会吃光 max_tokens；disabled 必须原样进 payload。"""
+    from mianjing_kb import llm_client as lc
+    seen = []
+
+    def fake_post(cfg, payload):
+        seen.append(payload)
+        return 200, {"choices": [{"message": {"content": "ok"}}],
+                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    monkeypatch.setattr(lc, "_post", fake_post)
+    base = {"base": "http://x", "key": "", "model": "m", "timeout": 5, "json_mode": False}
+    lc.chat({**base, "thinking": "disabled"}, "s", "u", retries=1)
+    assert seen[-1]["thinking"] == {"type": "disabled"}
+    lc.chat({**base, "thinking": None}, "s", "u", retries=1)
+    assert "thinking" not in seen[-1]
 
 # ---------------- 密钥脱敏（README 承诺：日志/重试/异常不留 LLM_KEY） ----------------
 def test_scrub_secret_masks_config_key_and_patterns():
