@@ -33,7 +33,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, mdmap, products, status  # noqa: E402
+from mianjing_kb.kb import config, db, mdmap, products, status, wlock  # noqa: E402
 from mianjing_kb.question_freq import close_word, extract, normalize, simhash  # noqa: E402
 from mianjing_kb.chunker import chunk_v2  # noqa: E402
 
@@ -207,18 +207,7 @@ def store(conn, doc_hash: str, rows: list[dict]) -> int:
     return cur.rowcount
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="P1-1：题块落 questions 表")
-    ap.add_argument("--db", default=str(config.DB_PATH))
-    ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--stats", action="store_true", help="只看 questions 表分布")
-    ap.add_argument("--plan", action="store_true",
-                    help="只看身份映射与题池规模（不读正文、不写库）")
-    ap.add_argument("--incremental", action="store_true",
-                    help="只处理新增/变更文档（按 document_products 的 size/mtime 判定）")
-    args = ap.parse_args(argv)
-
+def _run(args) -> int:
     conn = db.connect(args.db, create=not (args.dry_run or args.plan))
     if args.stats:
         n = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
@@ -320,6 +309,30 @@ def main(argv=None) -> int:
     }, ensure_ascii=False, indent=1))
     conn.close()
     return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="P1-1：题块落 questions 表")
+    ap.add_argument("--db", default=str(config.DB_PATH))
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--stats", action="store_true", help="只看 questions 表分布")
+    ap.add_argument("--plan", action="store_true",
+                    help="只看身份映射与题池规模（不读正文、不写库）")
+    ap.add_argument("--incremental", action="store_true",
+                    help="只处理新增/变更文档（按 document_products 的 size/mtime 判定）")
+    args = ap.parse_args(argv)
+    if args.dry_run or args.plan or args.stats:      # 只读，不进写锁
+        return _run(args)
+    db_path = Path(args.db)
+    try:
+        with wlock.write_lock("kb", tool="extract", build_dir=db_path.parent, target=db_path):
+            return _run(args)
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                          "note": "另有工具在写 kb.sqlite；extract 不与之并行，稍后重试"},
+                         ensure_ascii=False, indent=1))
+        return 2
 
 
 if __name__ == "__main__":

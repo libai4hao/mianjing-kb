@@ -21,6 +21,21 @@ Set-Location -LiteralPath $repo
 
 ---
 
+## 0.5 首次写库前：迁移预演（必做）
+
+产库 `kb.sqlite` 落后于代码（001–015 未落）时，第一个写库工具会一次性补跑全部迁移。**先预演，再动产库**：
+
+```powershell
+# 只读副本上跑迁移 + extract --plan；产库全程不被写
+python -m mianjing_kb.rehearse_migrate `
+  --db "$env:KB_BUILD_DIR\kb.sqlite" --work "$env:KB_BUILD_DIR\migration_rehearsal"
+```
+
+- 看 `new_migrations` 是否覆盖 001–015、`before/after` 的 `source_documents` 行数与状态分布是否一致；
+- 看 `plan.exit=0` 且 `pool_docs / md_mapped_sources / source_only / orphan_md` 合理；
+- 任一步失败→先修代码，不要动产库；成功后才让 `intake`/`extract` 正常写库。
+- 首次 `extract` 会把内容池 `classified` 转 `processing/processed` 并写 `document_products`，这是预期行为。
+
 ## 1. intake.py —— 登记 + 判重
 
 ```powershell
@@ -224,11 +239,12 @@ root 落在语料根内时（如默认的 `31-收件箱`）仍写全 `31-收件�
 | 组件 | 状态 | 缺口 |
 |---|---|---|
 | `classify --neighbor` | 未实现 | 需文档向量索引（第②档归因，覆盖规则之后的残渣） |
-| `cluster`（增量吸附） | 未实现 | `canonical_questions` / `question_variants` 表已建，0.92/0.85 阈值算法未写 |
-| `reconcile`（缺口对账） | ✅ 已实现（P1-2，路径级 convert_log vs 20-题库MD） | 磁盘 / 表 / convert_log / DB 四数闭合，用来清 `ok=423 vs 397` 的 26 条旧账 |
-| `dispatch.py` | 未实现 | 按 category 选拆题策略（题库→parse_banks，面经→extract，专题→只索引） |
-| `extract.py` | 未实现 | 面经抽题 + 公司/年份归一 |
-| `30-补录` / `31-收件箱` | `31-收件箱` 已建（空）；`30-补录` 未建 | 补录脚本只跑过 `-DryRun`（41 个 doc 命中） |
+| `cluster`（增量吸附） | 未实现 | `canonical_questions` 表已建，0.92/0.85 吸附算法未写（T29） |
+| `reconcile`（缺口对账） | ✅ 已实现（P1-2） | 磁盘 / 表 / convert_log / DB 四数闭合 |
+| `dispatch.py` | ✅ 已实现 | 按 category 选拆题策略 |
+| `extract.py` | ✅ 已实现（含 `--incremental`） | 面经抽题 + 产物台账（`document_products`） |
+| `30-补录` / `31-收件箱` | ✅ 两个目录均已建 | 补录走 `doc_convert`，收件箱为唯一新增入口 |
+| `kb status` | 未实现（T31） | 待分类/待产物/待抽题/待打标/门禁状态一站查询 |
 
 ---
 
@@ -242,11 +258,15 @@ root 落在语料根内时（如默认的 `31-收件箱`）仍写全 `31-收件�
 
 ## 10. 写库并发与长任务取舍（T11 / T12 / T15）
 
-- **写锁**：`intake` / `batch_label` / `doc_convert` / `review_cli` / `refresh` 启动即抢
-  `<build>/locks/kb.lock`（JSON 记 pid + tool + started_at）。拿不到就打印
-  `{"verdict":"ABORT","why":"写锁被占用：kb.lock（pid=… tool=…）"}` 并退 2，**不会**等到
+- **写锁**：`intake` / `classify`(写库) / `batch_label` / `doc_convert` / `review_cli` / `gate`(写台账) /
+  `extract` / `canonical` / `refresh` 启动即抢 `<build>/locks/kb.lock`；`build_db` / `embed` 抢
+  `<build>/locks/online.lock`（保护 `面经库.db`）；`refresh` 同时持有两把。锁文件 JSON 记
+  pid + tool + **target（本次操作目标库）** + started_at。拿不到就打印
+  `{"verdict":"ABORT","why":"写锁被占用：kb.lock（pid=… tool=… 目标库=…）"}` 并退 2，**不会**等到
   `database is locked` 栈；持有者进程已死则自动改名 `.stale-<pid>` 接管并打 `[warn]`。
   `refresh.lock` 保留，只管"同一时间一个 refresh"。
+- **build_db 禁止直跑**：会 DROP `vec_questions` 并重写线上库，默认拒绝；正常走 `refresh`（自动 reembed）。
+  排障确需直跑时加 `--direct`，跑完必须 `embed`，否则 `search` 降级 kw、G4 只报 WARN。
 - **intake 分块提交**：每 500 件（`CHUNK_SIZE`，按"文档 + 新增题"计件）提交一次，批次行
   `batches.state` 走 `running → completed / failed`。中途崩溃或异常：已提交的块可查，
   批次记 `failed` + 异常摘要，返回码 3；直接重跑即可按 hash 幂等续扫。

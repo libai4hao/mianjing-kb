@@ -44,7 +44,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, hashing, textmetrics  # noqa: E402
+from mianjing_kb.kb import config, db, hashing, textmetrics, wlock  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
@@ -388,18 +388,26 @@ def main(argv=None) -> int:
             return 2
         report = scan_dir(md_dir)
         if not args.no_db:
-            conn = db.connect(args.db)
-            for p in sorted(md_dir.rglob("*.md")):
-                r = gate_file_ledger(p)
-                conn.execute(
-                    "INSERT OR REPLACE INTO gate_results "
-                    "(md_path, doc_hash, visible_chars, cjk_chars, cjk_ratio, garbled_ratio, valid_ratio, verdict, checked_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
-                    (r["md_path"], None, r["visible_chars"], r["cjk_chars"], r["cjk_ratio"],
-                     r["garbled_ratio"], r["valid_ratio"], r["verdict"], datetime.now().strftime(NOW_FMT)),
-                )
-            conn.commit()
-            conn.close()
+            db_path = Path(args.db)
+            try:
+                with wlock.write_lock("kb", tool="gate", build_dir=db_path.parent, target=db_path):
+                    conn = db.connect(args.db)
+                    for p in sorted(md_dir.rglob("*.md")):
+                        r = gate_file_ledger(p)
+                        conn.execute(
+                            "INSERT OR REPLACE INTO gate_results "
+                            "(md_path, doc_hash, visible_chars, cjk_chars, cjk_ratio, garbled_ratio, valid_ratio, verdict, checked_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,?)",
+                            (r["md_path"], None, r["visible_chars"], r["cjk_chars"], r["cjk_ratio"],
+                             r["garbled_ratio"], r["valid_ratio"], r["verdict"], datetime.now().strftime(NOW_FMT)),
+                        )
+                    conn.commit()
+                    conn.close()
+            except wlock.LockHeld as ex:
+                print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                                  "note": "另有工具在写 kb.sqlite；gate 台账未写入"},
+                                 ensure_ascii=False, indent=1))
+                return 2
 
     out_path = (Path(args.out) if args.out
                 else (Path(config.BUILD_DIR) / "gate_report.json" if args.audit else None))

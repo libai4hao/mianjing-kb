@@ -25,7 +25,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "mianjing_kb"))
-from mianjing_kb.kb import config, db, mdmap, status  # noqa: E402
+from mianjing_kb.kb import config, db, mdmap, status, wlock  # noqa: E402
 
 OUT_DB = Path(config.BUILD_DIR) / "面经库.db"
 MD_ROOT = Path(config.CORPUS_ROOT) / "20-题库MD"
@@ -51,6 +51,11 @@ def build(out_db: Path | None = None) -> dict:
     src = db.connect(config.DB_PATH, create=False)
     started = time.perf_counter()
     out = sqlite3.connect(str(out_db))
+    vec_before = 0
+    try:                                    # 旧向量行数：DROP 前先记，结尾提示才具体
+        vec_before = out.execute("SELECT COUNT(*) FROM vec_questions").fetchone()[0]
+    except sqlite3.OperationalError:
+        pass
     out.executescript("""
 PRAGMA journal_mode=WAL;
 DROP TABLE IF EXISTS documents; DROP TABLE IF EXISTS questions;
@@ -134,7 +139,8 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
     size_mb = round(out_db.stat().st_size / 1e6, 1)
     src.close()
     return {"documents": n_doc, "questions": n_q, "doc_contents": n_docs_content,
-            "size_mb": size_mb, "elapsed_sec": elapsed, "db": str(out_db)}
+            "size_mb": size_mb, "elapsed_sec": elapsed, "db": str(out_db),
+            "vec_dropped": True, "vec_rows_before": vec_before}
 
 
 def demo_query(out_db: Path, keyword: str, limit: int = 5) -> list[dict]:
@@ -161,9 +167,30 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="建检索库 面经库.db")
     ap.add_argument("--query", default=None, help="建完后验证一条 FTS 查询")
     ap.add_argument("--limit", type=int, default=5)
+    ap.add_argument("--direct", action="store_true",
+                    help="允许绕过 refresh 直写线上库（仅排障/演示用；正常走 kb refresh）")
     args = ap.parse_args(argv)
-    stats = build()
+    if not args.direct:
+        print(json.dumps({
+            "verdict": "ABORT",
+            "why": "build_db 会 DROP 向量表并重写线上 面经库.db，已禁止直跑",
+            "note": ("请用 kb refresh（内部建影子库 + G1–G5/G8 + 原子切换 + reembed）；"
+                     "确需排障请加 --direct，并在之后跑 embed 补向量"),
+        }, ensure_ascii=False, indent=1))
+        return 2
+    online = Path(config.BUILD_DIR) / "面经库.db"
+    try:
+        with wlock.write_lock("online", tool="build_db", build_dir=online.parent,
+                              target=online):
+            stats = build()
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                          "note": "另有工具在写线上库（refresh/embed/build_db）；稍后重试"},
+                         ensure_ascii=False, indent=1))
+        return 2
     print(json.dumps(stats, ensure_ascii=False, indent=1))
+    print(f"[build_db] 向量表已清空（DROP 前 {stats['vec_rows_before']} 行）；"
+          "如需向量检索请跑 embed（refresh 会自动 reembed），否则 search 降级 kw", file=sys.stderr)
     if args.query:
         hits = demo_query(OUT_DB, args.query, args.limit)
         print(json.dumps({"query": args.query, "hits": len(hits), "rows": hits},

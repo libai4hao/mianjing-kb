@@ -366,13 +366,27 @@ def main(argv=None) -> int:
     # T15：refresh 也是写库工具，与 intake / batch_label / doc_convert 共用同一把写锁，
     # 否则 refresh 重建影子库期间别人往线上库写字，切换后这些写入会凭空消失。
     kb_lock = wlock.write_lock("kb", tool="refresh", build_dir=build_dir,
-                               wait_sec=KB_LOCK_WAIT_SEC)
+                               wait_sec=KB_LOCK_WAIT_SEC, target=config.DB_PATH)
     try:
         kb_lock.__enter__()
     except wlock.LockHeld as ex:
         _release_lock(lock)
         print(json.dumps({"verdict": "ABORT", "why": str(ex),
                           "note": "已有写库工具在写 kb/线上库，refresh 不与之并行；稍后重试"},
+                         ensure_ascii=False, indent=1))
+        return 2
+
+    # P1-3：refresh 同时持 kb 与 online 两把锁。online 覆盖 copy_vec + os.replace，
+    # 防止手跑 build_db / embed 在"影子已建好、尚未 swap"的窗口里重写线上库。
+    online_lock = wlock.write_lock("online", tool="refresh", build_dir=build_dir,
+                                   wait_sec=KB_LOCK_WAIT_SEC, target=online)
+    try:
+        online_lock.__enter__()
+    except wlock.LockHeld as ex:
+        kb_lock.__exit__(None, None, None)
+        _release_lock(lock)
+        print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                          "note": "线上 面经库.db 正被其他工具写；refresh 拒绝在窗口外切换"},
                          ensure_ascii=False, indent=1))
         return 2
 
@@ -513,6 +527,7 @@ def main(argv=None) -> int:
                          ensure_ascii=False, indent=1))
         return 1
     finally:
+        online_lock.__exit__(None, None, None)
         kb_lock.__exit__(None, None, None)
         _release_lock(lock)
 

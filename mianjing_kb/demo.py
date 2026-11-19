@@ -77,7 +77,7 @@ def run(work: Path, *, quiet: bool = False) -> dict:
         ("intake", []),
         ("classify", []),
         ("extract", []),
-        ("build_db", []),
+        ("build_db", ["--direct"]),
         ("verify_ledger", ["--kb-db", str(db_path)]),
     ]
     for step, args in steps:

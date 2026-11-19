@@ -30,7 +30,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db  # noqa: E402
+from mianjing_kb.kb import config, db, wlock  # noqa: E402
 from mianjing_kb.report import build_clusters, load_questions  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
@@ -90,15 +90,7 @@ def write_all(conn, rows_c: list[tuple], rows_v: list[tuple]) -> None:
         "VALUES (?,?,?,?,?,?,?)", rows_v)
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="题簇落库：canonical_questions + question_variants")
-    ap.add_argument("--db", default=str(config.DB_PATH))
-    ap.add_argument("--dist", type=int, default=24, help="SimHash 候选阈值（report 同款）")
-    ap.add_argument("--jac", type=float, default=0.7, help="2-gram Jaccard 复核阈值")
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--stats", action="store_true")
-    args = ap.parse_args(argv)
-
+def _run(args) -> int:
     conn = db.connect(args.db, create=not args.dry_run)
     if args.stats:
         out = {
@@ -130,6 +122,27 @@ def main(argv=None) -> int:
     }, ensure_ascii=False, indent=1))
     conn.close()
     return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="题簇落库：canonical_questions + question_variants")
+    ap.add_argument("--db", default=str(config.DB_PATH))
+    ap.add_argument("--dist", type=int, default=24, help="SimHash 候选阈值（report 同款）")
+    ap.add_argument("--jac", type=float, default=0.7, help="2-gram Jaccard 复核阈值")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--stats", action="store_true")
+    args = ap.parse_args(argv)
+    if args.dry_run or args.stats:
+        return _run(args)
+    db_path = Path(args.db)
+    try:
+        with wlock.write_lock("kb", tool="canonical", build_dir=db_path.parent, target=db_path):
+            return _run(args)
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                          "note": "另有工具在写 kb.sqlite；canonical 不与之并行"},
+                         ensure_ascii=False, indent=1))
+        return 2
 
 
 if __name__ == "__main__":

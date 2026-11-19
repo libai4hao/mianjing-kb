@@ -20,7 +20,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "mianjing_kb"))
-from mianjing_kb.kb import config  # noqa: E402
+from mianjing_kb.kb import config, wlock  # noqa: E402
 
 OUT_DB = Path(config.BUILD_DIR) / "面经库.db"
 MODEL = "BAAI/bge-small-zh-v1.5"
@@ -85,7 +85,15 @@ def main(argv=None) -> int:
         get_model()
         print(json.dumps({"ok": True, "model": MODEL}, ensure_ascii=False))
         return 0
-    print(json.dumps(run(), ensure_ascii=False, indent=1))
+    online = Path(config.BUILD_DIR) / "面经库.db"
+    try:
+        with wlock.write_lock("online", tool="embed", build_dir=online.parent, target=online):
+            print(json.dumps(run(), ensure_ascii=False, indent=1))
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                          "note": "另有工具在写线上库（refresh/build_db/embed）；稍后重试"},
+                         ensure_ascii=False, indent=1))
+        return 2
     return 0
 
 

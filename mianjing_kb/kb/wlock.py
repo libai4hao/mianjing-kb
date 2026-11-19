@@ -41,7 +41,9 @@ class LockHeld(RuntimeError):
         pid = self.holder.get("pid", "?")
         tool = self.holder.get("tool", "?")
         started = self.holder.get("started_at", "?")
-        super().__init__(f"写锁被占用：{path.name}（pid={pid} tool={tool} 起始={started}）")
+        target = self.holder.get("target", "?")
+        super().__init__(f"写锁被占用：{path.name}（pid={pid} tool={tool} "
+                         f"目标库={target} 起始={started}）")
 
 
 def _pid_alive(pid: int) -> bool:
@@ -124,9 +126,11 @@ def _release_owned(p: Path) -> None:
 
 @contextmanager
 def write_lock(name: str = "kb", tool: str = "?", *, build_dir: Path | str | None = None,
-               wait_sec: float = 0.0):
+               wait_sec: float = 0.0, target: str | Path | None = None):
     """拿写锁；拿不到抛 `LockHeld`（调用方决定打印什么、退出码多少）。
 
+    `name` 区分被保护的库：`kb` = `kb.sqlite`（事实源），`online` = `面经库.db`（线上检索库）。
+    `target` 写进锁文件，冲突提示能直接说清"谁在动哪个库"。
     `wait_sec` 只用于"短任务等一会儿"的场景（如 migrate），长任务不要等——
     等 30 分钟不如直接告诉用户谁在跑。
     """
@@ -141,6 +145,7 @@ def write_lock(name: str = "kb", tool: str = "?", *, build_dir: Path | str | Non
         try:
             os.write(fd, json.dumps({
                 "pid": os.getpid(), "tool": tool,
+                "target": str(target) if target else ("kb.sqlite" if name == "kb" else name),
                 "started_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             }, ensure_ascii=False).encode("utf-8"))
         finally:
