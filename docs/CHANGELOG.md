@@ -8,6 +8,10 @@
 
 ## 2026-11-19
 
+- **关键技术决策 ADR 冻结**：新增 `docs/34-关键技术决策ADR-2026-11-19.md`，把外部建议 D-01～D-11
+  正式编为 D-27～D-37（避免覆盖既有 D-01～D-26）。覆盖生产迁移门禁、文件锁、hash_collision、
+  staging 清理、发布 manifest、Golden Query、RAG 去重/预算、BGE 集成回归；并标注生产 016/qnorm
+  未 apply，`docs/29`、`docs/32` 的快照数字不得直接当生产迁移依据。
 - **question_freq 归一器 v2 + 迁移工具**：NFKC 后做代码符号语义映射（`C++`/`C#`/`&&`/`&`/`i++`/`++i`），
   CJK 清洗范围扩到扩展 A/兼容区；`config.NORMALIZER_VERSION="nfkc-clean-v2"`。新增
   `mianjing_kb/migrate_norm.py`，dry-run 出 old→new 快照，`--apply` 同一事务更新 `questions` 与
