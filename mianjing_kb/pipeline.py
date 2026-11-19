@@ -61,22 +61,31 @@ def main(argv=None) -> int:
         base.append("--dry-run")
     print("=== 1/3 去重登记 ===")
     intake = run(base)
-    if intake:
-        print(json.dumps(intake["actions"], ensure_ascii=False))
+    if intake is None:
+        print("[fail] 阶段 1/3 去重登记失败，停止后续阶段", file=sys.stderr)
+        return 1
+    print(json.dumps(intake["actions"], ensure_ascii=False))
 
     if args.check:
         print("\n[check] 预览模式，未写库；确认真实重后再去掉 --check")
         return 0
 
     print("\n=== 2/3 分类 ===")
-    print(json.dumps(run([str(TOOLS / "classify.py"), "--db", args.db, "--status", status.PENDING]),
-                     ensure_ascii=False))
+    classified = run([str(TOOLS / "classify.py"), "--db", args.db, "--status", status.PENDING])
+    if classified is None:
+        print("[fail] 阶段 2/3 分类失败，停止后续阶段", file=sys.stderr)
+        return 1
+    print(json.dumps(classified, ensure_ascii=False))
 
     print("\n=== 3/3 可入库清单 ===")
     q = [str(TOOLS / "ingest_queue.py"), "--db", args.db, "--stats"]
     if args.export:
         q += ["--export", args.export]
-    print(json.dumps(run(q), ensure_ascii=False))
+    queued = run(q)
+    if queued is None:
+        print("[fail] 阶段 3/3 可入库清单失败", file=sys.stderr)
+        return 1
+    print(json.dumps(queued, ensure_ascii=False))
     return 0
 
 

@@ -104,27 +104,42 @@ def _is_reparse_dir(path: str) -> bool:
 
 
 def iter_files(root: Path, all_exts: bool):
-    """遍历所有文件，产出 (path, rel, ext, size|None, quarantined)。"""
+    """遍历所有文件，产出 (path, rel, ext, size|None, quarantined)。
+
+    同内容多副本时，登记顺序决定"谁占主记录"：必须让正式区先于
+    99-重复文件待删，且同优先级按 rel 字典序稳定。否则 os.walk 的目录顺序
+    会让隔离区副本抢占正式件身份（ISSUE-01）。
+    """
     base = scan_base(root)
+    entries = []
     for dirpath, dirnames, filenames in os.walk(root):
-        # 不跟随 junction/重解析点目录，避免同内容在两条路径重复注册
-        dirnames[:] = [d for d in dirnames if not _is_reparse_dir(os.path.join(dirpath, d))]
+        # 不跟随 junction/重解析点目录，避免同内容在两条路径重复注册；
+        # 目录显式排序，保证遍历本身可复现（最终还会按 quarantined/rel 再排一次）。
+        dirnames[:] = sorted(
+            (d for d in dirnames
+             if not _is_reparse_dir(os.path.join(dirpath, d))),
+            key=lambda d: (is_quarantine(rel_posix(Path(dirpath) / d, base)), d.casefold()))
         rel_dir = rel_posix(Path(dirpath), base)
         if is_excluded(rel_dir):
             dirnames[:] = []
             continue
         quarantined = is_quarantine(rel_dir)
-        for fn in filenames:
+        for fn in sorted(filenames, key=str.casefold):
             p = Path(dirpath) / fn
             ext = p.suffix.lower()
+            rel = rel_posix(p, base)
             if not all_exts and ext not in config.DOC_EXTS:
-                yield p, rel_posix(p, base), ext, None, quarantined
+                entries.append((quarantined, rel.casefold(), p, rel, ext, None, quarantined))
                 continue
             try:
                 size = p.stat().st_size
             except OSError:
                 continue
-            yield p, rel_posix(p, base), ext, size, quarantined
+            entries.append((quarantined, rel.casefold(), p, rel, ext, size, quarantined))
+    # 正式区（quarantined=False）整体排在隔离区之前；同区按相对路径稳定排序。
+    for _q, _rel_key, p, rel, ext, size, quarantined in sorted(
+            entries, key=lambda x: (x[0], x[1])):
+        yield p, rel, ext, size, quarantined
 
 
 def _src_is_original(row, rel: str | None = None) -> bool:

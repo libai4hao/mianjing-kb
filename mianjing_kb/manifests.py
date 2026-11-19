@@ -4,7 +4,7 @@
 manifest 是"这批增量到底改了什么"的账本：
   - created_canonicals：本批新建的 canonical_id
   - attached：吸附到既有 canonical 的 q_key
-  - candidates：0.85–0.92 待人工合并的候选
+  - candidates：0.65–0.7 待人工合并的候选
   - added_variants：本批新增的 variant q_key
 
 回滚先标 `rollback_requested`（不动库）；带 `--apply` 才删本批 variant/dependent，

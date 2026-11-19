@@ -8,6 +8,16 @@
 
 ## 2026-11-19
 
+- **canonical 数据安全与增量修复**：增量候选只更新 `pending` 行，`approved/rejected` 不再被
+  重置；全量重建保留 `merge_candidates`，`canonical_id` 按成员重叠粘性绑定并回写旧 ID；
+  增量默认阈值对齐全量 `--jac 0.7`（0.65–0.7 候选），新增 `--candidates/--approve/--reject/
+  --apply-candidates` 消费链路；variant_id 冲突显式替换并清理旧 dependent；修正
+  created/attached 计数、单例判定、topic 多数票与 collection 归一化；gram/simhash 预计算 +
+  LSH 前置过滤；dry-run/stats 改只读，增量 dry-run 在内存副本上计算，不再申请写锁。
+- **intake 判重顺序修复**：目录/文件显式排序，正式区整体优先于 `99-重复文件待删`，同一
+  SHA256 不再由 `os.walk` 首次命中决定身份；新增隔离区先扫描的回归测试。
+- **pipeline 失败传播**：intake/classify/ingest_queue 任一阶段失败即停并返回 1，不再把
+  子进程失败吞成成功。
 - **CI 与 CLI 编码收口**：GitHub Actions 的 checkout/setup-python 升到 Node 24 版本
   （`actions/checkout@v5` / `actions/setup-python@v6`）；Windows job 强制 `PYTHONUTF8=1` /
   `PYTHONIOENCODING=utf-8`。新增 `kb/stdio.py`，所有 CLI 入口在打印前把非 UTF-8 的
@@ -31,6 +41,7 @@
   （`(doc_hash,q_norm_hash)` 重复题按答案最长保留，生产 20,984 → 20,010），`question_variants`
   增 `q_key`，新增 `canonical_dependents` / `merge_candidates`；`extract` 同步去重。
   `canonical --incremental` 实现 0.92 吸附 / 0.85–0.92 候选 / 新簇三路，只重算受影响 witness；
+  （2026-11-19 后续已统一为全量 `--jac 0.7` + 0.65–0.7 候选，见顶部“canonical 数据安全与增量修复”）
   `manifests.py` 提供 `kb manifest --list / --rollback [--apply]`。`refresh` 增题集指纹：
   自动拷贝前校验 `vec_meta.question_set_hash`，结构/指纹不匹配自动重嵌入，`--copy-vec` 显式失败即止。
 - **待办收口（T6 / 遗留两项）**：`skip_log` 明确留在 `meta/`、个人数据永不入库；G1 对

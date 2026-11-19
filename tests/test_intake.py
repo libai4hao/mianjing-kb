@@ -284,6 +284,31 @@ def test_quarantine_copy_cannot_steal_path(tmp_path, capsys):
     assert row[0]["parent_dir"] == "12-综合题库"
 
 
+def test_quarantine_scanned_first_cannot_steal_path(tmp_path, capsys):
+    """ISSUE-01：隔离区目录先被 os.walk 遇到时，正式件仍必须占主记录。
+
+    同一 SHA256 不能由"先扫到谁"决定身份；正式区优先级高于 99，
+    且结果不随目录创建/遍历顺序变化。
+    """
+    root = tmp_path / "corpus"
+    dup = root / "99-重复文件待删" / "12-综合题库" / "设计模式面试专题.md"
+    dup.parent.mkdir(parents=True)
+    dup.write_bytes(b"same content")
+    real = root / "12-综合题库" / "设计模式面试专题.md"
+    real.parent.mkdir(parents=True)
+    real.write_bytes(b"same content")
+
+    db_path = tmp_path / "kb.sqlite"
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["actions"]["added"] == 1
+    assert summary["actions"]["duplicate"] >= 1
+    row = rows(db_path)
+    assert len(row) == 1
+    assert row[0]["dir_path"] == "12-综合题库"
+    assert row[0]["status"] == "pending_classify"
+
+
 def test_move_into_quarantine_flips_status(tmp_path, capsys):
     """过时件清理：正式区记录被移进 99- 区后，路径要改、状态要转 quarantined、不再进清单。"""
     root = tmp_path / "corpus"

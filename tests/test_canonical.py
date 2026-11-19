@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """canonical 落库测试：簇→两表映射、topic 多数票、witness、幂等重建、--dry-run。"""
+import json
 import sqlite3
 
 import pytest
@@ -144,3 +145,166 @@ def test_incremental_attach_create_and_manifest_rollback(mini_db, tmp_path):
     assert out["ok"] and out["status"] == "rolled_back"
     assert mini_db.execute("SELECT COUNT(*) FROM canonical_questions").fetchone()[0] == 3
     assert mini_db.execute("SELECT COUNT(*) FROM question_variants").fetchone()[0] == 6
+
+
+def _add_source_and_question(conn, h, seq, norm, qkey, topic="JVM", collection="c9"):
+    conn.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+        "dir_path, status, batch_id, first_seen_at, last_seen_at, topic, collection) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (h, h + "0" * 48, f"{h}.pdf", ".pdf", 1, f"x/{h}.pdf", "02", "classified", "t",
+         "now", "now", topic, collection))
+    sh = __import__("mianjing_kb.question_freq", fromlist=["simhash"]).simhash(norm)
+    sh = sh if sh < 2 ** 63 else sh - 2 ** 64
+    conn.execute(
+        "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
+        "q_norm_hash, simhash, span_start, span_end, extracted_at, q_key) "
+        "VALUES ((SELECT COALESCE(MAX(qid),0)+1 FROM questions),?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (h, seq, norm, f"答案-{h}", "八股", "high", norm, norm[:16],
+         sh, 0, 1, "now", qkey))
+    conn.commit()
+
+
+def test_singleton_count_is_member_count(mini_db, capsys):
+    cn.main([])
+    out = json.loads(capsys.readouterr().out)
+    assert out["singletons"] == 1                 # 只有 Redis 单件；JVM/MySQL 都是多成员簇
+
+
+def test_full_rebuild_keeps_candidate_status_and_sticky_id(mini_db, capsys):
+    cn.main([])
+    capsys.readouterr()
+    jvm_id = mini_db.execute(
+        "SELECT canonical_id FROM canonical_questions WHERE title_norm=?", (N_JVM,)).fetchone()[0]
+    qkey = "h9:candidate"
+    _add_source_and_question(mini_db, "h9", 1, "jvm内存模型", qkey)
+    mini_db.execute(
+        "INSERT INTO merge_candidates(q_key,canonical_id,similarity,status,created_at,updated_at) "
+        "VALUES(?,?,?, 'approved', 'now', 'now')",
+        (qkey, jvm_id, 0.667))
+    mini_db.commit()
+
+    cn.main([])                                  # 全量重建
+    capsys.readouterr()
+    assert mini_db.execute("SELECT COUNT(*) FROM merge_candidates").fetchone()[0] == 1
+    assert mini_db.execute("SELECT status FROM merge_candidates WHERE q_key=?",
+                           (qkey,)).fetchone()[0] == "approved"
+    assert mini_db.execute(
+        "SELECT canonical_id FROM canonical_questions WHERE title_norm=?", (N_JVM,)).fetchone()[0] == jvm_id
+
+
+def test_sticky_id_wins_over_new_representative(mini_db):
+    """同一批成员换了代表 norm，旧 canonical_id 也不能漂移。"""
+    qs = [
+        {"doc_hash": "h1", "seq": 1, "q_norm": "什么是jvm内存模型", "q_key": "h1:a",
+         "a_text": "", "topic": "JVM"},
+        {"doc_hash": "h2", "seq": 1, "q_norm": "jvm内存模型详解", "q_key": "h2:b",
+         "a_text": "", "topic": "JVM"},
+    ]
+    clusters = [{"members": [0, 1]}]
+    rows_c, _rows_v, aliases = cn.build_rows(
+        qs, clusters, {"h1": ("JVM", "c1"), "h2": ("JVM", "c2")}, "now",
+        sticky={"h1:a": "oldid", "h2:b": "oldid"})
+    assert rows_c[0][0] == "oldid"
+    assert aliases == {}
+
+
+def test_incremental_candidate_keeps_approved_and_apply_consumes(mini_db, capsys, tmp_path):
+    cn.main([])
+    capsys.readouterr()
+    jvm_id = mini_db.execute(
+        "SELECT canonical_id FROM canonical_questions WHERE title_norm=?", (N_JVM,)).fetchone()[0]
+    qkey = "h9:candidate"
+    _add_source_and_question(mini_db, "h9", 1, "jvm内存模型", qkey)
+    mini_db.execute(
+        "INSERT INTO merge_candidates(q_key,canonical_id,similarity,status,created_at,updated_at) "
+        "VALUES(?,?,?, 'approved', 'now', 'now')",
+        (qkey, jvm_id, 0.667))
+    mini_db.commit()
+
+    assert cn.main(["--incremental", "--batch-id", "t-cand"]) == 0
+    capsys.readouterr()
+    # 0.667 落在候选区间：不能把 approved 重置成 pending
+    assert mini_db.execute("SELECT status FROM merge_candidates WHERE q_key=?",
+                           (qkey,)).fetchone()[0] == "approved"
+    assert cn.main(["--apply-candidates"]) == 0
+    capsys.readouterr()
+    assert mini_db.execute("SELECT status FROM merge_candidates WHERE q_key=?",
+                           (qkey,)).fetchone()[0] == "merged"
+    assert mini_db.execute("SELECT COUNT(*) FROM question_variants WHERE q_key=?",
+                           (qkey,)).fetchone()[0] == 1
+
+
+def test_incremental_replaces_variant_when_qkey_changes(mini_db, capsys):
+    cn.main([])
+    capsys.readouterr()
+    old_key = mini_db.execute(
+        "SELECT q_key FROM question_variants WHERE doc_hash='h1' AND question_no='1'").fetchone()[0]
+    new_key = "h1:newhash"
+    mini_db.execute("UPDATE questions SET q_key=? WHERE doc_hash='h1' AND seq=1", (new_key,))
+    mini_db.commit()
+    assert cn.main(["--incremental", "--batch-id", "t-repl"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["replaced_variants_count"] == 1
+    assert out["replaced_variants"] == ["h1:newhash"]
+    assert mini_db.execute("SELECT q_key FROM question_variants WHERE variant_id=?",
+                           (cn.variant_id("h1", 1),)).fetchone()[0] == new_key
+    assert mini_db.execute("SELECT COUNT(*) FROM question_variants WHERE variant_id=?",
+                           (cn.variant_id("h1", 1),)).fetchone()[0] == 1
+    assert mini_db.execute("SELECT COUNT(*) FROM canonical_dependents WHERE q_key=?",
+                           (old_key,)).fetchone()[0] == 0
+    # 下一轮不应再重复处理
+    assert cn.main(["--incremental", "--batch-id", "t-repl-2"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["replaced_variants_count"] == 0
+
+
+def test_stats_missing_db_does_not_create(tmp_path):
+    missing = tmp_path / "missing.sqlite"
+    assert cn.main(["--stats", "--db", str(missing)]) == 2
+    assert not missing.exists()
+
+
+def test_incremental_dry_run_computes_on_memory_copy(mini_db, capsys):
+    cn.main([])
+    capsys.readouterr()
+    qkey = "h6:dry"
+    _add_source_and_question(mini_db, "h6", 1, N_JVM, qkey)
+    before = mini_db.execute("SELECT COUNT(*) FROM question_variants").fetchone()[0]
+
+    assert cn.main(["--incremental", "--dry-run", "--batch-id", "t-dry"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert mini_db.execute("SELECT COUNT(*) FROM question_variants").fetchone()[0] == before
+    assert mini_db.execute("SELECT COUNT(*) FROM question_variants WHERE q_key=?",
+                           (qkey,)).fetchone()[0] == 0
+
+    assert cn.main(["--incremental", "--batch-id", "t-real"]) == 0
+    assert mini_db.execute("SELECT COUNT(*) FROM question_variants WHERE q_key=?",
+                           (qkey,)).fetchone()[0] == 1
+
+
+def test_incremental_counts_later_member_as_attached(mini_db, capsys):
+    """同一批新建簇的后续成员应计 attached，不能因 cid 已 created 就被漏掉。"""
+    cn.main([])
+    capsys.readouterr()
+    _add_source_and_question(mini_db, "h6", 1, "全新题目甲乙丙", "h6:new", collection="c6")
+    _add_source_and_question(mini_db, "h7", 1, "全新题目甲乙丙", "h7:new", collection="c7")
+    assert cn.main(["--incremental", "--batch-id", "t-count"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["created_canonicals_count"] == 1
+    assert out["created_questions"] == 1
+    assert out["attached_count"] == 1
+
+
+def test_incremental_does_not_store_unclassified_topic(mini_db, capsys):
+    """增量新簇也要走多数票/过滤口径，不能把“未分类”原样写成 canonical topic。"""
+    cn.main([])
+    capsys.readouterr()
+    _add_source_and_question(mini_db, "h6", 1, "完全新的未分类题", "h6:unc",
+                            topic=config.UNCLASSIFIED, collection="c6")
+    assert cn.main(["--incremental", "--batch-id", "t-unc"]) == 0
+    capsys.readouterr()
+    row = mini_db.execute(
+        "SELECT topic FROM canonical_questions WHERE title_norm='完全新的未分类题'").fetchone()
+    assert row is not None and row["topic"] is None
