@@ -113,10 +113,12 @@ def _run(args) -> int:
     if not args.dry_run:
         write_all(conn, rows_c, rows_v)
         conn.commit()
-    multi = sum(1 for c in clusters if c["n_docs"] >= 2)
+    multi_source = sum(1 for c in clusters if c["n_collections"] >= 2)
+    multi_doc = sum(1 for c in clusters if c["n_docs"] >= 2)
     print(json.dumps({
         "questions": len(qs), "canon": len(rows_c), "variants": len(rows_v),
-        "multi_doc_canon": multi, "singletons": len(rows_c) - multi,
+        "multi_source_canon": multi_source, "multi_doc_canon": multi_doc,
+        "singletons": len(rows_c) - multi_source,
         "dry_run": args.dry_run,
         "elapsed_sec": round(time.perf_counter() - started, 1),
     }, ensure_ascii=False, indent=1))
