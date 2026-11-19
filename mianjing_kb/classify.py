@@ -370,7 +370,7 @@ def run_neighbor_vec(conn, dry_run: bool = False, show: int = 0) -> int:
         "SELECT doc_hash, dir_path, file_name, category FROM source_documents "
         f"WHERE status='{st.CLASSIFIED}' AND topic=? ORDER BY dir_path", (config.UNCLASSIFIED,)).fetchall()
     refs = conn.execute(
-        "SELECT doc_hash, file_name, topic, sub_topic, category FROM source_documents "
+        "SELECT doc_hash, dir_path, file_name, topic, sub_topic, category FROM source_documents "
         f"WHERE status='{st.CLASSIFIED}' AND topic NOT IN (?, '', '综合')",
         (config.UNCLASSIFIED,)).fetchall()
     ref_by_cat: dict[str, list] = {}
@@ -379,18 +379,18 @@ def run_neighbor_vec(conn, dry_run: bool = False, show: int = 0) -> int:
     print(f"[neighbor-vec] 未分类 {len(uncls)} 件，参照池 "
           f"{ {k: len(v) for k, v in ref_by_cat.items()} }", flush=True)
 
-    # 批量嵌入（一次模型调用；标题去扩展名）
-    stems_ref = [Path(r["file_name"]).stem for r in refs]
-    stems_tgt = [Path(r["file_name"]).stem for r in uncls]
-    vecs = embed_texts(stems_ref + stems_tgt)
-    vec_of = dict(zip(stems_ref + stems_tgt, vecs))
+    # 用目录上下文消解同名文件，并始终以稳定 doc_hash 绑定向量，文件名不充当主键。
+    ref_inputs = [f"{r['dir_path']}/{Path(r['file_name']).stem}" for r in refs]
+    tgt_inputs = [f"{r['dir_path']}/{Path(r['file_name']).stem}" for r in uncls]
+    vecs = embed_texts(ref_inputs + tgt_inputs)
+    vec_of = {r["doc_hash"]: vec for r, vec in zip(refs + uncls, vecs)}
 
     applied, review = [], []
     for r in uncls:
-        tv = vec_of.get(Path(r["file_name"]).stem)
+        tv = vec_of.get(r["doc_hash"])
         scored = []
         for ref in ref_by_cat.get(r["category"], []):
-            rv = vec_of.get(Path(ref["file_name"]).stem)
+            rv = vec_of.get(ref["doc_hash"])
             if not tv or not rv:
                 continue
             c = _cos(tv, rv)

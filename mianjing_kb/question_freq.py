@@ -32,6 +32,7 @@ from xml.etree import ElementTree as ET
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mianjing_kb.kb import config  # noqa: E402
+from mianjing_kb.kb import docx_safety
 
 # 题号标记：行首的序号 / 括号序号 / Q1 / 第N题 / 【N】
 Q_MARK = re.compile(
@@ -89,11 +90,12 @@ def text_of_pdf(path: Path) -> str:
 
 
 def _docx_numbering(zf: zipfile.ZipFile) -> dict[str, dict[int, tuple[str, str, int]]]:
-    """解析 word/numbering.xml：numId -> ilvl -> (numFmt, lvlText, start)。"""
+    """解析受大小限制的 word/numbering.xml：numId -> ilvl -> (numFmt, lvlText, start)。"""
     try:
-        xml = zf.read("word/numbering.xml")
+        xml = docx_safety.read_docx_member(zf.filename, "word/numbering.xml",
+                                           max_bytes=4 * 1024 * 1024)
         root = ET.fromstring(xml)
-    except (KeyError, ET.ParseError):
+    except (KeyError, ET.ParseError, docx_safety.UnsafeDocx):
         return {}
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     abstract: dict[str, dict[int, tuple[str, str, int]]] = {}
@@ -180,7 +182,7 @@ def _docx_para_text(p, numbering: dict, counters: dict[str, dict[int, int]]) -> 
 def text_of_docx(path: Path) -> str:
     """docx 是 zip：直接读 word/document.xml；保留 w:br/w:tab 与自动编号前缀。"""
     with zipfile.ZipFile(path) as zf:
-        xml = zf.read("word/document.xml")
+        xml = docx_safety.read_docx_member(path, "word/document.xml")
         numbering = _docx_numbering(zf)
     try:
         root = ET.fromstring(xml)

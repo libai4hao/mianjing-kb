@@ -114,3 +114,74 @@ def test_crashed_engine_restarts_and_both_processes_are_waited(fake_world):
     assert (tmp_path / "ocr_text" / "a.pdf.txt").exists()
     rows = [json.loads(x) for x in (tmp_path / "ocr.jsonl").read_text(encoding="utf-8").splitlines()]
     assert rows and rows[0]["ok"] is True
+
+
+def test_nonempty_legacy_ocr_text_is_not_resumed(fake_world):
+    tmp_path, _pdf = fake_world
+    out_root = tmp_path / "ocr_text"
+    target = op.text_path_for("a.pdf", out_root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("===== page 1 =====\ntruncated", encoding="utf-8")
+    assert not op.is_complete_text("a.pdf", _pdf, out_root)
+    stats = op.run_batch(["a.pdf"], out_root, tmp_path / "ocr.jsonl", dpi=72,
+                         show=0, every=1)
+    assert stats["ok"] == 1 and stats["resumed"] == 0
+    assert op.is_complete_text("a.pdf", _pdf, out_root)
+
+
+def test_ocr_sidecar_detects_output_tampering(fake_world):
+    tmp_path, pdf = fake_world
+    out_root = tmp_path / "ocr_text"
+    pages = [{"page": 1, "text": "完整文本", "score": 0.9, "lines": 1, "seconds": 0.1}]
+    saved = op.save_text("a.pdf", pages, out_root, source_pdf=pdf, total_pages=1)
+    assert op.is_complete_text("a.pdf", pdf, out_root)
+    saved.write_text("截断", encoding="utf-8")
+    assert not op.is_complete_text("a.pdf", pdf, out_root)
+
+
+def test_partial_page_export_is_not_marked_complete(fake_world):
+    tmp_path, pdf = fake_world
+    out_root = tmp_path / "ocr_text"
+    pages = [{"page": 1, "text": "仅部分页", "score": 0.9, "lines": 1, "seconds": 0.1}]
+    op.save_text("a.pdf", pages, out_root, source_pdf=pdf, total_pages=2)
+    assert not op.is_complete_text("a.pdf", pdf, out_root)
+
+
+def test_atomic_write_failure_preserves_previous_target(tmp_path, monkeypatch):
+    from mianjing_kb.kb import atomic
+    target = tmp_path / "result.txt"
+    target.write_text("old-complete", encoding="utf-8")
+
+    def fail_replace(_src, _dst):
+        raise OSError("simulated power-loss before replace")
+
+    monkeypatch.setattr(atomic.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated"):
+        atomic.atomic_write_text(target, "new-partial", encoding="utf-8")
+    assert target.read_text(encoding="utf-8") == "old-complete"
+    assert not list(tmp_path.glob(".result.txt.*.tmp"))
+
+
+def test_duplicate_page_records_are_not_complete(fake_world):
+    tmp_path, pdf = fake_world
+    out_root = tmp_path / "ocr_text"
+    page = {"page": 1, "text": "page", "score": 0.9, "lines": 1, "seconds": 0.1}
+    op.save_text("a.pdf", [page, page], out_root, source_pdf=pdf, total_pages=1)
+    assert not op.is_complete_text("a.pdf", pdf, out_root)
+
+
+def test_pdf_change_during_ocr_is_not_marked_complete(fake_world, monkeypatch):
+    tmp_path, pdf = fake_world
+    original = op.ocr_pdf_pages
+
+    def mutate_after_ocr(pdf_path, pages, engine, dpi):
+        rows = original(pdf_path, pages, engine, dpi)
+        pdf_path.write_bytes(pdf_path.read_bytes() + b"changed")
+        return rows
+
+    monkeypatch.setattr(op, "ocr_pdf_pages", mutate_after_ocr)
+    out_root = tmp_path / "ocr_text"
+    stats = op.run_batch(["a.pdf"], out_root, tmp_path / "ocr.jsonl", dpi=72,
+                         show=0, every=1)
+    assert stats["fail"] == 1 and stats["ok"] == 0
+    assert not op.is_complete_text("a.pdf", pdf, out_root)

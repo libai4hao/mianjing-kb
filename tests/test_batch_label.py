@@ -135,8 +135,9 @@ def test_run_batch_budget_stops(mini_db, monkeypatch, tmp_path):
     """
     monkeypatch.setattr(bl, "label_one", _fake_label())
     out = bl.run_batch(CFG, mini_db, budget=0.0003, failed_path=tmp_path / "f.jsonl")
-    assert out["labeled"] <= 2                      # 并发 2：第 3 题被 cancel
-    assert out["est_cost_yuan"] <= 0.0005           # 总成本有界（≤3 题 × 0.00016）
+    assert out["labeled"] <= 3                      # 已在途请求必须收割并持久化
+    assert out["all_submitted_results_consumed"] is True
+    assert mini_db.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0] == out["labeled"]
 
 
 def test_run_batch_cost_splits_in_out(mini_db, monkeypatch, tmp_path):
@@ -523,6 +524,28 @@ def test_run_review_updates_states(mini_db, monkeypatch, tmp_path):
     assert json.loads(note2)["suggestion"]["topic"] == "Redis"
 
 
+
+def test_review_budget_stops_and_consumes_inflight(mini_db, monkeypatch, tmp_path):
+    """复核达到预算后停止补单，但已在途复核均要更新 staging。"""
+    import time
+    for qid in (1, 2, 3):
+        _stage(mini_db, qid, "玄学")
+    mini_db.commit()
+    cfg = {**CFG, "concurrency": 2, "price": (10.0, 10.0)}
+
+    def fake_review(cfg_arg, row):
+        time.sleep(0.02 if row["qid"] == 1 else 0.08)
+        return {"verdict": "agree", "suggestion": {}, "note": "ok",
+                "review_model": cfg_arg["model"], "prompt_tokens": 60,
+                "completion_tokens": 15}
+
+    monkeypatch.setattr(bl, "review_one", fake_review)
+    out = bl.run_review(cfg, mini_db, budget=0.0001, failed_path=tmp_path / "rf.jsonl")
+    assert out["budget_exceeded"] is True
+    assert out["submitted"] == 2 and out["reviewed"] == 2
+    assert out["all_submitted_results_consumed"] is True
+    assert mini_db.execute("SELECT COUNT(*) FROM labels_staging WHERE review_state='agree'").fetchone()[0] == 2
+
 def test_merge_holds_disagree_rows(mini_db, monkeypatch, tmp_path):
     """R3：merge 不落库不删 disagree 分歧行（n_review_hold 输出），终审后放行。"""
     monkeypatch.setattr(bl, "label_one", _fake_label())
@@ -704,3 +727,44 @@ def test_read_only_branch_never_creates_missing_db(tmp_path, monkeypatch):
     rc = bl.main(["--manual-template", "1", "--db", str(missing)])
     assert rc == 2
     assert not missing.exists()
+
+
+def test_budget_stop_consumes_and_persists_all_inflight(mini_db, monkeypatch, tmp_path):
+    """超预算后不再提交新任务，但所有已提交 Future 必须被消费并持久化。"""
+    import time
+    cfg = {**CFG, "concurrency": 2, "price": (10.0, 10.0)}
+    _add_question(mini_db, 5, "第五个待打标题？")
+    _add_question(mini_db, 6, "第六个待打标题？")
+    mini_db.commit()
+
+    def fake(cfg_arg, q):
+        if q["qid"] == 1:
+            time.sleep(0.02)
+            return _fake_label()(cfg_arg, q)
+        if q["qid"] == 2:
+            time.sleep(0.08)
+            return _fake_label()(cfg_arg, q)
+        raise AssertionError("预算触发后不应提交 qid>=3")
+
+    monkeypatch.setattr(bl, "label_one", fake)
+    out = bl.run_batch(cfg, mini_db, budget=0.0001, failed_path=tmp_path / "f.jsonl")
+    assert out["budget_exceeded"] is True, out
+    assert out["submitted"] == 2
+    assert out["labeled"] == 2
+    assert out["all_submitted_results_consumed"] is True
+    assert mini_db.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0] == 2
+
+
+def test_manual_template_escapes_formula_cells(mini_db, tmp_path):
+    import csv
+    mini_db.execute("UPDATE questions SET q_text=? WHERE qid=1", (' =HYPERLINK("https://evil.invalid","x")',))
+    mini_db.execute("UPDATE questions SET a_text=? WHERE qid=2", ("+cmd|' /C calc'!A0",))
+    mini_db.commit()
+    path = tmp_path / "manual.csv"
+    bl.manual_template(mini_db, 3, path, seed=1)
+    with path.open("r", encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    q1 = next(r for r in rows if r["qid"] == "1")
+    q2 = next(r for r in rows if r["qid"] == "2")
+    assert q1["q_text"].startswith("' ")
+    assert q2["a_text"].startswith("'+cmd")

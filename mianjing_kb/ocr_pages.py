@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import queue
 import shutil
@@ -30,7 +31,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, paths  # noqa: E402
+from mianjing_kb.kb import atomic, config, paths  # noqa: E402
 
 PAGE_MARK = "\n\n===== page {n} =====\n\n"
 
@@ -225,13 +226,64 @@ def text_path_for(rel: str, out_root: Path) -> Path:
     return paths.safe_join(out_root, rel.replace("\\", "/") + ".txt")
 
 
-def save_text(rel: str, pages: list[dict], out_root: Path) -> Path:
-    """全文落盘：带页标记，便于下游回溯页码。"""
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def text_meta_path_for(rel: str, out_root: Path) -> Path:
+    return paths.safe_join(out_root, rel.replace("\\", "/") + ".txt.meta.json")
+
+
+def save_text(rel: str, pages: list[dict], out_root: Path, *,
+              source_pdf: Path | None = None, total_pages: int | None = None,
+              source_sha256: str | None = None) -> Path:
+    """原子落盘 OCR 全文；sidecar 证明源 PDF 与完整页集，旧非空文件不再视为完成。"""
     tp = text_path_for(rel, out_root)
-    tp.parent.mkdir(parents=True, exist_ok=True)
     parts = [PAGE_MARK.format(n=p["page"]) + p["text"] for p in pages]
-    tp.write_text("".join(parts), encoding="utf-8")
+    text = "".join(parts)
+    atomic.atomic_write_text(tp, text, encoding="utf-8")
+    if source_pdf is not None and total_pages is not None:
+        page_numbers = sorted({int(p["page"]) for p in pages})
+        all_pages = list(range(1, int(total_pages) + 1))
+        meta = {
+            "format_version": 1,
+            "source_sha256": source_sha256 or _sha256_file(Path(source_pdf)),
+            "total_pages": int(total_pages),
+            "completed_pages": page_numbers,
+            "complete": len(pages) == len(page_numbers) == int(total_pages)
+                        and page_numbers == all_pages,
+            "output_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "chars": len(text),
+        }
+        atomic.atomic_write_text(text_meta_path_for(rel, out_root),
+                                 json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     return tp
+
+
+def is_complete_text(rel: str, source_pdf: Path, out_root: Path) -> bool:
+    """验证 OCR 文本属于当前 PDF 且覆盖所有页，且 sidecar 的输出 hash 匹配。"""
+    try:
+        tp = text_path_for(rel, out_root)
+        meta_path = text_meta_path_for(rel, out_root)
+        if not tp.is_file() or not meta_path.is_file():
+            return False
+        import pymupdf
+        with pymupdf.open(str(source_pdf)) as doc:
+            total_pages = doc.page_count
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if (meta.get("format_version") != 1 or meta.get("complete") is not True
+                or meta.get("total_pages") != total_pages
+                or meta.get("completed_pages") != list(range(1, total_pages + 1))):
+            return False
+        if meta.get("source_sha256") != _sha256_file(source_pdf):
+            return False
+        return meta.get("output_sha256") == _sha256_file(tp)
+    except Exception:  # noqa: BLE001 —— 完整性校验必须 fail closed（含 PDF parser 错误）
+        return False
 
 
 def load_batch(path: Path) -> list[str]:
@@ -260,22 +312,24 @@ def run_batch(rels: list[str], out_root: Path, log_path: Path, dpi: int,
         for rel in rels:
             try:
                 pdf = paths.safe_join(config.CORPUS_ROOT, rel, must_exist=True)
-                tp = text_path_for(rel, out_root)
+                text_path_for(rel, out_root)
             except (paths.UnsafePath, OSError) as ex:
                 stats["fail"] += 1
                 _log(log_path, {"rel": rel, "ok": False, "reason": f"unsafe_path: {ex}"})
-                continue
-            if tp.exists() and tp.stat().st_size > 0:
-                stats["resumed"] += 1
                 continue
             if not pdf.exists():
                 stats["fail"] += 1
                 _log(log_path, {"rel": rel, "ok": False, "reason": "file_missing"})
                 continue
             import pymupdf
+            source_sha256 = _sha256_file(pdf)
             with pymupdf.open(str(pdf)) as doc:
                 pages = list(range(1, doc.page_count + 1))
+                page_count = doc.page_count
             total_pages_est += len(pages)
+            if is_complete_text(rel, pdf, out_root):
+                stats["resumed"] += 1
+                continue
             attempt = 0
             while True:
                 try:
@@ -292,7 +346,13 @@ def run_batch(rels: list[str], out_root: Path, log_path: Path, dpi: int,
                     engine = stack.enter_context(PaddleOCRJson())
             if results is None:
                 continue
-            save_text(rel, results, out_root)
+            if _sha256_file(pdf) != source_sha256:
+                stats["fail"] += 1
+                _log(log_path, {"rel": rel, "ok": False,
+                                "reason": "source_changed_during_ocr"})
+                continue
+            save_text(rel, results, out_root, source_pdf=pdf, total_pages=page_count,
+                      source_sha256=source_sha256)
             chars = sum(len(p["text"]) for p in results)
             scores = [p["score"] for p in results if p["score"] is not None]
             stats["ok"] += 1
@@ -371,6 +431,7 @@ def main(argv=None) -> int:
         return 2
 
     import pymupdf
+    source_sha256 = _sha256_file(pdf)
     with pymupdf.open(str(pdf)) as doc:
         total = doc.page_count
     pages = parse_range(args.pages, total) if args.pages else list(range(1, total + 1))
@@ -389,7 +450,10 @@ def main(argv=None) -> int:
             rel = str(pdf.relative_to(config.CORPUS_ROOT))
         except ValueError:
             rel = pdf.name
-        saved = save_text(rel, results, out_root)
+        if _sha256_file(pdf) != source_sha256:
+            raise RuntimeError("PDF 在 OCR 期间发生变化；拒绝将结果标记为完成")
+        saved = save_text(rel, results, out_root, source_pdf=pdf, total_pages=total,
+                          source_sha256=source_sha256)
     print(json.dumps({
         "pdf": str(pdf), "pages": len(rows), "elapsed_sec": round(time.perf_counter() - t0, 2),
         "avg_sec_per_page": round((time.perf_counter() - t0) / max(1, len(rows)), 2),

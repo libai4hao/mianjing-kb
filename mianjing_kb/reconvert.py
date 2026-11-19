@@ -20,13 +20,13 @@ import sys
 import time
 from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "mianjing_kb"))
 
-from mianjing_kb.kb import config, db, hashing, status, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, hashing, paths, status, wlock  # noqa: E402
 
 # 审核修复（2026-11-18）：原 insert(0) 会把语料侧 tools 顶到最前，遮蔽本仓库同名模块
 # （同进程后续 from mianjing_kb.build_db import build 会解析到语料侧旧模块）；改为 append 放到末尾。
@@ -126,17 +126,28 @@ def sha16(p: Path) -> str:
 
 
 def convert_one_entry(rel: str, category: str, topic: str, dry_run: bool) -> dict:
-    src = config.CORPUS_ROOT / rel
     out = {"rel": rel, "category": category, "topic": topic}
-    if not src.exists():
-        out.update(ok=False, err="源件不存在（已删/隔离）")
+    try:
+        src = paths.safe_join(config.CORPUS_ROOT, rel, must_exist=True)
+    except paths.UnsafePath as ex:
+        out.update(ok=False, err=f"源路径不安全或不存在: {ex}")
         return out
     cv = _require_convert_one()
     doc_hash = sha16(src)
     out["doc_hash"] = doc_hash
-    stem = cv.safe_name(Path(rel).stem)
-    out_dir = MD_ROOT / CAT_MAP.get(category, category) / (cv.safe_name(topic) or "综合")
-    md_path = out_dir / f"{stem}_{doc_hash[:8]}.md"
+    cat = CAT_MAP.get(category)
+    if cat is None:
+        out.update(ok=False, err=f"非法 category: {category!r}")
+        return out
+    stem = cv.safe_name(PurePosixPath(rel.replace("\\", "/")).stem)
+    topic_seg = cv.safe_name(topic) or "综合"
+    try:
+        out_dir = paths.safe_join(MD_ROOT, Path(cat) / topic_seg)
+        images_dir = paths.safe_join(MD_ROOT, Path(cat) / topic_seg / "images")
+        md_path = paths.safe_join(MD_ROOT, Path(cat) / topic_seg / f"{stem}_{doc_hash[:8]}.md")
+    except paths.UnsafePath as ex:
+        out.update(ok=False, err=f"输出路径不安全: {ex}")
+        return out
     out["md"] = str(md_path.relative_to(MD_ROOT).as_posix())
     if dry_run:
         out.update(ok=None, note="dry-run")
@@ -145,7 +156,7 @@ def convert_one_entry(rel: str, category: str, topic: str, dry_run: bool) -> dic
         ext = src.suffix.lower()
         if ext == ".pdf":
             md, pages, kept, skipped = cv.pdf_to_md(
-                str(src), str(out_dir / "images"), stem + f"_{doc_hash[:8]}", "pymupdf4llm")
+                str(src), str(images_dir), stem + f"_{doc_hash[:8]}", "pymupdf4llm")
         elif ext == ".docx":
             md = cv.docx_to_md(str(src))
             pages, kept, skipped = 1, 0, 0

@@ -5,6 +5,7 @@
     LLM_PROVIDER     local | online（默认 local；决定 base/并发/超时的缺省）
     LLM_BASE         local: http://127.0.0.1:11434/v1 | online: https://api.deepseek.com/v1
     LLM_KEY          online 必填（用户级环境变量，绝不进 git；local 留空）
+    LLM_ALLOW_CONTENT_UPLOAD=1  显式同意把已脱敏题库文本发送到 online provider；默认拒绝
     LLM_MODEL        local: qwen3:4b | online: deepseek-flash
     LLM_CONCURRENCY  local: 1 | online: 8
     LLM_PRICE        输入价,输出价（¥/百万 token；如 "1,4"）
@@ -140,6 +141,9 @@ def resolve_config(env: dict | None = None) -> dict:
             "LLM_TIMEOUT", e.get("LLM_TIMEOUT") or str(d["timeout"])),
         "json_mode": json_mode,
         "price": _parse_price(e["LLM_PRICE"]) if e.get("LLM_PRICE") else d.get("price", (0.0, 0.0)),
+        # 在线 provider 不因配置 API key 就默认获得题库内容外发授权。
+        "allow_content_upload": _parse_bool("LLM_ALLOW_CONTENT_UPLOAD", e["LLM_ALLOW_CONTENT_UPLOAD"])
+        if e.get("LLM_ALLOW_CONTENT_UPLOAD") else False,
         # 批次三 R4：上下文窗口透传（docs/13 §5：批量打标 8192）；缺省 None 不透传
         "num_ctx": _parse_positive_int("LLM_NUM_CTX", e["LLM_NUM_CTX"])
         if e.get("LLM_NUM_CTX") else None,
@@ -166,9 +170,23 @@ _RE_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _RE_WECHAT = re.compile(r"(微信|weixin|wx|qq)\s*[:：号]?\s*[A-Za-z0-9_-]{5,20}", re.I)
 _RE_IDCARD = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
 _RE_URL = re.compile(r"https?://[^\s，。；）)】]+")
+_RE_NAMED_PERSON = re.compile(
+    r"(?i)(?:姓名|联系人|收件人|候选人|面试者|作者|负责人|户主)\s*[:：=]\s*"
+    r"[\u4e00-\u9fff·]{2,20}"
+)
+_RE_ADDRESS = re.compile(
+    r"(?i)(?:家庭住址|联系地址|通信地址|住址|地址)\s*[:：=]\s*[^\r\n，。；;]{4,100}"
+)
+_RE_PASSPORT = re.compile(
+    r"(?i)(?:护照(?:号码|号)?|passport(?:\s*(?:no|number))?)\s*[:：#=]?\s*[A-Z0-9]{6,20}"
+)
+_RE_BANK_ACCOUNT = re.compile(
+    r"(?i)(?:银行卡号|银行账号|银行账户|bank\s*account|account\s*(?:no|number))"
+    r"\s*[:：#=]?\s*[0-9 -]{10,30}"
+)
 REDACT_MARK = "[联系方式]"
+PERSON_MARK = "[个人信息]"
 KEY_MARK = "[LLM_KEY]"
-
 
 def scrub_secret(text: str, cfg: dict | None = None) -> str:
     """异常/日志出口统一清洗密钥：配置里的原值、`sk-...`、Bearer 头都不留。
@@ -191,7 +209,11 @@ def scrub_secret(text: str, cfg: dict | None = None) -> str:
 
 
 def redact(text: str) -> tuple[str, bool]:
-    """遮罩手机号/邮箱/微信QQ/身份证/URL → [联系方式]。返回 (新文本, 是否命中)。"""
+    """遮罩常见结构化联系方式、姓名/地址标签、护照和银行账号。
+
+    这不是通用 NER：无法保证识别没有字段标签的自由文本姓名/住址；online 请求另需显式
+    LLM_ALLOW_CONTENT_UPLOAD=1，授权后仍只发送本函数处理过的文本。
+    """
     hit = False
 
     def _sub(rx: re.Pattern) -> None:
@@ -201,6 +223,11 @@ def redact(text: str) -> tuple[str, bool]:
             hit = True
             text = new
 
+    for rx in (_RE_NAMED_PERSON, _RE_ADDRESS, _RE_PASSPORT, _RE_BANK_ACCOUNT):
+        new_text = rx.sub(PERSON_MARK, text)
+        if new_text != text:
+            hit = True
+            text = new_text
     for rx in (_RE_IDCARD, _RE_PHONE, _RE_EMAIL, _RE_WECHAT, _RE_URL):
         _sub(rx)
     return text, hit
@@ -259,14 +286,23 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
     降级链：429/5xx/超时/网络 → 指数退避重试；JSON 模式下解析失败也重试
     （第二次起在 system 末尾强化"只输出严格 JSON，不要任何其他文字"）。
     """
-    sys_prompt = system
+    online = cfg.get("provider") == "online"
+    if online and not cfg.get("allow_content_upload", False):
+        raise ConfigError(
+            "在线 LLM 不会默认上传题库内容；确认外发风险后显式设置 "
+            "LLM_ALLOW_CONTENT_UPLOAD=1，再重新启动命令。")
+    # 最终网络边界再次脱敏，避免新增调用方绕过 batch_label 的预处理。
+    # 该规则只覆盖可识别格式，不构成自由文本匿名化保证。
+    outbound_system = redact(system)[0] if online else system
+    outbound_user = redact(user)[0] if online else user
+    sys_prompt = outbound_system
     last_err = ""
     for attempt in range(1, retries + 1):
         if attempt > 1 and json_mode:
-            sys_prompt = system + "\n只输出严格 JSON，不要任何其他文字、围栏或解释。"
+            sys_prompt = outbound_system + "\n只输出严格 JSON，不要任何其他文字、围栏或解释。"
         # Qwen3 默认开思考链（吃光 max_tokens 且污染 JSON）：本地（无 response_format
         # 支持）追加 /no_think 关闭——docs/12 冒烟同款坑
-        u_text = user if cfg.get("json_mode") else user + "\n/no_think"
+        u_text = outbound_user if cfg.get("json_mode") else outbound_user + "\n/no_think"
         payload = {
             "model": cfg["model"],
             "messages": [{"role": "system", "content": sys_prompt},

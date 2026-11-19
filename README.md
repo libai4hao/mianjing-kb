@@ -35,6 +35,10 @@ python -m pytest tests -q                # 全量测试（含 e2e demo、聚类�
 [Environment]::SetEnvironmentVariable('KB_OCR_ENGINE_DIR','<OCR_ENGINE_DIR>','User')   # 只跑 OCR 才需要
 ```
 
+在线 LLM：`LLM_PROVIDER=online` 时，题库内容默认不会发送到外部服务。确认数据授权与服务商条款后，还需显式设置 `LLM_ALLOW_CONTENT_UPLOAD=1`；发送前会执行规则脱敏，但规则无法识别所有无标签姓名/住址。
+
+`batch_label --budget` 是软预算：达到阈值后停止提交新请求，但会消费已在途任务的结果，因此实际费用可能超过阈值，最大额外暴露取决于并发数和单请求成本。
+
 未设时工具直接报路径不存在（快速失败，不会乱读别的目录）。其余可覆盖项：
 `KB_BUILD_DIR` / `KB_DB` / `KB_META_DIR`。文档里的 `<CORPUS_ROOT>`、`<REPO_ROOT>` 等都是占位符，
 对应关系见下表。

@@ -10,7 +10,9 @@
   --merge            G6 门禁复核 → PASS 才单事务 merge 进 questions（失败可整批回滚）
 
 环境变量见 llm_client（LLM_PROVIDER/LLM_BASE/LLM_KEY/LLM_MODEL/LLM_CONCURRENCY/
-LLM_PRICE/LLM_JSON_MODE——后两者可覆盖 provider 默认的价格与 json_object 支持开关）。
+LLM_PRICE/LLM_JSON_MODE/LLM_ALLOW_CONTENT_UPLOAD。在线 provider 默认拒绝外发题库文本，
+需明确设置 LLM_ALLOW_CONTENT_UPLOAD=1；--budget 是软上限，超限后不再提交新请求，
+但会收割已在途请求，实际费用最多可能超过一个并发窗口内的请求费用。
 
 用法：
     python -m mianjing_kb.batch_label --check
@@ -30,7 +32,7 @@ import os
 import random
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 
@@ -291,7 +293,7 @@ def write_failed_csv(failed_path: Path) -> tuple[Path, int]:
         w.writeheader()
         key = lambda r: (0, int(r["qid"])) if r["qid"].isdigit() else (1, r["qid"])
         for row in sorted(agg.values(), key=key):
-            w.writerow({k: row[k] for k in FAILED_CSV_HEADER})
+            w.writerow({k: _csv_safe_cell(row[k]) for k in FAILED_CSV_HEADER})
     return path, len(agg)
 
 
@@ -327,29 +329,50 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
         except Exception as ex:  # noqa: BLE001 —— 单题失败不阻塞整批（docs/15 §3.4）
             return q, None, ex
 
-    with ThreadPoolExecutor(max_workers=cfg["concurrency"]) as pool:
-        futs = [pool.submit(_worker, q) for q in todo]
-        for fut in as_completed(futs):
-            q, row, exc = fut.result()
-            if exc is not None:
-                failed.append({"qid": q["qid"], "err_type": type(exc).__name__,
-                               "err": f"{type(exc).__name__}: {str(exc)[:160]}",
-                               "model": cfg["model"],
-                               "at": datetime.now().strftime(NOW_FMT)})
-                with failed_path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(failed[-1], ensure_ascii=False) + "\n")
-                continue
-            done.append(row)
-            tokens_total += row["tokens"]
-            in_total += row.get("prompt_tokens") or 0
-            out_total += row.get("completion_tokens") or 0
-            if not dry_run and len(done) % 20 == 0:
-                write_staging(conn, done[-20:])          # 每 20 题 flush（断点粒度）
-            cost = (in_total * cfg["price"][0] + out_total * cfg["price"][1]) / 1e6
-            if budget and cost > budget:
-                for f in futs:
-                    f.cancel()
-                break                                    # 预算封顶，已完成的保留
+    # 有界提交：任一批次触达预算后，不再提交新请求；所有已提交请求仍须消费并落 staging。
+    # 并发预算是软上限，最坏超支被限制在触发阈值时已在途的请求，不再出现结果丢失。
+    max_workers = max(1, int(cfg["concurrency"]))
+    pending = {}
+    todo_iter = iter(todo)
+    submitted = 0
+    budget_exceeded = False
+
+    def submit_available(pool):
+        nonlocal submitted
+        while not budget_exceeded and len(pending) < max_workers:
+            try:
+                q = next(todo_iter)
+            except StopIteration:
+                return
+            pending[pool.submit(_worker, q)] = q
+            submitted += 1
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        submit_available(pool)
+        while pending:
+            finished, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+            for fut in finished:
+                pending.pop(fut, None)
+                q, row, exc = fut.result()
+                if exc is not None:
+                    failed.append({"qid": q["qid"], "err_type": type(exc).__name__,
+                                   "err": f"{type(exc).__name__}: {str(exc)[:160]}",
+                                   "model": cfg["model"],
+                                   "at": datetime.now().strftime(NOW_FMT)})
+                    with failed_path.open("a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(failed[-1], ensure_ascii=False) + "\n")
+                    continue
+                done.append(row)
+                tokens_total += row["tokens"]
+                in_total += row.get("prompt_tokens") or 0
+                out_total += row.get("completion_tokens") or 0
+                if not dry_run and len(done) % 20 == 0:
+                    write_staging(conn, done[-20:])
+                cost = (in_total * cfg["price"][0] + out_total * cfg["price"][1]) / 1e6
+                if budget and cost > budget:
+                    budget_exceeded = True
+            # 即使预算已触发，也继续收割 pending；但不再补充新任务。
+            submit_available(pool)
     if done and not dry_run:
         write_staging(conn, done)
     failed_csv, failed_qids = (write_failed_csv(failed_path) if failed else (None, 0))
@@ -357,6 +380,8 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
             "tokens": tokens_total,
             "est_cost_yuan": round((in_total * cfg["price"][0]
                                     + out_total * cfg["price"][1]) / 1e6, 4),
+            "submitted": submitted, "budget_exceeded": budget_exceeded,
+            "all_submitted_results_consumed": True,
             "dry_run": dry_run, "budget": budget,
             "elapsed_sec": round(time.perf_counter() - started, 1),
             "failed_log": str(failed_path) if failed else None,
@@ -405,14 +430,27 @@ def manual_template(conn, n: int, path: Path, seed: int = 42) -> dict:
     w = csv.DictWriter(buf, fieldnames=MANUAL_COLUMNS)
     w.writeheader()
     for r in picked:
-        w.writerow({"qid": r["qid"], "doc_hash": r["doc_hash"] or "",
+        w.writerow({k: _csv_safe_cell(v) for k, v in {
+                    "qid": r["qid"], "doc_hash": r["doc_hash"] or "",
                     "q_text": (r["q_text"] or "")[:300],
                     "a_text": (r["a_text"] or "")[:300],
                     "topic": r["topic"] or "", "qtype": r["qtype"] or "",
                     "difficulty": r["difficulty"] if r["difficulty"] is not None else "",
-                    "position": "", "quality": "", "canonical_q": "", "tags": "", "note": ""})
+                    "position": "", "quality": "", "canonical_q": "", "tags": "", "note": ""
+                    }.items()})
     _atomic_write_text(path, buf.getvalue(), encoding="utf-8-sig")
     return {"path": str(path), "rows": k, "columns": MANUAL_COLUMNS}
+
+
+def _csv_safe_cell(value):
+    """防 CSV/Excel 公式注入；以公式字符起始的用户文本在首位加单引号。"""
+    if value is None:
+        return ""
+    text = str(value)
+    trimmed = text.lstrip(" \t\r\n")
+    if text.startswith(("\t", "\r", "\n")) or trimmed.startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
 
 
 def _split_multi(raw: str) -> list[str]:
@@ -689,34 +727,52 @@ def run_review(cfg, conn, *, limit: int = 0, budget: float = 10.0,
         except Exception as ex:              # noqa: BLE001 —— 单题失败不阻塞
             return row, None, ex
 
-    with ThreadPoolExecutor(max_workers=cfg["concurrency"]) as pool:
-        futs = [pool.submit(_worker, t) for t in targets]
-        for fut in as_completed(futs):
-            row, res, exc = fut.result()
-            if exc is not None:
-                failed.append({"qid": row["qid"],
-                               "err": f"{type(exc).__name__}: {str(exc)[:160]}",
-                               "at": datetime.now().strftime(NOW_FMT)})
-                with failed_path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(failed[-1], ensure_ascii=False) + "\n")
-                continue
-            if res["verdict"] == "agree":
-                note = res["note"]
-            else:
-                note = json.dumps({"suggestion": res["suggestion"], "note": res["note"]},
-                                  ensure_ascii=False)
-            conn.execute("UPDATE labels_staging SET review_state=?, review_model=?, "
-                         "review_note=? WHERE qid=?",
-                         (res["verdict"], res["review_model"], note, row["qid"]))
-            conn.commit()
-            done += 1
-            in_total += res["prompt_tokens"]
-            out_total += res["completion_tokens"]
-            cost = (in_total * cfg["price"][0] + out_total * cfg["price"][1]) / 1e6
-            if budget and cost > budget:
-                for f in futs:
-                    f.cancel()
-                break
+    max_workers = max(1, int(cfg["concurrency"]))
+    pending = {}
+    target_iter = iter(targets)
+    submitted = 0
+    budget_exceeded = False
+
+    def submit_available(pool):
+        nonlocal submitted
+        while not budget_exceeded and len(pending) < max_workers:
+            try:
+                target = next(target_iter)
+            except StopIteration:
+                return
+            pending[pool.submit(_worker, target)] = target
+            submitted += 1
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        submit_available(pool)
+        while pending:
+            finished, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+            for fut in finished:
+                pending.pop(fut, None)
+                row, res, exc = fut.result()
+                if exc is not None:
+                    failed.append({"qid": row["qid"],
+                                   "err": f"{type(exc).__name__}: {str(exc)[:160]}",
+                                   "at": datetime.now().strftime(NOW_FMT)})
+                    with failed_path.open("a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(failed[-1], ensure_ascii=False) + "\n")
+                    continue
+                if res["verdict"] == "agree":
+                    note = res["note"]
+                else:
+                    note = json.dumps({"suggestion": res["suggestion"], "note": res["note"]},
+                                      ensure_ascii=False)
+                conn.execute("UPDATE labels_staging SET review_state=?, review_model=?, "
+                             "review_note=? WHERE qid=?",
+                             (res["verdict"], res["review_model"], note, row["qid"]))
+                conn.commit()
+                done += 1
+                in_total += res["prompt_tokens"]
+                out_total += res["completion_tokens"]
+                cost = (in_total * cfg["price"][0] + out_total * cfg["price"][1]) / 1e6
+                if budget and cost > budget:
+                    budget_exceeded = True
+            submit_available(pool)
     # agree/disagree 为全表累计（含此前轮次）；targets/reviewed 是本轮口径（评审 Minor#3）
     agree = conn.execute("SELECT COUNT(*) FROM labels_staging "
                          "WHERE review_state='agree'").fetchone()[0]
@@ -726,6 +782,8 @@ def run_review(cfg, conn, *, limit: int = 0, budget: float = 10.0,
             "agree": agree, "disagree": disagree,
             "est_cost_yuan": round((in_total * cfg["price"][0]
                                     + out_total * cfg["price"][1]) / 1e6, 4),
+            "submitted": submitted, "budget_exceeded": budget_exceeded,
+            "all_submitted_results_consumed": True,
             "elapsed_sec": round(time.perf_counter() - started, 1),
             "failed_log": str(failed_path) if failed else None}
 

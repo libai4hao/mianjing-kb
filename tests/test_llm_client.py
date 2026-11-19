@@ -104,7 +104,7 @@ def test_price_negative_rejected():
 
 
 def test_price_empty_uses_provider_default():
-    assert resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})["price"] == (1.0, 4.0)
+    assert resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k", "LLM_ALLOW_CONTENT_UPLOAD": "1"})["price"] == (1.0, 4.0)
     assert resolve_config(env={})["price"] == (0.0, 0.0)
 
 
@@ -177,7 +177,7 @@ def test_chat_retries_on_529_then_succeeds(monkeypatch):
         (200, {"choices": [{"message": {"content": "好"}}], "usage": {"prompt_tokens": 3}}),
     ])
     monkeypatch.setattr(lc, "_post", fake)
-    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k", "LLM_ALLOW_CONTENT_UPLOAD": "1"})
     r = chat(cfg, "s", "u", retries=3, sleep=0)
     assert r["text"] == "好" and r["tokens"] == 3 and len(calls) == 3
 
@@ -190,7 +190,7 @@ def test_chat_returns_split_token_counts(monkeypatch):
                "usage": {"prompt_tokens": 420, "completion_tokens": 40}}),
     ])
     monkeypatch.setattr(lc, "_post", fake)
-    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k", "LLM_ALLOW_CONTENT_UPLOAD": "1"})
     r = chat(cfg, "s", "u", retries=1, sleep=0)
     assert r["prompt_tokens"] == 420 and r["completion_tokens"] == 40
     assert r["tokens"] == 460
@@ -200,7 +200,7 @@ def test_chat_fast_fail_on_401(monkeypatch):
     from mianjing_kb import llm_client as lc
     fake, calls = _fake_post_factory([(401, {"error": "bad key"})])
     monkeypatch.setattr(lc, "_post", fake)
-    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k", "LLM_ALLOW_CONTENT_UPLOAD": "1"})
     with pytest.raises(RuntimeError, match="401"):
         chat(cfg, "s", "u", retries=3, sleep=0)
     assert len(calls) == 1          # 4xx 不重试
@@ -212,7 +212,7 @@ def test_chat_json_loose_parse_and_retry_hint(monkeypatch):
         (200, {"choices": [{"message": {"content": "废话前缀 {\"a\": 1} 尾巴"}}]}),
     ])
     monkeypatch.setattr(lc, "_post", fake)
-    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k", "LLM_ALLOW_CONTENT_UPLOAD": "1"})
     r = chat_json(cfg, "s", "u", retries=1, sleep=0)
     assert r["obj"] == {"a": 1}          # 宽松解析抠出 JSON
     assert cfg["json_mode"] is True and calls[0]["response_format"] == {"type": "json_object"}
@@ -222,7 +222,7 @@ def test_chat_json_parse_fail_returns_none(monkeypatch):
     from mianjing_kb import llm_client as lc
     fake, _ = _fake_post_factory([(200, {"choices": [{"message": {"content": "完全不是JSON"}}]})])
     monkeypatch.setattr(lc, "_post", fake)
-    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k", "LLM_ALLOW_CONTENT_UPLOAD": "1"})
     r = chat_json(cfg, "s", "u", retries=1, sleep=0)
     assert r["obj"] is None and r.get("parse_failed") is True
 
@@ -251,7 +251,7 @@ def test_num_ctx_only_passed_for_local(monkeypatch):
         return 200, {"choices": [{"message": {"content": "ok"}}]}
 
     monkeypatch.setattr(lc, "_post", fake)
-    online = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
+    online = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k", "LLM_ALLOW_CONTENT_UPLOAD": "1"})
     lc.chat({**online, "num_ctx": 8192}, "s", "u", retries=1)
     assert "options" not in seen[-1]
     local = resolve_config(env={})
@@ -335,10 +335,80 @@ def test_scrub_secret_masks_config_key_and_patterns():
 def test_runtime_error_never_contains_key(monkeypatch):
     """重试耗尽的 RuntimeError 必须清洗服务端回显的 key。"""
     from mianjing_kb import llm_client as lc
-    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "sk-live-abcdef123456"})
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "sk-live-abcdef123456", "LLM_ALLOW_CONTENT_UPLOAD": "1"})
     monkeypatch.setattr(lc, "_post", lambda c, p: (
         500, {"error": "invalid Authorization: Bearer sk-live-abcdef123456"}))
     with pytest.raises(RuntimeError) as ei:
         lc.chat(cfg, "s", "u", retries=1)
     assert "sk-live-abcdef123456" not in str(ei.value)
     assert "[LLM_KEY]" in str(ei.value)
+
+
+def test_online_content_upload_requires_explicit_opt_in(monkeypatch):
+    from mianjing_kb import llm_client as lc
+    calls = []
+    monkeypatch.setattr(lc, "_post", lambda cfg, payload: calls.append(payload) or (200, {}))
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k"})
+    assert cfg["allow_content_upload"] is False
+    with pytest.raises(ConfigError, match="LLM_ALLOW_CONTENT_UPLOAD"):
+        chat(cfg, "system", "question", retries=1)
+    assert calls == []
+
+
+def test_online_content_upload_explicit_opt_in(monkeypatch):
+    from mianjing_kb import llm_client as lc
+    calls = []
+    monkeypatch.setattr(lc, "_post", lambda cfg, payload: calls.append(payload) or
+                        (200, {"choices": [{"message": {"content": "ok"}}], "usage": {}}))
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k",
+                              "LLM_ALLOW_CONTENT_UPLOAD": "1"})
+    assert cfg["allow_content_upload"] is True
+    assert chat(cfg, "system", "question", retries=1)["text"] == "ok"
+    assert len(calls) == 1
+
+
+def test_online_chat_redacts_at_final_network_boundary(monkeypatch):
+    from mianjing_kb import llm_client as lc
+    calls = []
+    monkeypatch.setattr(lc, "_post", lambda cfg, payload: calls.append(payload) or
+                        (200, {"choices": [{"message": {"content": "ok"}}], "usage": {}}))
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k",
+                              "LLM_ALLOW_CONTENT_UPLOAD": "1"})
+    phone = "138" + "12345678"
+    lc.chat(cfg, "联系人：李四", f"姓名：张三；地址：上海市浦东新区测试路 1 号；手机号：{phone}",
+            retries=1)
+    sent = calls[0]["messages"]
+    wire = "\n".join(item["content"] for item in sent)
+    for secret in ("李四", "张三", "上海市浦东新区", phone):
+        assert secret not in wire
+    assert wire.count("[个人信息]") >= 3
+
+
+def test_online_chat_retry_keeps_redaction(monkeypatch):
+    """JSON 重试会改写 system，不能把未脱敏的原文重新拼回去。"""
+    from mianjing_kb import llm_client as lc
+    calls = []
+
+    def fake(cfg, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return 500, {"error": "temporary"}
+        return 200, {"choices": [{"message": {"content": '{"ok": true}'}}], "usage": {}}
+
+    monkeypatch.setattr(lc, "_post", fake)
+    cfg = resolve_config(env={"LLM_PROVIDER": "online", "LLM_KEY": "k",
+                              "LLM_ALLOW_CONTENT_UPLOAD": "1"})
+    phone = "138" + "12345678"
+    lc.chat_json(cfg, "联系人：李四", f"姓名：张三；手机号：{phone}", retries=2, sleep=0)
+    wire = "\n".join(m["content"] for c in calls for m in c["messages"])
+    for secret in ("李四", "张三", phone):
+        assert secret not in wire
+
+
+def test_redact_structured_identity_address_passport_and_bank():
+    raw = "姓名：张三；住址：上海市浦东新区示例路 1 号；护照号：E12345678；银行卡号：6222021234567890"
+    clean, hit = redact(raw)
+    assert hit
+    for value in ("张三", "上海市浦东新区", "E12345678", "6222021234567890"):
+        assert value not in clean
+    assert clean.count("[个人信息]") >= 4

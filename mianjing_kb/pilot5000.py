@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
         "price": "1,4",
         "thinking": "disabled",
         "rpm": 5,
+        "allow_content_upload": False,
     },
 }
 
@@ -296,6 +297,7 @@ def _env(cfg: dict) -> dict:
             "LLM_PRICE": str(llm.get("price") or "0,0"),
             "LLM_THINKING": str(llm.get("thinking") or ""),
             "LLM_RPM": str(llm.get("rpm") or ""),
+            "LLM_ALLOW_CONTENT_UPLOAD": "1" if llm.get("allow_content_upload") else "",
         })
     return env
 

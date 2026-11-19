@@ -23,7 +23,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "mianjing_kb"))
-from mianjing_kb.kb import config, paths  # noqa: E402
+from mianjing_kb.kb import atomic, config, paths  # noqa: E402
 
 BUILD = Path(config.BUILD_DIR)   # P1-3 修复（2026-11-17 审核）：路径统一走 config，KB_* 环境变量可覆盖
 OCR_TEXT = BUILD / "ocr_text"
@@ -31,19 +31,46 @@ BACKUP = BUILD / "ocr_md_backup"
 IMG_MARK = "## 配图"
 
 
+def _trusted_md_path(raw: str | Path) -> Path:
+    """把报告中的 md 指向 QUESTION_MD_DIR 内部；报告字段本身不作为信任依据。"""
+    root = Path(config.QUESTION_MD_DIR).resolve()
+    value = str(raw or "")
+    if not value or "\x00" in value:
+        raise paths.UnsafePath("md 目标为空或含 NUL")
+    candidate = Path(value)
+    if candidate.is_absolute():
+        resolved = candidate.resolve(strict=False)
+        try:
+            resolved.relative_to(root)
+        except ValueError as ex:
+            raise paths.UnsafePath(f"报告 md 越出题库根目录: {value}") from ex
+        return resolved
+    return paths.safe_join(root, value.replace("\\", "/"))
+
+
 def merge_set(report_path: Path) -> list[dict]:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     out = []
-    for r in report["rows"]:
-        if r["state"] not in ("fail", "review"):
+    rows = report.get("rows") if isinstance(report, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("gate report 缺少 rows 列表")
+    for r in rows:
+        if not isinstance(r, dict) or r.get("state") not in ("fail", "review"):
             continue
-        rel = r["rel"].replace("\\", "/")
+        raw_rel = r.get("rel")
+        if not isinstance(raw_rel, str) or not raw_rel:
+            continue
+        rel = raw_rel.replace("\\", "/")
         try:
-            tp = paths.safe_join(OCR_TEXT, rel + ".txt")
+            tp = paths.safe_join(OCR_TEXT, rel + ".txt", must_exist=True)
+            md = _trusted_md_path(r.get("md"))
+            pdf = paths.safe_join(config.CORPUS_ROOT, rel, must_exist=True)
         except paths.UnsafePath:
             continue
-        if tp.exists() and tp.stat().st_size > 0 and r.get("md"):
-            out.append({"rel": rel, "md": r["md"], "ocr_txt": str(tp),
+        # 只合并具有完整页清单、源 PDF 指纹和输出 hash 的 OCR 产物。
+        from mianjing_kb.ocr_pages import is_complete_text
+        if tp.stat().st_size > 0 and is_complete_text(rel, pdf, OCR_TEXT) and md.is_file():
+            out.append({"rel": rel, "md": str(md), "ocr_txt": str(tp),
                         "reason": r.get("reason", "")})
     return out
 
@@ -95,7 +122,7 @@ def main(argv=None) -> int:
             if hashlib.sha256(bak.read_bytes()).hexdigest() != \
                     hashlib.sha256(old_bytes).hexdigest():
                 raise RuntimeError(f"OCR 备份内容校验失败: {bak}")
-            old_md.write_text(new_md, encoding="utf-8")
+            atomic.atomic_write_text(old_md, new_md, encoding="utf-8")
         results.append(rec)
     elapsed = time.perf_counter() - started
     ok_n = sum(1 for r in results if r.get("ok"))

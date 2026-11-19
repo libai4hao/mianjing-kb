@@ -21,9 +21,10 @@ import json
 import os
 import re
 import tempfile
-import zipfile
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from mianjing_kb.kb import atomic, docx_safety, paths
 
 VENDORED_FROM = "21-面经数据库/tools/convert_one.py"
 VENDORED_AT = "2026-11-19"
@@ -39,7 +40,13 @@ ILLEGAL = r'[\\/:*?"<>|\r\n\t]'
 
 
 def safe_name(name: str) -> str:
-    return re.sub(ILLEGAL, "_", name).strip()[:80]
+    """把不可信目录/文件名收敛为单个普通路径段。"""
+    value = re.sub(ILLEGAL, "_", str(name)).strip(" .")[:80]
+    if value in ("", ".", ".."):
+        return ""
+    if re.match(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", value, re.I):
+        value = "_" + value
+    return value
 
 
 def img_hash(data: bytes) -> str:
@@ -50,8 +57,7 @@ W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
 def docx_to_md(path: str | Path) -> str:
-    with zipfile.ZipFile(path) as z:
-        xml = z.read("word/document.xml")
+    xml = docx_safety.read_docx_member(path, "word/document.xml")
     root = ET.fromstring(xml)
     lines: list[str] = []
     body = root.find(f"{W}body")
@@ -97,21 +103,36 @@ def docx_to_md(path: str | Path) -> str:
 def doc_to_text(path: str | Path) -> str:
     """老 .doc：Word COM 另存为纯文本。注意这里不处理超时（T16 单独排队）。"""
     import win32com.client
-    out = tempfile.mktemp(suffix=".txt")
-    word = win32com.client.DispatchEx("Word.Application")
-    word.Visible = False
+    # 使用独占临时文件，避免 tempfile.mktemp 的名称竞争。
+    fd, out = tempfile.mkstemp(suffix=".txt")
+    os.close(fd)
+    word = None
     try:
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = 0
+        # 必须在 Documents.Open 之前设置；3 = msoAutomationSecurityForceDisable。
+        word.AutomationSecurity = 3
         d = word.Documents.Open(os.path.abspath(str(path)), ReadOnly=True,
-                                AddToRecentFiles=False,
+                                AddToRecentFiles=False, UpdateLinks=0,
+                                ConfirmConversions=False,
                                 PasswordDocument="__no_password__",
                                 WritePasswordDocument="__no_password__")
-        d.SaveAs2(out, FileFormat=2)  # wdFormatText
-        d.Close(False)
+        try:
+            d.SaveAs2(out, FileFormat=2)  # wdFormatText
+        finally:
+            d.Close(False)
+        with open(out, "rb") as f:
+            data = f.read()
     finally:
-        word.Quit()
-    with open(out, "rb") as f:
-        data = f.read()
-    os.remove(out)
+        try:
+            if word is not None:
+                word.Quit()
+        finally:
+            try:
+                os.remove(out)
+            except FileNotFoundError:
+                pass
     for enc in ("gbk", "utf-8", "utf-16"):
         try:
             return data.decode(enc)
@@ -204,36 +225,59 @@ def main(argv=None) -> int:
     ap.add_argument("--extractor", default="pymupdf4llm")
     ap.add_argument("--corpus-root", default=None)
     args = ap.parse_args(argv)
-    root = corpus_root(args.corpus_root)
+    root = corpus_root(args.corpus_root).resolve()
     with open(args.entry, encoding="utf-8") as f:
         e = json.load(f)
-    src = root / e["rel"]
-    res = dict(rel=e["rel"], category=e["category"], topic=e["topic"])
+    res = dict(rel=e.get("rel"), category=e.get("category"), topic=e.get("topic"))
 
     def _dump() -> None:
         with open(args.result, "w", encoding="utf-8") as f:
             json.dump(res, f, ensure_ascii=False)
 
-    if not src.exists():
-        res.update(ok=False, err="源文件不存在")
+    try:
+        src = paths.safe_join(root, str(e.get("rel") or ""), must_exist=True)
+    except paths.UnsafePath as ex:
+        res.update(ok=False, err=f"不安全源路径: {ex}")
         _dump()
         return 1
-    mdroot = root / "20-题库MD"
-    out_dir = mdroot / CAT_MAP.get(e["category"], e["category"]) / (safe_name(e["topic"]) or "综合")
-    os.makedirs(out_dir, exist_ok=True)
-    stem = safe_name(os.path.splitext(e["title"])[0])
-    md_path = out_dir / (stem + ".md")
-    ext = e["ext"]
+    category_value = e.get("category")
+    category = CAT_MAP.get(category_value) if isinstance(category_value, str) else None
+    if category is None:
+        res.update(ok=False, err=f"非法 category: {e.get('category')!r}")
+        _dump()
+        return 1
+    topic = safe_name(e.get("topic") or "") or "综合"
+    title = PurePosixPath(str(e.get("title") or src.name).replace("\\", "/")).name
+    stem = safe_name(PurePosixPath(title).stem)
+    if not stem:
+        res.update(ok=False, err="非法/空 title")
+        _dump()
+        return 1
+    ext = str(e.get("ext") or src.suffix).lower()
+    if ext != src.suffix.lower():
+        res.update(ok=False, err=f"扩展名与源文件不匹配: {ext} != {src.suffix.lower()}")
+        _dump()
+        return 1
+    mdroot = paths.safe_join(root, "20-题库MD")
+    out_rel = Path(category) / topic / f"{stem}.md"
     try:
+        md_path = paths.safe_join(mdroot, out_rel)
+    except paths.UnsafePath as ex:
+        res.update(ok=False, err=f"不安全输出路径: {ex}")
+        _dump()
+        return 1
+    out_dir = md_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        images_dir = paths.safe_join(mdroot, out_rel.parent / "images")
         if ext == ".pdf":
-            md, pages, kept, skipped = pdf_to_md(src, str(out_dir / "images"), stem, args.extractor)
+            md, pages, kept, skipped = pdf_to_md(src, str(images_dir), stem, args.extractor)
             ratio = cjk_ratio(md)
             if ratio < 0.05:  # 质量门禁：中文占比过低 => 字体映射损坏
                 res.update(ok=False, err=f"低CJK({ratio:.1%})", extractor=args.extractor)
                 _dump()
                 return 1
-            with open(md_path, "w", encoding="utf-8") as f:
-                f.write(md)
+            atomic.atomic_write_text(md_path, md, encoding="utf-8")
             res.update(ok=True, chars=len(md), pages=pages, cjk=round(ratio, 3),
                        imgs_kept=kept, imgs_skipped=skipped, extractor=args.extractor)
         elif ext in (".docx", ".doc", ".txt", ".md"):
@@ -246,8 +290,7 @@ def main(argv=None) -> int:
             if not md.strip():
                 res.update(ok=False, err="空文本")
             else:
-                with open(md_path, "w", encoding="utf-8") as f:
-                    f.write(md)
+                atomic.atomic_write_text(md_path, md, encoding="utf-8")
                 res.update(ok=True, chars=len(md), cjk=round(cjk_ratio(md), 3),
                            imgs_kept=0, imgs_skipped=0, extractor=ext)
         else:

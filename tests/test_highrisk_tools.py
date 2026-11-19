@@ -38,9 +38,12 @@ def test_backfill_target_md_paths():
     # 非法文件名字符替换（Path().stem 先取末段，a/b 路径只留 b；冒号替换为 _）
     e2 = {"title": "a/b:c.pdf", "category": "真题", "topic": "面经"}
     assert bf._target_md(e2).name == "b_c.md"
-    # CAT_MAP 未命中的 category 归题库
-    e3 = {"title": "x.md", "category": "其他", "topic": ""}
-    assert "题库" in bf._target_md(e3).parts
+    # 未知 category 直接拒绝，不能把清单字段拼进输出路径
+    import pytest
+    from mianjing_kb.kb.paths import UnsafePath
+    e3 = {"title": "x.md", "category": "../../outside", "topic": ""}
+    with pytest.raises(UnsafePath):
+        bf._target_md(e3)
 
 
 def test_backfill_hash_suffix():
@@ -160,3 +163,19 @@ def test_purge_decision_guard():
     assert decide(rows_q, corpus / "x.pdf") == "只有隔离副本"
     assert decide(rows_ok, r"D:\elsewhere\x.pdf") == "保留副本不在语料根内"
     assert decide(rows_ok, corpus / "x.pdf", keep_exists=False) == "保留副本不存在"
+
+
+def test_backfill_target_md_sanitizes_windows_reserved_names():
+    from mianjing_kb import backfill_convert as bf
+    p = bf._target_md({"title": "CON.pdf", "category": "题库", "topic": "AUX"})
+    assert p.name == "_CON.md"
+    assert p.parent.name == "_AUX"
+
+
+def test_reconvert_rejects_manifest_source_escape(tmp_path, monkeypatch):
+    from mianjing_kb import reconvert as rc
+    root = tmp_path / "corpus"
+    root.mkdir()
+    monkeypatch.setattr(rc.config, "CORPUS_ROOT", root)
+    result = rc.convert_one_entry("../outside.pdf", "题库", "Redis", dry_run=True)
+    assert result["ok"] is False and "不安全" in result["err"]

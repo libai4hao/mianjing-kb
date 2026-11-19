@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 class UnsafePath(ValueError):
@@ -17,12 +17,16 @@ def _check_rel(rel: str | Path) -> Path:
     raw = str(rel)
     if not raw or "\x00" in raw:
         raise UnsafePath("空路径或含 NUL")
-    p = Path(raw)
-    if p.is_absolute() or p.drive or re.match(r"^[A-Za-z]:", raw) or raw.startswith("\\\\"):
+    # 清单常来自 Windows，必须在 POSIX 测试机上也识别反斜杠穿越。
+    if raw.startswith(("\\\\", "//")) or re.match(r"^[A-Za-z]:", raw):
         raise UnsafePath(f"绝对路径不允许: {raw}")
-    if any(part in ("..", "") for part in p.parts):
-        raise UnsafePath(f"相对路径含 .. 或空段: {raw}")
-    return p
+    normalized = raw.replace("\\", "/")
+    p = PurePosixPath(normalized)
+    if p.is_absolute() or any(part in ("..", "") for part in p.parts):
+        raise UnsafePath(f"相对路径含绝对路径、.. 或空段: {raw}")
+    if any(":" in part for part in p.parts):  # Windows NTFS alternate data stream
+        raise UnsafePath(f"路径段不允许包含冒号/ADS: {raw}")
+    return Path(*p.parts)
 
 
 def safe_join(root: Path, rel: str | Path, *, must_exist: bool = False) -> Path:

@@ -87,3 +87,27 @@ def test_vote_semantic_low_conf_rejects():
     assert res2["topic"] == "MySQL" and res2["sub_topic"] == "索引"
     # 空票
     assert cl.vote_semantic([])["topic"] == "未分类"
+
+
+def test_duplicate_stems_keep_vectors_by_doc_hash(mini_db, monkeypatch):
+    """相同文件名 stem 不得互相覆盖；目录上下文与 doc_hash 均参与定位。"""
+    mini_db.execute("UPDATE source_documents SET file_name='same.pdf', dir_path='A' WHERE doc_hash='h1'")
+    mini_db.execute("UPDATE source_documents SET file_name='same.pdf', dir_path='B' WHERE doc_hash='h2'")
+    # 未分类目标与 A 中的 ref 相似，不应被 B 的同 stem 向量覆盖。
+    mini_db.execute("UPDATE source_documents SET file_name='target.pdf', dir_path='A' WHERE doc_hash='h3'")
+    mini_db.commit()
+
+    def contextual(texts):
+        out = []
+        for t in texts:
+            if t.startswith("A/"):
+                out.append([1.0, 0.0])
+            else:
+                out.append([0.0, 1.0])
+        return out
+
+    monkeypatch.setattr(embed_questions, "embed_texts", contextual)
+    # target 的输入也是 A/，因此只与同目录 A 参照一致。
+    rc = cl.run_neighbor_vec(mini_db, dry_run=False)
+    assert rc == 0
+    assert mini_db.execute("SELECT topic FROM source_documents WHERE doc_hash='h3'").fetchone()[0] == "并发编程"

@@ -29,12 +29,12 @@ import sys
 import tempfile
 import time
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "mianjing_kb"))
-from mianjing_kb.kb import config, status  # noqa: E402
+from mianjing_kb.kb import config, paths, status  # noqa: E402
 
 BUILD = Path(config.BUILD_DIR)
 LEDGER = Path(config.DB_PATH)
@@ -161,10 +161,23 @@ def _run_one(entry: dict, extractor: str = "pymupdf4llm") -> dict | None:
 
 
 def _target_md(entry: dict) -> Path:
-    """convert_one 的落盘路径：<mdroot>/<category>/<topic>/<stem>.md"""
-    cat = CAT_MAP.get(entry.get("category") or "", "题库")
-    stem = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", Path(entry["title"]).stem).strip()[:80]
-    return MD_ROOT / cat / (entry.get("topic") or "综合") / f"{stem}.md"
+    """受限目标：<mdroot>/<允许的 category>/<单段 topic>/<安全 stem>.md。"""
+    category = CAT_MAP.get(entry.get("category") or "")
+    if category is None:
+        raise paths.UnsafePath(f"非法 category: {entry.get('category')!r}")
+
+    def segment(value: str) -> str:
+        result = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", str(value)).strip(" .")[:80]
+        if re.match(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", result, re.I):
+            result = "_" + result
+        return result
+
+    title = PurePosixPath(str(entry.get("title") or "").replace("\\", "/")).name
+    stem = segment(PurePosixPath(title).stem)
+    topic = segment(entry.get("topic") or "综合") or "综合"
+    if not stem:
+        raise paths.UnsafePath("title 为空或不是有效文件名")
+    return paths.safe_join(MD_ROOT, Path(category) / topic / f"{stem}.md")
 
 
 def _hash_suffix(entry: dict) -> str:
@@ -296,14 +309,21 @@ def merge_ocr() -> None:
             skipped += 1
             continue
         p = plan.get(src_rel) or plan.get(rel)
-        suffix = ((p or {}).get("doc_hash") or "")[:8]
+        raw_hash = str((p or {}).get("doc_hash") or "")
+        suffix = raw_hash[:8] if re.fullmatch(r"[0-9a-fA-F]{8,}", raw_hash) else ""
         if not suffix:
-            src = CORPUS / src_rel
-            if src.exists():
+            try:
+                src = paths.safe_join(CORPUS, src_rel, must_exist=True)
+            except paths.UnsafePath:
+                src = None
+            if src is not None:
                 suffix = _h.sha256(src.read_bytes()).hexdigest()[:8]
         if suffix:
-            target = MD_ROOT / CAT_MAP.get((p or {}).get("category", "题库"), "题库") \
-                / ((p or {}).get("topic") or "综合") / f"{stem}__{suffix}.md"
+            base_target = _target_md({"title": f"{stem}.md",
+                                      "category": (p or {}).get("category", "题库"),
+                                      "topic": (p or {}).get("topic") or "综合"})
+            target = base_target.with_name(f"{base_target.stem}__{suffix}.md")
+            target = paths.safe_join(MD_ROOT, target.relative_to(MD_ROOT))
             if target.exists():
                 skipped += 1
                 continue
@@ -312,9 +332,14 @@ def merge_ocr() -> None:
             if any(MD_ROOT.rglob(f"{stem}*.md")):
                 skipped += 1
                 continue
-            target = MD_ROOT / "题库" / "综合" / f"{stem}.md"
+            safe_stem = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", stem).strip(" .")[:80]
+            if not safe_stem:
+                skipped += 1
+                continue
+            target = paths.safe_join(MD_ROOT, Path("题库") / "综合" / f"{safe_stem}.md")
+        from mianjing_kb.kb.atomic import atomic_write_text
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(txt.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+        atomic_write_text(target, txt.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
         made += 1
         print(f"[merge] {src_rel[:70]} -> {target.relative_to(MD_ROOT).as_posix()}")
     print(json.dumps({"new_md": made, "skipped": skipped}, ensure_ascii=False))
