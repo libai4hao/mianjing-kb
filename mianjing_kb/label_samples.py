@@ -133,6 +133,7 @@ def export_samples(db: str | os.PathLike, out_root: str | os.PathLike,
             "latency_ms": r.get("latency_ms"),
             **{k: "" for k in REVIEW_COLUMNS},
         }
+        item["review_status"] = "pending"
         items.append(item)
 
     with (out / "samples.csv").open("w", encoding="utf-8-sig", newline="") as fh:
