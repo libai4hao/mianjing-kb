@@ -1047,6 +1047,23 @@ def chunk_v2(md_text: str) -> Dict:
         for e in extra:
             add(e["q"], e["a"], e["span"], e["style"])
 
+    # D2 出口终检：漏过行级判定的代码碎片不产题（docx 无围栏形态）。
+    # 内容并入上一题答案、span 顺延保持可回溯；无上题时降为 probe 候选。
+    # 不在行分类层拦编号代码行：那会吃掉 qid 递进链，误伤其后的真题。
+    cleaned: List[dict] = []
+    frag_probe: List[dict] = []
+    for it in items:
+        if is_code_fragment(it["q"]):
+            if cleaned:
+                prev = cleaned[-1]
+                prev["a"] = (prev["a"] + "\n" + it["q"] + "\n" + it["a"]).strip("\n")
+                prev["span"][1] = it["span"][1]
+            else:
+                frag_probe.append({"span": it["span"], "why": "代码碎片"})
+            continue
+        cleaned.append(it)
+    items = cleaned
+
     # 同一文档内完全重复的题干（网页标题与正文题号重复）只做保守合并：
     # 空答案 / 极短答案被更完整答案替换；两条都有实质答案时都保留，
     # 避免不同章节下的同题异答被吞掉。
@@ -1087,6 +1104,8 @@ def chunk_v2(md_text: str) -> Dict:
             if len(probe) >= 3:
                 break
     if not items:
+        probe.extend(frag_probe[:max(0, 3 - len(probe))])
+    if not items and len(probe) < 3:
         lines = md_text.splitlines(keepends=True)
         starts, pos = [], 0
         for ln in lines:
