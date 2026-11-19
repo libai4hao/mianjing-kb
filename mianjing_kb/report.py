@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """P1-4 report：同题频次报告——questions 表 → 近重复簇 → Markdown + CSV。
 
-- 精确同文与近重复统一走 question_freq.cluster（simhash 16bit 分带 LSH 候选
-  + 汉明≤dist + 2-gram Jaccard≥jac 双确认）；同文必然同簇（simhash 相同同桶）。
+- 精确同文与近重复统一走 question_freq.cluster（2-gram 倒排索引 + Jaccard 阈值
+  精确判定）；同文必然同簇。
 - 输出：build/question_freq_report.md（Top 表 + 改写对样例 + 总览）
        build/question_freq_clusters.csv（全部 ≥2 文档的簇，含 doc_hash 清单）
 
 用法：
-    python -m mianjing_kb.report                 # 默认阈值 dist=24 jac=0.7
+    python -m mianjing_kb.report                 # 默认阈值 jac=0.7
     python -m mianjing_kb.report --top 100
 """
 from __future__ import annotations

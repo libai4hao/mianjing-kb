@@ -1,6 +1,10 @@
 ﻿# -*- coding: utf-8 -*-
 """问题切分：题干要吃进来、答案要砍掉，近重复要能合并。"""
-from mianjing_kb.question_freq import grams, hamming, jaccard, normalize, simhash, split_questions
+import zipfile
+
+from mianjing_kb.question_freq import (
+    grams, hamming, jaccard, normalize, simhash, split_questions, text_of_docx,
+)
 
 
 def test_split_keeps_question_drops_answer():
@@ -51,6 +55,20 @@ def test_normalize_handles_spacing_and_nfkc():
     assert normalize("什么 是 JVM ？") == normalize("什么是JVM？")
     assert normalize("1、MySQL 索引：B+树") != normalize("B+树")
     assert normalize("⼤⼚缓存") == normalize("大厂缓存")
+    assert normalize("什么是⼤数据") == "什么是大数据"
+    assert normalize("ＭｙＳＱＬ索引") == "mysql索引"
+    assert normalize("㐀扩展A") == "㐀扩展a"
+
+
+def test_normalize_keeps_code_symbols_distinct():
+    assert normalize("C++") == "cpp"
+    assert normalize("C#") == "csharp"
+    assert normalize("i++") == "ipostinc"
+    assert normalize("++i") == "preinci"
+    assert normalize("i--") == "ipostdec"
+    assert normalize("--i") == "predeci"
+    assert normalize("A && B") == "aandb"
+    assert normalize("A & B") == "abitandb"
 
 
 def test_near_duplicates_hash_close_far_ones_apart():
@@ -66,3 +84,29 @@ def test_near_duplicates_hash_close_far_ones_apart():
                    grams(normalize("说一下 JVM 的内存区域划分"))) >= 0.9
     assert jaccard(grams(normalize("说一下 JVM 的内存区域划分")),
                    grams(normalize("MySQL 的隔离级别有哪几种"))) < 0.2
+
+
+def test_docx_keeps_auto_numbering_and_soft_break(tmp_path):
+    """DOCX 的 1./2. 是 w:numPr 自动编号，不在 w:t 里；丢掉会让 chunker 少识别题号。"""
+    doc = (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body>"
+        '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
+        "<w:r><w:t>什么是 JVM</w:t><w:br/><w:t>第二行</w:t></w:r></w:p>"
+        '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
+        "<w:r><w:t>说一下 GC</w:t></w:r></w:p>"
+        "</w:body></w:document>"
+    )
+    numbering = (
+        '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/>'
+        '<w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>'
+        '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>'
+    )
+    p = tmp_path / "a.docx"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("word/document.xml", doc)
+        zf.writestr("word/numbering.xml", numbering)
+    text = text_of_docx(p)
+    assert "1. 什么是 JVM\n第二行" in text
+    assert "2. 说一下 GC" in text

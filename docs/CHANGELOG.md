@@ -8,6 +8,15 @@
 
 ## 2026-11-19
 
+- **question_freq 归一器 v2 + 迁移工具**：NFKC 后做代码符号语义映射（`C++`/`C#`/`&&`/`&`/`i++`/`++i`），
+  CJK 清洗范围扩到扩展 A/兼容区；`config.NORMALIZER_VERSION="nfkc-clean-v2"`。新增
+  `mianjing_kb/migrate_norm.py`，dry-run 出 old→new 快照，`--apply` 同一事务更新 `questions` 与
+  `label_facts`，同文档新 hash 碰撞按答案最长保留；生产 dry-run 2,299/20,010 条 hash 变化、0 删除。
+- **近重复聚类替换 LSH**：`question_freq.cluster` 与 `canonical.attach_incremental` 改用 2-gram 倒排 +
+  前缀过滤 + Jaccard 精确判定，去掉 SimHash 16bit 分带/汉明前置过滤；`--dist` 仅保留兼容。
+- **抽取器加固**：PDF `get_text(sort=True)`；DOCX 保留 `w:br`/`w:tab` 与 `w:numPr` 自动编号；Word COM
+  禁宏/关提示/只读打开参数/失败重试并抛异常；`extract.MIN_NORM=4`；`split_qa` 标 DEPRECATED。
+  question_freq CLI 排序新增 `n_collections`，与 canonical witness 的 distinct collection 口径统一。
 - **label_facts 加固（主键不变）**：保留 `q_norm_hash`，不迁 `q_key`；017 迁移补唯一索引、
   `normalizer_version`、`q_norm_sample`、`source/labeled_at/confidence`，`merge` 写归一版本与题干快照；
   同一归一题干跨文档共享标签，`extract.store` 重挂逻辑不动。按决策纪要未建 `label_overrides`：

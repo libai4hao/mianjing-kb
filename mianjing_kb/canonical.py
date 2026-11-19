@@ -5,7 +5,7 @@
   - canonical_questions  一行 = 一个"同一道题"（近重复簇），witness = 见证来源数
                           （distinct collection；collection 为空回退 doc_hash，Q-2 2026-11-19）
   - question_variants    一行 = 该题的一个变体（源 doc_hash + seq），FK 级联
-聚类复用 report.build_clusters（simhash LSH 分带 + 汉明 + 2-gram Jaccard 双确认，P1-4 同款）；
+聚类复用 report.build_clusters（2-gram 倒排 + Jaccard 精确判定，P1-4 同款）；
 单件簇也落库——canonical 是全量唯一题登记簿，不只存重复簇。
 
 全量重建的边界（2026-11-19 修复）：
@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sqlite3
 import sys
 import time
@@ -47,14 +48,21 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mianjing_kb import manifests  # noqa: E402
 from mianjing_kb.kb import config, db, wlock  # noqa: E402
-from mianjing_kb.question_freq import hamming, simhash  # noqa: E402
 from mianjing_kb.report import build_clusters, load_questions  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 TITLE_MAX = 500
-LSH_MAX_DIST = 24       # 与 build_clusters(--dist) 默认一致
 ATTACH_JAC = 0.7        # 权威口径：与全量 --jac 默认一致
 CANDIDATE_JAC = 0.65    # 只登记人工复核，不自动挂靠
+FILTER_JAC = min(CANDIDATE_JAC, ATTACH_JAC)   # 倒排前缀按更低阈值建，保证 0.7 候选不丢
+
+
+def _prefix_grams(g: frozenset[str], min_jac: float) -> list[str]:
+    """前缀过滤：字典序全局一致，Jaccard>=t 的两集合必有共享 token 落在双方前缀。"""
+    if not g:
+        return []
+    k = max(1, len(g) - math.ceil(min_jac * len(g)) + 1)
+    return sorted(g)[:k]
 
 
 def variant_id(q_key: str) -> str:
@@ -255,11 +263,6 @@ def _grams(text: str) -> frozenset[str]:
     return frozenset(s[i:i + 2] for i in range(max(0, len(s) - 1)))
 
 
-@lru_cache(maxsize=20000)
-def _simhash(text: str) -> int:
-    return simhash(text or "")
-
-
 def jaccard(a: frozenset[str], b: frozenset[str]) -> float:
     if not a or not b:
         return 0.0
@@ -294,47 +297,44 @@ def _recompute_topic(conn, canonical_id: str,
 
 
 def _rep_index(reps: list[tuple[str, str]]):
-    """预计算代表题干的 gram/simhash 与 4 段 LSH 桶，供增量前置过滤。"""
+    """预计算代表题干的 gram 与前缀倒排，供增量候选召回。
+
+    前缀按 FILTER_JAC（0.65）建：它比挂靠阈值 0.7 更低，0.7 的候选必然落在
+    0.65 的候选集里；不再保留 SimHash 16bit 分带（会漏掉汉明距离大的同义改写）。
+    """
     by_norm: dict[str, str] = {}
-    grams: dict[str, frozenset[str]] = {}
-    sims: dict[str, int] = {}
-    buckets: dict[tuple[int, int], list[str]] = defaultdict(list)
+    gram_sets: dict[str, frozenset[str]] = {}
+    index: dict[str, list[str]] = defaultdict(list)
     for cid, title in reps:
         key = (title or "")[:TITLE_MAX]
         by_norm.setdefault(key, cid)
         g = _grams(title or "")
-        h = _simhash(title or "")
-        grams[cid] = g
-        sims[cid] = h
-        for band in range(4):
-            buckets[(band, (h >> (band * 16)) & 0xFFFF)].append(cid)
-    return by_norm, grams, sims, buckets
+        gram_sets[cid] = g
+        for token in _prefix_grams(g, FILTER_JAC):
+            index[token].append(cid)
+    return by_norm, gram_sets, index
 
 
-def _add_rep(cid: str, title: str, by_norm, grams, sims, buckets) -> None:
+def _add_rep(cid: str, title: str, by_norm, gram_sets, index) -> None:
     key = (title or "")[:TITLE_MAX]
     by_norm.setdefault(key, cid)
-    grams[cid] = _grams(title or "")
-    h = _simhash(title or "")
-    sims[cid] = h
-    for band in range(4):
-        buckets[(band, (h >> (band * 16)) & 0xFFFF)].append(cid)
+    g = _grams(title or "")
+    gram_sets[cid] = g
+    for token in _prefix_grams(g, FILTER_JAC):
+        index[token].append(cid)
 
 
-def _best_existing(norm: str, by_norm, grams, sims, buckets) -> tuple[str | None, float]:
+def _best_existing(norm: str, by_norm, gram_sets, index) -> tuple[str | None, float]:
     key = norm[:TITLE_MAX]
     if key in by_norm:
         return by_norm[key], 1.0
     qg = _grams(norm)
-    qh = _simhash(norm)
     cands: set[str] = set()
-    for band in range(4):
-        cands.update(buckets.get((band, (qh >> (band * 16)) & 0xFFFF), ()))
+    for token in _prefix_grams(qg, FILTER_JAC):
+        cands.update(index.get(token, ()))
     best_cid, best_sim = None, 0.0
     for cid in cands:
-        if hamming(qh, sims.get(cid, 0)) > LSH_MAX_DIST:
-            continue
-        s = jaccard(qg, grams.get(cid, frozenset()))
+        s = jaccard(qg, gram_sets.get(cid, frozenset()))
         if s > best_sim:
             best_cid, best_sim = cid, s
     return best_cid, best_sim
@@ -380,7 +380,7 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
     """T29：只处理尚未进 variant 的新题，吸附/候选/新建三路，不重跑全量聚类。
 
     - q_key 已在 question_variants 的题跳过（幂等）；
-    - 用预计算 gram + simhash LSH 桶找候选，避免 O(新题 × 全部 canonical) 的集合重建；
+    - 用预计算 gram + 前缀倒排找候选，避免 O(新题 × 全部 canonical) 的集合重建；
     - Jaccard ≥ attach_jac → 吸到最相似 canonical；
     - candidate_jac ≤ sim < attach_jac → merge_candidates(status=pending)，不落 variant；
     - 其余 → 新 canonical + variant；
@@ -394,7 +394,7 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
         "SELECT q_key FROM question_variants WHERE COALESCE(q_key,'')!=''")}
     reps = [(r[0], r[1]) for r in conn.execute(
         "SELECT canonical_id, title_norm FROM canonical_questions")]
-    by_norm, grams, sims, buckets = _rep_index(reps)
+    by_norm, gram_sets, index = _rep_index(reps)
     known = set(by_norm.values())
     meta = doc_meta(conn)
     created: list[str] = []
@@ -411,7 +411,7 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
         if qkey in attached_keys:
             continue
         norm = q.get("q_norm") or ""
-        best_cid, best_sim = _best_existing(norm, by_norm, grams, sims, buckets)
+        best_cid, best_sim = _best_existing(norm, by_norm, gram_sets, index)
         if best_cid and best_sim < attach_jac and best_sim >= candidate_jac:
             conn.execute(
                 "INSERT INTO merge_candidates(q_key,canonical_id,similarity,status,created_at,updated_at) "
@@ -435,7 +435,7 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
             created.append(cid)
             created_set.add(cid)
             known.add(cid)
-            _add_rep(cid, norm, by_norm, grams, sims, buckets)
+            _add_rep(cid, norm, by_norm, gram_sets, index)
             best_cid, best_sim = cid, 1.0
 
         cid = best_cid

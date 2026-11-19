@@ -5,7 +5,7 @@
   ① 抽取文本（pdf 走 pymupdf、docx 走 zip+XML、doc 走 Word COM）
   ② 切题：优先按题号标记（1. / 1、/ （1） / Q1 / 第1题 / 【1】）切块，
      块内取到第一个问号为止；无题号时按"含疑问词"的行兜底
-  ③ 归一化 + SimHash(64bit, char bigram) + 16bit 分带 LSH 找近重复，并查集合并
+  ③ 归一化 + 2-gram 倒排（前缀过滤）找近重复，并查集合并；SimHash 仅保留作辅助特征
   ④ 按"出现的文档数"排序输出 CSV / Markdown
 
 用法：
@@ -18,6 +18,7 @@ import argparse
 import atexit
 import csv
 import hashlib
+import math
 import os
 import re
 import sys
@@ -48,10 +49,32 @@ Q_WORD = re.compile(r"(什么|如何|为什么|怎么|区别|原理|简述|请�
 # 题号后面紧跟答案时的截断词
 ANSWER_CUT = re.compile(r"(参考答案|答案\s*[:：]|答\s*[:：]|解析\s*[:：]|说明\s*[:：])")
 PAGE_NOISE = re.compile(r"^(?:第?\s*\d+\s*页?|-\s*\d+\s*-|\d{1,4})$")
-CLEAN = re.compile(r"[^\u4e00-\u9fa5a-z0-9]+")
-# 归一逻辑版本：NFKC、清洗规则或大小写策略变化时递增；label_facts 用它标记存量标签的
+CLEAN = re.compile(r"[^\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaffa-z0-9]+")
+# 归一逻辑版本：NFKC、清洗规则或符号映射变化时递增；label_facts 用它标记存量标签的
 # 可迁移口径，并可用 q_norm_sample 在升级后重算 hash 而不是整批废弃。
 NORMALIZER_VERSION = config.NORMALIZER_VERSION
+MIN_NORM = 4
+
+# 代码符号先做语义映射，避免 `C++`/`C#`、`&&`/`&`、`i++`/`++i` 被 CLEAN 抹平后碰撞。
+_CXX = re.compile(r"\bC\+\+", re.I)
+_CSHARP = re.compile(r"\bC#", re.I)
+_POST_INC = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\+\+")
+_PRE_INC = re.compile(r"\+\+([A-Za-z_][A-Za-z0-9_]*)")
+_POST_DEC = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\-\-")
+_PRE_DEC = re.compile(r"\-\-([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _map_symbols(text: str) -> str:
+    """把有语义的代码符号映射成词，再做清洗；顺序保证 C++ 不被 ++ 规则拆坏。"""
+    text = _CXX.sub("cpp", text)
+    text = _CSHARP.sub("csharp", text)
+    text = text.replace("&&", "and").replace("||", "or")
+    text = text.replace("&", "bitand").replace("|", "bitor")
+    text = _POST_INC.sub(r"\1postinc", text)
+    text = _PRE_INC.sub(r"preinc\1", text)
+    text = _POST_DEC.sub(r"\1postdec", text)
+    text = _PRE_DEC.sub(r"predec\1", text)
+    return text
 
 
 # ---------------- 文本抽取 ----------------
@@ -62,21 +85,110 @@ def text_of_pdf(path: Path) -> str:
     import pymupdf
 
     with pymupdf.open(path) as doc:
-        return "\n".join(page.get_text() for page in doc)
+        return "\n".join(page.get_text("text", sort=True) for page in doc)
+
+
+def _docx_numbering(zf: zipfile.ZipFile) -> dict[str, dict[int, tuple[str, str, int]]]:
+    """解析 word/numbering.xml：numId -> ilvl -> (numFmt, lvlText, start)。"""
+    try:
+        xml = zf.read("word/numbering.xml")
+        root = ET.fromstring(xml)
+    except (KeyError, ET.ParseError):
+        return {}
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    abstract: dict[str, dict[int, tuple[str, str, int]]] = {}
+    for a in root.iter(ns + "abstractNum"):
+        aid = a.get(ns + "abstractNumId") or ""
+        levels: dict[int, tuple[str, str, int]] = {}
+        for lvl in a.iter(ns + "lvl"):
+            ilvl = int(lvl.get(ns + "ilvl") or 0)
+            fmt = lvl.find(ns + "numFmt")
+            text = lvl.find(ns + "lvlText")
+            start = lvl.find(ns + "start")
+            levels[ilvl] = (
+                (fmt.get(ns + "val") if fmt is not None else "decimal") or "decimal",
+                (text.get(ns + "val") if text is not None else "%1.") or "%1.",
+                int(start.get(ns + "val") if start is not None else 1),
+            )
+        abstract[aid] = levels
+    nums: dict[str, dict[int, tuple[str, str, int]]] = {}
+    for n in root.iter(ns + "num"):
+        nid = n.get(ns + "numId") or ""
+        aid_node = n.find(ns + "abstractNumId")
+        aid = (aid_node.get(ns + "val") or "").strip() if aid_node is not None else ""
+        nums[nid] = abstract.get(aid, {})
+    return nums
+
+
+def _roman(n: int) -> str:
+    vals = [(10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")]
+    out = ""
+    for v, s in vals:
+        while n >= v:
+            out += s
+            n -= v
+    return out
+
+
+def _number_label(fmt: str, n: int) -> str:
+    if fmt == "decimal":
+        return str(n)
+    if fmt == "lowerLetter":
+        return chr(ord("a") + (n - 1) % 26)
+    if fmt == "upperLetter":
+        return chr(ord("A") + (n - 1) % 26)
+    if fmt in ("lowerRoman", "upperRoman"):
+        s = _roman(n)
+        return s.upper() if fmt == "upperRoman" else s
+    if fmt == "bullet":
+        return "•"
+    return str(n)
+
+
+def _docx_para_text(p, numbering: dict, counters: dict[str, dict[int, int]]) -> str:
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    ppr = p.find(ns + "pPr")
+    prefix = ""
+    if ppr is not None:
+        numpr = ppr.find(ns + "numPr")
+        if numpr is not None:
+            nid_node = numpr.find(ns + "numId")
+            ilvl_node = numpr.find(ns + "ilvl")
+            nid = (nid_node.get(ns + "val") if nid_node is not None else "") or ""
+            ilvl = int((ilvl_node.get(ns + "val") if ilvl_node is not None else 0) or 0)
+            levels = numbering.get(nid, {})
+            level = levels.get(ilvl)
+            if level:
+                fmt, lvl_text, start = level
+                cur = counters.setdefault(nid, {})
+                cur[ilvl] = cur.get(ilvl, start - 1) + 1
+                for deeper in [k for k in cur if k > ilvl]:
+                    del cur[deeper]
+                label = _number_label(fmt, cur[ilvl])
+                prefix = lvl_text.replace(f"%{ilvl + 1}", label) + " "
+    parts = [prefix]
+    for node in p.iter():
+        if node.tag == ns + "t":
+            parts.append(node.text or "")
+        elif node.tag == ns + "br":
+            parts.append("\n")
+        elif node.tag == ns + "tab":
+            parts.append("\t")
+    return "".join(parts)
 
 
 def text_of_docx(path: Path) -> str:
-    """docx 是 zip：直接读 word/document.xml，段落按 </w:p> 断行。不依赖 python-docx。"""
+    """docx 是 zip：直接读 word/document.xml；保留 w:br/w:tab 与自动编号前缀。"""
     with zipfile.ZipFile(path) as zf:
         xml = zf.read("word/document.xml")
+        numbering = _docx_numbering(zf)
     try:
         root = ET.fromstring(xml)
     except ET.ParseError:
         return ""
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    paras = []
-    for p in root.iter(ns + "p"):
-        paras.append("".join(t.text or "" for t in p.iter(ns + "t")))
+    counters: dict[str, dict[int, int]] = {}
+    paras = [_docx_para_text(p, numbering, counters) for p in root.iter(ns + "p")]
     return "\n".join(paras)
 
 
@@ -90,8 +202,22 @@ def _word_app():
         import win32com.client as win32
         app = win32.DispatchEx("Word.Application")
         app.Visible = False
+        # 禁宏、关提示：question_freq 可能打开不可信 .doc，绝不能让宏在自动化会话里执行。
+        app.AutomationSecurity = 3       # msoAutomationSecurityForceDisable
+        app.DisplayAlerts = 0            # wdAlertsNone
         _WORD = app
     return _WORD
+
+
+def _open_word_doc(app, path: Path):
+    """只读打开 .doc；不转换确认、不加入最近文件、不提示密码。"""
+    return app.Documents.Open(
+        str(path),
+        ConfirmConversions=False,
+        ReadOnly=True,
+        AddToRecentFiles=False,
+        PasswordDocument="",
+    )
 
 
 def close_word() -> None:
@@ -120,16 +246,32 @@ def word_app():
 
 
 def text_of_doc(path: Path) -> str:
-    """老 .doc 只能靠 Word（本机 Office 12.0）。失败返回空串，由上层记 skipped。"""
+    """老 .doc 只能靠 Word（本机 Office 12.0）。失败抛异常，不能冒充空文档。
+
+    打开失败重试一次：Word 崩溃后旧代理会拖死后续所有文档，必须 Quit 重建。
+    """
     try:
         __import__("win32com.client")      # 仅探依赖；实例统一由 _word_app 管理
-    except ImportError:
-        return ""
-    d = _word_app().Documents.Open(str(path), ReadOnly=True)
+    except ImportError as exc:
+        raise RuntimeError("win32com 不可用，无法读取 .doc") from exc
+    app = None
+    doc = None
+    for attempt in range(2):
+        try:
+            app = _word_app()
+            doc = _open_word_doc(app, path)
+            break
+        except Exception:
+            close_word()
+            if attempt == 1:
+                raise
     try:
-        return d.Content.Text
+        return doc.Content.Text
     finally:
-        d.Close(False)
+        try:
+            doc.Close(False)
+        except Exception:  # noqa: BLE001  已崩溃的 Word 不值得覆盖真实读取错误
+            close_word()
 
 
 def extract(path: Path) -> str:
@@ -147,6 +289,8 @@ def extract(path: Path) -> str:
 def split_qa(text: str) -> list[tuple[str, str]]:
     """把文本切成 (题干块, 答案块) 列表（均未归一化）。
 
+    DEPRECATED：extract 已改用 chunker.chunk_v2；本函数只保留给 cluster 的旧
+    缓存/对照路径，完成迁移后应删除。新代码不要再用它切题。
     题干块仍需再过 `_clean_question` 才知是否真是题；答案块用于"同题不同答"的对抗判定
     （聚类删重只看题干会把"题目一样、答案不同"的两份资料判成重复）。
     """
@@ -219,7 +363,9 @@ def split_questions(text: str) -> list[str]:
 
 
 def normalize(q: str) -> str:
-    return CLEAN.sub("", unicodedata.normalize("NFKC", q).lower())
+    text = unicodedata.normalize("NFKC", q)
+    text = _map_symbols(text)
+    return CLEAN.sub("", text.lower())
 
 
 # ---------------- 近重复聚类 ----------------
@@ -273,32 +419,67 @@ class DSU:
             self.p[rb] = ra
 
 
-def cluster(items: list[tuple[str, int]], max_dist: int, min_jac: float = 0.75) -> DSU:
-    """items = [(归一化文本, simhash)]；16 bit 分带 LSH 取候选，再算汉明 + Jaccard 双重确认。
+def _prefix_len(size: int, min_jac: float) -> int:
+    """Jaccard 前缀过滤长度：len - ceil(t*len) + 1。
 
-    只用汉明不管用：短问句（十来字）的 SimHash 抖动大，同义改写常差 20+ 位，
-    而完全不同的题也可能撞进 12 位内。加一道 2-gram Jaccard 才稳。
+    全局按 2-gram 词频从稀到常排序后，Jaccard >= t 的两个集合必有一对相同 gram
+    同时落在各自前缀里（prefix filtering 的标准结论）。
     """
-    dsu = DSU(len(items))
-    gsets = [grams(t) for t, _ in items]
-    buckets = defaultdict(list)
-    for idx, (_, h) in enumerate(items):
-        for band in range(4):
-            buckets[(band, (h >> (band * 16)) & 0xFFFF)].append(idx)
-    for cands in buckets.values():
+    return max(1, size - math.ceil(min_jac * size) + 1)
+
+
+def cluster(items: list[tuple[str, int]], max_dist: int = 24, min_jac: float = 0.75) -> DSU:
+    """按 2-gram 倒排索引 + 前缀过滤聚类；Jaccard 阈值是精确的，不再依赖 SimHash 分带。
+
+    `max_dist` 为兼容旧调用保留但不再参与判定：SimHash 只是近似召回，20bit 差异的
+    同义改写会被 16bit LSH 漏掉，而 `--dist` 也不是有效的 Jaccard 阈值。这里先对
+    归一化后的唯一文本建倒排，再用前缀过滤生成候选，最后按完整 Jaccard 精确复核。
+    """
+    unique: dict[str, list[int]] = {}
+    for idx, (text, _h) in enumerate(items):
+        unique.setdefault(text, []).append(idx)
+
+    texts = list(unique)
+    gsets = [grams(t) for t in texts]
+    freq: dict[str, int] = {}
+    for s in gsets:
+        for g in s:
+            freq[g] = freq.get(g, 0) + 1
+
+    # 全局统一排序，保证两个集合的前缀使用同一顺序；稀 token 优先，降低候选量。
+    order = sorted(freq, key=lambda g: (freq[g], g))
+    rank = {g: i for i, g in enumerate(order)}
+    postings: dict[str, list[int]] = defaultdict(list)
+    for idx, s in enumerate(gsets):
+        if not s:
+            continue
+        k = _prefix_len(len(s), min_jac)
+        for g in sorted(s, key=lambda x: rank[x])[:k]:
+            postings[g].append(idx)
+
+    udsu = DSU(len(texts))
+    for cands in postings.values():
         if len(cands) < 2:
             continue
         for i in range(len(cands)):
             for j in range(i + 1, len(cands)):
                 a, b = cands[i], cands[j]
-                if dsu.find(a) == dsu.find(b):
-                    continue
-                if hamming(items[a][1], items[b][1]) > max_dist:
+                if udsu.find(a) == udsu.find(b):
                     continue
                 if jaccard(gsets[a], gsets[b]) < min_jac:
                     continue
-                dsu.union(a, b)
-    return dsu
+                udsu.union(a, b)
+
+    # 唯一文本的簇扩展到原实例：同一文本的多次出现必然同簇，不参与 N×M 比对。
+    full = DSU(len(items))
+    groups: dict[int, list[int]] = defaultdict(list)
+    for u_idx, idxs in enumerate(unique.values()):
+        groups[udsu.find(u_idx)].extend(idxs)
+    for idxs in groups.values():
+        rep = idxs[0]
+        for idx in idxs[1:]:
+            full.union(rep, idx)
+    return full
 
 
 # ---------------- 主流程 ----------------
@@ -327,8 +508,8 @@ def main(argv=None) -> int:
     ap.add_argument("--csv", default="", help="输出 CSV 路径")
     ap.add_argument("--md", default="", help="输出 Markdown 报告路径")
     ap.add_argument("--top", type=int, default=200, help="CSV 输出前 N 个簇")
-    ap.add_argument("--dist", type=int, default=24, help="SimHash 候选阈值（短问句抖动大，只当候选用）")
-    ap.add_argument("--jac", type=float, default=0.7, help="2-gram Jaccard 复核阈值")
+    ap.add_argument("--dist", type=int, default=24, help="已废弃：聚类改为 2-gram 倒排，仅保留参数兼容")
+    ap.add_argument("--jac", type=float, default=0.7, help="2-gram Jaccard 阈值（精确判定）")
     args = ap.parse_args(argv)
 
     roots = [Path(d) if Path(d).is_absolute() else config.CORPUS_ROOT / d for d in args.dirs]
@@ -339,6 +520,13 @@ def main(argv=None) -> int:
 
     occ: list[tuple[str, int, str, set, int]] = []   # (原文代表, simhash, 归一化, 文档集合, 次数)
     stats = Counter()
+    col_by_rel: dict[str, str] = {}
+    rules = None
+    try:
+        from mianjing_kb.classify import Rules
+        rules = Rules()
+    except Exception:  # noqa: BLE001 —— 独立统计不应因分类配置缺失而失败
+        rules = None
     for p in iter_docs(roots):
         try:
             text = extract(p)
@@ -353,9 +541,13 @@ def main(argv=None) -> int:
         stats["docs"] += 1
         stats["questions"] += len(qs)
         rel = str(p.relative_to(config.CORPUS_ROOT)) if config.CORPUS_ROOT in p.parents else str(p)
+        try:
+            col_by_rel[rel] = rules.collection(rel.replace("\\", "/")) if rules else ""
+        except Exception:  # noqa: BLE001
+            col_by_rel[rel] = ""
         for q in qs:
             nq = normalize(q)
-            if len(nq) < 6:
+            if len(nq) < MIN_NORM:
                 stats["too_short"] += 1
                 continue
             occ.append((q, simhash(nq), nq, {rel}, 1))
@@ -393,9 +585,11 @@ def main(argv=None) -> int:
                 best = occ[i][0]
         for d in docs:
             kind_docs[kind_of(Path(d))].add(d)
+        collections = {col_by_rel.get(d, "") or f"doc:{d}" for d in docs}
         agg.append({
             "question": best[:200],
             "doc_freq": len(docs),
+            "n_collections": len(collections),
             "occurrences": total,
             "面试文档": len(kind_docs["面试"]),
             "笔试文档": len(kind_docs["笔试"]),
@@ -403,7 +597,8 @@ def main(argv=None) -> int:
             "sample": sorted(docs)[0],
         })
 
-    agg.sort(key=lambda x: (-x["doc_freq"], -x["occurrences"], -len(x["question"])))
+    agg.sort(key=lambda x: (-x["n_collections"], -x["doc_freq"], -x["occurrences"],
+                            -len(x["question"])))
     top = agg[: args.top]
 
     if args.csv:
@@ -411,15 +606,17 @@ def main(argv=None) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         with out.open("w", encoding="utf-8-sig", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["rank", "doc_freq", "occurrences", "面试文档", "笔试文档", "variants", "question", "sample"])
+            w.writerow(["rank", "n_collections", "doc_freq", "occurrences", "面试文档", "笔试文档",
+                        "variants", "question", "sample"])
             for rank, row in enumerate(top, 1):
-                w.writerow([rank, row["doc_freq"], row["occurrences"], row["面试文档"], row["笔试文档"],
+                w.writerow([rank, row["n_collections"], row["doc_freq"], row["occurrences"],
+                            row["面试文档"], row["笔试文档"],
                             row["variants"], row["question"], row["sample"]])
         print(f"[csv] {len(top)} 行 → {out}")
 
     print(f"[stat] 文档 {stats['docs']}，抽不出文本 {stats['no_text']}，异常 {stats['error']}，"
-          f"题目块 {stats['questions']}，簇 {len(agg)}，≥2 文档的簇 "
-          f"{sum(1 for r in agg if r['doc_freq'] >= 2)}")
+          f"题目块 {stats['questions']}，簇 {len(agg)}，≥2 来源集的簇 "
+          f"{sum(1 for r in agg if r['n_collections'] >= 2)}")
 
     if args.md:
         md = Path(args.md)
@@ -430,16 +627,16 @@ def main(argv=None) -> int:
             f"- 统计范围：{', '.join(str(r) for r in roots)}",
             f"- 文档 {stats['docs']}（抽不出文本 {stats['no_text']}，异常 {stats['error']}），"
             f"切出题目块 {stats['questions']}",
-            f"- 聚成 {len(agg)} 个题簇，其中 ≥2 份文档重复的 "
-            f"{sum(1 for r in agg if r['doc_freq'] >= 2)} 个",
+            f"- 聚成 {len(agg)} 个题簇，其中 ≥2 个来源集（collection）重复的 "
+            f"{sum(1 for r in agg if r['n_collections'] >= 2)} 个",
             "",
-            "| # | 出现文档 | 出现次数 | 面试 | 笔试 | 题目（最长变体，截断） |",
-            "|---|---|---|---|---|---|",
+            "| # | 来源集 | 出现文档 | 出现次数 | 面试 | 笔试 | 题目（最长变体，截断） |",
+            "|---|---|---|---|---|---|---|",
         ]
         for rank, row in enumerate(top[:60], 1):
             q = row["question"].replace("|", "/")[:60]
-            lines.append(f"| {rank} | {row['doc_freq']} | {row['occurrences']} | "
-                         f"{row['面试文档']} | {row['笔试文档']} | {q} |")
+            lines.append(f"| {rank} | {row['n_collections']} | {row['doc_freq']} | "
+                         f"{row['occurrences']} | {row['面试文档']} | {row['笔试文档']} | {q} |")
         md.write_text("\n".join(lines) + "\n", encoding="utf-8")
         print(f"[md] {md}")
 

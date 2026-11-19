@@ -40,7 +40,7 @@ from mianjing_kb.chunker import chunk_v2  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 MIN_CHARS = config.TEXT_MIN_CHARS
-MIN_NORM = 6
+MIN_NORM = 4
 
 
 _HEAD_LINE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+(.+?)(\r?\n)?$")

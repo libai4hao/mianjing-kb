@@ -57,7 +57,7 @@ GATE_MIN_VISIBLE = 800     # 单篇有效字符下限（低于此判 non_content
 # ---------- 打标事实 ----------
 # label_facts 以 q_norm_hash 为键；归一逻辑（NFKC/清洗规则）变更时递增此版本，
 # 配 q_norm_sample 可批量重算 hash 迁移标签，而不是整批失效。
-NORMALIZER_VERSION = "nfkc-clean-v1"
+NORMALIZER_VERSION = "nfkc-clean-v2"
 
 # ---------- 分类 ----------
 UNCLASSIFIED = "未分类"
