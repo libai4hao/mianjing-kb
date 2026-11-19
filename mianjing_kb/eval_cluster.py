@@ -240,6 +240,11 @@ def _merged_intervals(spans):
 
 
 # ---------------- 报告 ----------------
+def _has_placeholder(path: Path) -> bool:
+    """配置未注入时 BUILD_DIR 会保留 `<CORPUS_ROOT>` 占位段，Windows 下 mkdir 会报 WinError 123。"""
+    return any("<" in part or ">" in part for part in Path(path).parts)
+
+
 def write_report(path: Path, meta: dict, base: dict, by_kind: dict, sweep_rows: list[dict],
                  dbs: dict | None, mds: dict | None) -> None:
     lines = ["# 题簇评测报告（pair-level）", "",
@@ -318,6 +323,13 @@ def main(argv=None) -> int:
     ap.add_argument("--min-f1", type=float, default=0.0, help="低于此值 exit 1")
     args = ap.parse_args(argv)
 
+    if not args.out_md and _has_placeholder(config.BUILD_DIR):
+        print(json.dumps({
+            "error": "输出目录未配置：config.BUILD_DIR 仍是占位值；"
+                     "请传 --out-md，或设置 KB_CORPUS_ROOT / KB_BUILD_DIR",
+        }, ensure_ascii=False), file=sys.stderr)
+        return 2
+
     pairs_path = Path(args.pairs)
     if not pairs_path.exists():
         print(json.dumps({"error": f"评测集不存在：{pairs_path}"}, ensure_ascii=False))
@@ -363,4 +375,6 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    from mianjing_kb.kb.stdio import configure_utf8_stdio
+    configure_utf8_stdio()
     raise SystemExit(main())

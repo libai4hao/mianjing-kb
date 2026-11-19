@@ -71,8 +71,8 @@ def run(work: Path, *, quiet: bool = False) -> dict:
         "KB_BUILD_DIR": str(build),
         "KB_DB": str(db_path),
         # Windows runner 控制台默认 cp1252；子进程 print 中文 JSON 会直接 UnicodeEncodeError。
+        # 只改 stdio 编码，不启用 UTF-8 mode（避免连带改变 open()/文件系统默认编码）。
         "PYTHONIOENCODING": "utf-8",
-        "PYTHONUTF8": "1",
     })
 
     result: dict = {"work": str(work), "corpus": str(corpus), "db": str(db_path), "steps": {}}
@@ -145,4 +145,6 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    from mianjing_kb.kb.stdio import configure_utf8_stdio
+    configure_utf8_stdio()
     raise SystemExit(main())

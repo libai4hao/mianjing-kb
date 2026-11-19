@@ -2,6 +2,8 @@
 """题簇成对评测：加载、判据、P/R/F1、分组、阈值扫描、语料指标与 CLI。"""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from mianjing_kb import eval_cluster as ec
@@ -131,3 +133,12 @@ def test_cli_writes_report_and_exit_codes(tmp_path):
 
 def test_cli_missing_pairs_returns_2(tmp_path):
     assert ec.main(["--pairs", str(tmp_path / "nope.yaml"), "--skip-corpus"]) == 2
+
+
+def test_cli_refuses_placeholder_output_dir(tmp_path, monkeypatch):
+    """未配置 BUILD_DIR 且没传 --out-md：应报错退出，而不是 mkdir 占位路径。"""
+    p = _pairs(tmp_path, [
+        {"id": "N1", "kind": "normalize", "same": True, "a": "什么是Spring", "b": "什么是 Spring？"},
+    ])
+    monkeypatch.setattr(ec.config, "BUILD_DIR", Path("<CORPUS_ROOT>") / "21-面经数据库" / "build")
+    assert ec.main(["--pairs", str(p), "--skip-corpus"]) == 2

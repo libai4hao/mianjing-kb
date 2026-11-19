@@ -66,6 +66,9 @@ def _bootstrap() -> None:
 
 
 def main(argv=None) -> int:
+    _bootstrap()
+    from mianjing_kb.kb.stdio import configure_utf8_stdio
+    configure_utf8_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help", "help"):
         print("kb <command> [args...]\n\n命令：\n  " + "\n  ".join(sorted(COMMANDS)))
@@ -78,7 +81,6 @@ def main(argv=None) -> int:
     if not mod_name:
         print(f"[kb] 未知命令：{cmd}（kb list 看全部）", file=sys.stderr)
         return 2
-    _bootstrap()
     mod = importlib.import_module(f"mianjing_kb.{mod_name}")
     entry = getattr(mod, "main", None)
     if entry is None:      # chunker 之类没有 main 的模块

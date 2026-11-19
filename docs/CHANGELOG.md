@@ -8,6 +8,12 @@
 
 ## 2026-11-19
 
+- **CI 与 CLI 编码收口**：GitHub Actions 的 checkout/setup-python 升到 Node 24 版本
+  （`actions/checkout@v5` / `actions/setup-python@v6`）；Windows job 强制 `PYTHONUTF8=1` /
+  `PYTHONIOENCODING=utf-8`。新增 `kb/stdio.py`，所有 CLI 入口在打印前把非 UTF-8 的
+  stdout/stderr 重配为 UTF-8，修复重定向输出时中文 JSON 触发 `UnicodeEncodeError`；
+  `demo` 子进程仅设 `PYTHONIOENCODING`，不再开启 UTF-8 mode。`eval_cluster` 在未配置
+  `BUILD_DIR` 且未传 `--out-md` 时明确 exit 2，不再对占位路径 `mkdir` 抛 WinError。
 - **T31 `kb status`**（`fde9542`）：只读汇总源状态、产物/待抽题、题与标签覆盖、检索库向量/标签行、
   门禁报告指纹是否过期、99 区结果、写锁与最近批次；`kb status --json` 可脚本消费。门禁报告
   与当前 kb/面经库大小+mtime 不一致时标 `STALE`，不重跑门禁。

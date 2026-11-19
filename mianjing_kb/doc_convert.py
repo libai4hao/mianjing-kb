@@ -374,5 +374,7 @@ def _apply(files, args) -> int:
 
 
 if __name__ == "__main__":
+    from mianjing_kb.kb.stdio import configure_utf8_stdio
+    configure_utf8_stdio()
     raise SystemExit(main())
 
