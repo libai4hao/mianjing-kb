@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """extract：把语料切成题块落 questions 表（P1-1，chunker v2 产出）。
 
-- 文档池 = source_documents 里 status='classified' 的件 + 20-题库MD 的 md 镜像（与 cluster 同池）
+**单身份（P0-1，2026-11-19）**：题池只认一个文本源——有 md 产物的源文档用 md 正文、
+身份仍是源 `doc_hash`；无产物的源才直接抽源文件；孤儿 md 保留自身 `md-mirror:` 身份。
+映射由 `kb/mdmap.py` 统一裁决（hash8 精确 > 唯一 stem > 歧义裁决 > 孤儿），
+报告落 `build/md_identity_report.json`。不再把"源文件 + md 镜像"同时收进题池。
+
 - md/txt 直接读文件；pdf/docx/doc 走 question_freq.extract；<80 字符的空文档记 0 题
 - 每题算 q_norm / q_norm_hash / simhash，落 meta/schema/004_questions.sql 的 questions 表
 - 频次口径：精确同文直接可用视图 question_freq；近重复簇留给 P1-4 report（simhash）
@@ -9,6 +13,7 @@
 用法：
     python -m mianjing_kb.extract --limit 20          # 试跑 20 件
     python -m mianjing_kb.extract --stats             # 只看 questions 表分布
+    python -m mianjing_kb.extract --plan              # 只看"会抽哪些身份"（不读正文、不写库）
     python -m mianjing_kb.extract                     # 全量（幂等：同 doc 覆盖重写）
 """
 from __future__ import annotations
@@ -24,7 +29,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, status  # noqa: E402
+from mianjing_kb.kb import config, db, mdmap, status  # noqa: E402
 from mianjing_kb.question_freq import close_word, extract, normalize, simhash  # noqa: E402
 from mianjing_kb.chunker import chunk_v2  # noqa: E402
 
@@ -54,32 +59,29 @@ def _excluded_rels() -> tuple[set[str], set[str]]:
     return src, mds
 
 
-def _md_mirror_paths() -> tuple[list[Path], int]:
-    """返回 (参与抽题的 md, 被跳过的旧同名 md 数)。
+def doc_pool(conn) -> tuple[list[tuple[str, Path]], "mdmap.Mapping"]:
+    """(doc_hash, path) 题池 —— **一文档一身份**。
 
-    reconvert/backfill 生成的 `x_<hash8>.md` 与旧 `x.md` 会在 rglob 里同时出现；
-    同一目录同一 base 已有带哈希版本时跳过旧文件，避免同一原文抽两遍、题频虚高。
+    1. 有 md 产物：用 md 正文，身份 = 源 doc_hash（P0-1 单身份）；
+    2. 无产物：抽源文件，身份 = 源 doc_hash；
+    3. 孤儿 md（找不到源）：保留 `md-mirror:` 身份单独成池。
+    exclusions.json 命中的件不进题池（P2-⑤：保留检索、不抽题）；产物被排除时整篇不抽，
+    不再回退到源文件（否则排除形同虚设）。
     """
-    import re
-    paths = sorted(config.QUESTION_MD_DIR.rglob("*.md")) if config.QUESTION_MD_DIR.exists() else []
-    pat = re.compile(r"(?:__|_)[0-9a-f]{8}$")
-    hashed = {(p.parent, pat.sub("", p.stem)) for p in paths if pat.search(p.stem)}
-    kept, skipped = [], 0
-    for p in paths:
-        if not pat.search(p.stem) and (p.parent, p.stem) in hashed:
-            skipped += 1
-            continue
-        kept.append(p)
-    return kept, skipped
-
-
-def doc_pool(conn) -> list[tuple[str, Path]]:
-    """(doc_hash, path)：classified 件 + 20-题库MD md 镜像（无行孤儿按路径自算 hash 前缀）。
-    exclusions.json 命中的件不进题池（P2-⑤：保留检索、不抽题）。"""
-    pool: dict[str, Path] = {}
     ex_src, ex_md = _excluded_rels()
+    mapping = mdmap.build(conn, Path(config.QUESTION_MD_DIR))
+    pool: dict[str, Path] = {}
+
+    for doc_hash, (rel, p) in mapping.by_doc.items():
+        if rel in ex_md:
+            continue
+        pool[doc_hash] = p
+
     for r in conn.execute(
             f"SELECT doc_hash, src_path FROM source_documents WHERE status='{status.CLASSIFIED}'").fetchall():
+        doc_hash = r["doc_hash"]
+        if doc_hash in pool:             # 已有产物，源文件不再重复抽
+            continue
         p = Path(r["src_path"])
         if not p.exists():
             continue
@@ -89,18 +91,22 @@ def doc_pool(conn) -> list[tuple[str, Path]]:
             rel = p.name
         if rel in ex_src:
             continue
-        pool[r["doc_hash"]] = p
-    if config.QUESTION_MD_DIR.exists():
-        paths, _skipped = _md_mirror_paths()
-        for p in paths:
-            # 镜像 md 无 DB 行：doc_hash 按路径稳定（内容 hash 会在 md 被改写时产生孤儿行——
-            # OCR 合并/懒加载每改一次 md，旧 hash 的题行就残留累积，2026-11-17 修复）
-            rel = p.relative_to(config.QUESTION_MD_DIR).as_posix()
-            if rel in ex_md:
-                continue
-            h = hashlib.sha256(("md-mirror:" + rel).encode("utf-8")).hexdigest()[:16]
-            pool.setdefault(h, p)
-    return sorted(pool.items())
+        pool[doc_hash] = p
+
+    for mh, (rel, p) in mapping.orphans.items():
+        if rel in ex_md:
+            continue
+        pool.setdefault(mh, p)
+    return sorted(pool.items()), mapping
+
+
+def write_identity_report(mapping) -> Path:
+    """`build/md_identity_report.json`：映射率、歧义、多产物、孤儿——单身份的可审计留痕。"""
+    build = Path(config.BUILD_DIR)
+    build.mkdir(parents=True, exist_ok=True)
+    out = build / "md_identity_report.json"
+    out.write_text(json.dumps(mapping.report, ensure_ascii=False, indent=1), encoding="utf-8")
+    return out
 
 
 def purge_orphans(conn, pool_keys: set[str]) -> int:
@@ -181,9 +187,11 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--stats", action="store_true", help="只看 questions 表分布")
+    ap.add_argument("--plan", action="store_true",
+                    help="只看身份映射与题池规模（不读正文、不写库）")
     args = ap.parse_args(argv)
 
-    conn = db.connect(args.db, create=not args.dry_run)
+    conn = db.connect(args.db, create=not (args.dry_run or args.plan))
     if args.stats:
         n = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
         out = {"questions": n,
@@ -196,7 +204,20 @@ def main(argv=None) -> int:
         conn.close()
         return 0
 
-    pool = doc_pool(conn)
+    pool, mapping = doc_pool(conn)
+    report_path = write_identity_report(mapping)
+    if args.plan:
+        print(json.dumps({
+            "pool_docs": len(pool),
+            "md_mapped_sources": len(mapping.by_doc),
+            "source_only": len(pool) - len(mapping.by_doc) - len(mapping.orphans),
+            "orphan_md": len(mapping.orphans),
+            "mapping": {k: v for k, v in mapping.report.items()
+                        if k not in ("mapping", "conflicts", "duplicates", "orphans_list")},
+            "report": str(report_path),
+        }, ensure_ascii=False, indent=1))
+        conn.close()
+        return 0
     if args.limit:
         pool = pool[:args.limit]
     started = time.perf_counter()
@@ -239,6 +260,11 @@ def main(argv=None) -> int:
         "label_reattached": n_reattached if not args.dry_run else 0,
         "label_facts_lost": n_lost,
         "dry_run": args.dry_run, "elapsed_sec": round(elapsed, 1),
+        "identity": {"md_mapped_sources": len(mapping.by_doc),
+                     "orphan_md": len(mapping.orphans),
+                     "ambiguous": mapping.report.get("ambiguous", 0),
+                     "multi_md_docs": mapping.report.get("docs_multi_md", 0),
+                     "report": str(report_path)},
         "qtype": qtype, "conf": conf,
     }, ensure_ascii=False, indent=1))
     conn.close()

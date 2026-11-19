@@ -41,7 +41,7 @@ ROLLBACK_KEEP = 3              # 只留最近 3 份，避免把盘塞满
 LOCK_NAME = "refresh.lock"
 KB_LOCK_WAIT_SEC = 10          # 等别的写库工具让路的上限；超时就放弃，不硬抢
 LOG_NAME = "refresh_log.jsonl"
-REQUIRED_GATES = ("G1", "G2", "G3", "G4", "G5")
+REQUIRED_GATES = ("G1", "G2", "G3", "G4", "G5", "G8")
 KNOWN_STATES = ("PASS", "WARN", "FAIL", "SKIP")
 
 
@@ -264,9 +264,9 @@ def check_reembed(shadow: Path, emb: dict) -> str | None:
 
 
 def run_gates(shadow: Path) -> list[dict]:
-    """G1-G5 对影子库实跑（G6 打标、G7 文档一致性不在此跑）。"""
+    """G1-G5 + G8 对影子库实跑（G6 打标、G7 文档一致性不在此跑）。"""
     from mianjing_kb.verify_ledger import (g1_coverage, g2_chain, g3_topic, g4_index, g5_disk,
-                               load_skip_log)
+                               g8_single_identity, load_skip_log)
     kb_conn = sqlite3.connect(_ro_uri(Path(config.DB_PATH)), uri=True)
     kb_conn.row_factory = sqlite3.Row
     out_conn = sqlite3.connect(_ro_uri(shadow), uri=True)
@@ -285,6 +285,7 @@ def run_gates(shadow: Path) -> list[dict]:
         g3_topic(out_conn),
         g4_index(out_conn),
         g5_disk(kb_conn, Path(config.CORPUS_ROOT), Path(config.BUILD_DIR)),
+        g8_single_identity(out_conn),
     ]
     kb_conn.close()
     out_conn.close()

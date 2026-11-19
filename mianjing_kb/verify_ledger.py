@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""verify_ledger：G1-G7 核账门禁（docs/15 §2 方案，2026-11-17 审核后落地）。
+"""verify_ledger：G1-G8 核账门禁（docs/15 §2 方案，2026-11-17 审核后落地）。
 
 与 docs/15 原方案的两处实现偏差（docs/17 §5 有记录）：
   1. 输出为 build/verify_report.json + verify_report.md——gate_report.json 已由
@@ -18,6 +18,7 @@
   G5 台账-磁盘一致（硬）：classified → src_path 在盘；superseded → 在 99 区或已删且留痕
      （note / build/retire_log.csv）；99 区每件都能在台账找到
   G6 打标质量（软→硬）：labels_staging 未建（线上打标未启用），报 SKIP
+  G8 单身份（硬）：有源回链的 md 产物不得再有 `md-mirror:` 身份的题行（P0-1 双份检测）
   G7 文档一致性（软，--docs）：README 声称的测试数 vs pytest --collect-only 实际；
      「尚未实现」清单不得列 mianjing_kb/ 已存在的脚本；docs 编号范围 vs docs/ 实际
 
@@ -597,6 +598,37 @@ def g6b_golden(kb_conn) -> dict:
                   "weak_topics": weak, "matrix": matrix}, sql)
 
 
+def g8_single_identity(out_conn) -> dict:
+    """G8 单身份（硬，P0-1）：有源回链的 md 产物，其 `md-mirror:` 身份下不得再有题行。
+
+    判定：`doc_contents` 里 `doc_hash IS NOT NULL` 的每一行（= 能回链到源文档的产物），
+    若 `questions` 仍有 `doc_hash = mirror_hash` 的行 → 说明这份原文又被镜像身份抽了一遍，
+    题数/见证数会双份放大（`docs/27` P0-1）。
+    正常态：一个源只有一种身份，mirror_rows 全为 0；孤儿 md（doc_hash IS NULL）不在判据内。
+    """
+    sql = ("SELECT dc.md_rel, dc.doc_hash, dc.mirror_hash, "
+           " (SELECT COUNT(*) FROM questions q WHERE q.doc_hash=dc.mirror_hash) AS mirror_rows, "
+           " (SELECT COUNT(*) FROM questions q WHERE q.doc_hash=dc.doc_hash) AS source_rows "
+           "FROM doc_contents dc WHERE dc.doc_hash IS NOT NULL")
+    import sqlite3
+    try:
+        rows = out_conn.execute(sql).fetchall()
+    except sqlite3.OperationalError:
+        return _gate("G8", "单身份（双份检测）", "硬", "SKIP", [],
+                     {"note": "doc_contents/questions 表缺失（检索库未建）"}, sql)
+    bad = [r for r in rows if r["mirror_rows"]]
+    mirror_total = sum(r["mirror_rows"] for r in bad)
+    fails = [{"kind": "dual_identity", "md": r["md_rel"], "doc_hash": r["doc_hash"],
+              "mirror_hash": r["mirror_hash"], "mirror_rows": r["mirror_rows"],
+              "source_rows": r["source_rows"]} for r in bad[:20]]
+    if len(bad) > 20:
+        fails.append({"kind": "dual_identity_more", "bad_total": len(bad)})
+    return _gate("G8", "单身份（双份检测）", "硬", "FAIL" if bad else "PASS", fails,
+                 {"mapped_products": len(rows), "bad_products": len(bad),
+                  "mirror_rows_total": mirror_total,
+                  "note": "有源回链的产物若还挂 mirror 题行 = 同一原文抽了两遍"}, sql)
+
+
 # ---------------- G7 文档一致性（软） ----------------
 def g7_docs(repo_root: Path, actual_tests: int) -> dict:
     """README 测试数 vs 实际；尚未实现清单不得列已存在脚本；docs 编号范围 vs 实际。"""
@@ -741,6 +773,7 @@ def main(argv=None) -> int:
         g3_topic(out_conn),
         g4_index(out_conn),
         g5_disk(kb_conn, Path(config.CORPUS_ROOT), build_dir),
+        g8_single_identity(out_conn),
         g6_label(kb_conn),
         g6b_golden(kb_conn),
     ]

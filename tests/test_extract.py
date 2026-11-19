@@ -143,11 +143,12 @@ def test_exclusion_pool(tmp_env, tmp_path, monkeypatch):
         {"rel": "被排除.md", "md_rel": "镜像.md", "reason": "test"}]}, ensure_ascii=False),
         encoding="utf-8")
     monkeypatch.setattr(config, "EXCLUSIONS_FILE", ex)
-    pool = extract.doc_pool(conn)
+    pool, _mapping = extract.doc_pool(conn)
     paths = {v.name for _, v in pool}
     assert "被排除.md" not in paths and "镜像.md" not in paths
     monkeypatch.setattr(config, "EXCLUSIONS_FILE", tmp_path / "不存在.json")
-    paths2 = {v.name for _, v in extract.doc_pool(conn)}
+    pool2, _m2 = extract.doc_pool(conn)
+    paths2 = {v.name for _, v in pool2}
     assert "被排除.md" in paths2 and "镜像.md" in paths2
 
 
@@ -159,9 +160,11 @@ def test_pool_hash_stable_across_content_change(tmp_env, monkeypatch):
     p.mkdir()
     f = p / "题库.md"
     f.write_text("# 第一版\n\n" + "1. 什么是索引？" * 5, encoding="utf-8")
-    key1 = next(k for k, v in extract.doc_pool(conn) if v == f)
+    pool1, _m1 = extract.doc_pool(conn)
+    key1 = next(k for k, v in pool1 if v == f)
     f.write_text("# 第二版（内容变了，懒加载改写）\n\n" + "1. 什么是索引？" * 5, encoding="utf-8")
-    key2 = next(k for k, v in extract.doc_pool(conn) if v == f)
+    pool2, _m2 = extract.doc_pool(conn)
+    key2 = next(k for k, v in pool2 if v == f)
     assert key1 == key2
     # 孤儿清理：写入一个不在池里的 doc_hash 的题行，purge 应删掉
     conn.execute(
@@ -183,5 +186,7 @@ def test_pool_skips_old_md_when_hash_sibling_exists(tmp_env):
     new = md_dir / "题库" / "x_abcd1234.md"
     old.write_text(MD_A, encoding="utf-8")
     new.write_text(MD_A, encoding="utf-8")
-    names = {v.name for _, v in extract.doc_pool(conn)}
+    pool, _m = extract.doc_pool(conn)
+    names = {v.name for _, v in pool}
     assert new.name in names and old.name not in names
+

@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sqlite3
 import sys
@@ -26,7 +25,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "mianjing_kb"))
-from mianjing_kb.kb import config, db, status  # noqa: E402
+from mianjing_kb.kb import config, db, mdmap, status  # noqa: E402
 
 OUT_DB = Path(config.BUILD_DIR) / "面经库.db"
 MD_ROOT = Path(config.CORPUS_ROOT) / "20-题库MD"
@@ -86,30 +85,16 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
         "  source_trust, dir_path, source_count, sources_json, note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         [tuple(r) for r in docs])
     # ---- doc_contents：20-题库MD 正文（检索原文）——先于 questions 落库 ----
-    # G3/K12 修复（docs/15，2026-11-17）：镜像题（doc_hash=sha256("md-mirror:"+rel)[:16]，
-    # 无台账行）的 topic 此前落空串（生产 5,192 条），按继承链补齐：
-    #   源文档 topic →（无源行时）md_rel 倒数第二段目录（转换约定 parent=topic，docs/14 K11 目录推断）
-    by_stem = {}
-    for r in docs:
-        # 归一：台账文件名可能带尾随空格 / 大小写差异（md 侧 safe_name 已 strip）
-        by_stem.setdefault(Path(r["file_name"]).stem.strip().lower(), r["doc_hash"])
+    # 身份口径统一走 `kb/mdmap.py`（P0-1）：md 是"产物"，doc_hash 取源身份；
+    # 同一源多份产物时只把主产物当 identity，但**所有** md 都要进 doc_contents（G2 要求磁盘 md 全覆盖）。
+    mapping = mdmap.build(src, md_root)
     mirror_topic: dict[str, str] = {}
     mirror_cat: dict[str, str] = {}
     n_docs_content = 0
-    md_paths = sorted(md_root.rglob("*.md")) if md_root.exists() else []
-    import re
-    _pat = re.compile(r"(?:__|_)[0-9a-f]{8}$")
-    _hashed = {(p.parent, _pat.sub("", p.stem)) for p in md_paths if _pat.search(p.stem)}
-    for p in md_paths:
-        # 旧 x.md 与 reconvert 生成的 x_<hash8>.md 同目录共存时只收新版，避免同一原文双份
-        if not _pat.search(p.stem) and (p.parent, p.stem) in _hashed:
-            continue
-        rel = p.relative_to(md_root).as_posix()
-        stem = Path(rel).stem
-        base = _base_stem(stem).strip().lower()
+    for prod in mapping.products:
+        rel, p = prod["rel"], prod["path"]
         text = p.read_text(encoding="utf-8", errors="replace")
-        # P3-③：镜像 hash 回链——md 镜像题的 doc_hash = sha256("md-mirror:"+rel)[:16]
-        mirror_hash = hashlib.sha256(("md-mirror:" + rel).encode("utf-8")).hexdigest()[:16]
+        mirror_hash = mdmap.mirror_hash(rel)
         parts = rel.split("/")
         # F10（2026-11-19）：<category>/<topic>/<stem>.md 三段才有 topic 段；两段路径
         # parts[-2]==parts[0]==category，原 len>=2 会把 category 误当 topic。
@@ -117,14 +102,15 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
         c_guess = parts[0] if len(parts) >= 2 else ""
         mirror_topic[mirror_hash] = t_guess
         mirror_cat[mirror_hash] = c_guess
-        doc_hash = by_stem.get(base) or by_stem.get(stem)
+        doc_hash = prod["doc_hash"]
         if doc_hash:                                     # 源件 topic 空时同样走目录推断兜底
             mirror_topic.setdefault(doc_hash, t_guess)
             mirror_cat.setdefault(doc_hash, c_guess)
         out.execute("INSERT INTO doc_contents(md_rel, doc_hash, mirror_hash, content) VALUES(?,?,?,?)",
                     (rel, doc_hash, mirror_hash, text[:200000]))
         out.execute("INSERT INTO docs_fts(rowid, file_name, content) VALUES(?,?,?)",
-                    (out.execute("SELECT last_insert_rowid()").fetchone()[0], stem, text[:100000]))
+                    (out.execute("SELECT last_insert_rowid()").fetchone()[0],
+                     Path(rel).stem, text[:100000]))
         n_docs_content += 1
     # ---- questions ----
     # 题级 topic 优先（006 列，batch_label merge 的事实源落点）→ 文档级 → 镜像继承兜底

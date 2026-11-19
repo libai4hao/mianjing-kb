@@ -100,9 +100,9 @@ def mini_env(tmp_path, monkeypatch):
                 (MD_A, _h(b"jia"), vl.mirror_hash_of(MD_A), "# 甲"))
     out.execute("INSERT INTO doc_contents (md_rel, doc_hash, mirror_hash, content) VALUES (?,?,?,?)",
                 (MD_B, _h(b"yi"), vl.mirror_hash_of(MD_B), "# 乙"))
-    # 甲走镜像 hash（extract 落库口径），乙走源 hash 直连
+    # P0-1 单身份：md 产物题行也用源 doc_hash（不再挂 md-mirror 身份）
     out.execute("INSERT INTO questions (qid, doc_hash, seq, q_text, q_norm_hash, topic) "
-                "VALUES (1, ?, 1, '什么是 JVM？', 'x', 'JVM')", (vl.mirror_hash_of(MD_A),))
+                "VALUES (1, ?, 1, '什么是 JVM？', 'x', 'JVM')", (_h(b"jia"),))
     out.execute("INSERT INTO questions (qid, doc_hash, seq, q_text, q_norm_hash, topic) "
                 "VALUES (2, ?, 1, '什么是 MySQL？', 'y', 'MySQL')", (_h(b"yi"),))
     out.execute("INSERT INTO questions_fts (rowid, q_text, a_text) VALUES (1, '什么是 JVM？', '')")
@@ -191,6 +191,36 @@ def test_g4_vec_mismatch_fails(mini_env):
     g = vl.g4_index(out)
     assert g["state"] == "FAIL"
     assert any(x["kind"] == "vec_mismatch" for x in g["fails"])
+
+
+# ---------------- G8 单身份（P0-1） ----------------
+def test_g8_pass_when_single_identity(mini_env):
+    g = vl.g8_single_identity(mini_env["out"])
+    assert g["id"] == "G8" and g["state"] == "PASS"
+    assert g["detail"]["bad_products"] == 0
+
+
+def test_g8_fails_when_mirror_rows_survive(mini_env):
+    """有源回链的产物若还挂着 md-mirror 题行 → 同一原文抽了两遍，必须 FAIL。"""
+    out = mini_env["out"]
+    out.execute("INSERT INTO questions (qid, doc_hash, seq, q_text, q_norm_hash, topic) "
+                "VALUES (3, ?, 1, '什么是 JVM？', 'x', 'JVM')", (vl.mirror_hash_of(MD_A),))
+    out.commit()
+    g = vl.g8_single_identity(out)
+    assert g["state"] == "FAIL"
+    assert g["fails"][0]["md"] == MD_A and g["fails"][0]["mirror_rows"] == 1
+
+
+def test_g8_ignores_orphan_md(mini_env):
+    """没有源文档的孤儿 md（doc_hash IS NULL）保留自身身份，不属于双份。"""
+    out = mini_env["out"]
+    rel = "题库/综合/孤儿.md"
+    out.execute("INSERT INTO doc_contents (md_rel, doc_hash, mirror_hash, content) VALUES (?,?,?,?)",
+                (rel, None, vl.mirror_hash_of(rel), "# 孤儿"))
+    out.execute("INSERT INTO questions (qid, doc_hash, seq, q_text, q_norm_hash, topic) "
+                "VALUES (4, ?, 1, '孤儿题', 'z', '综合')", (vl.mirror_hash_of(rel),))
+    out.commit()
+    assert vl.g8_single_identity(out)["state"] == "PASS"
 
 
 # ---------------- G5 ----------------
