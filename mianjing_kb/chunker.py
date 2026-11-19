@@ -65,6 +65,7 @@ render(md_text)：两步输出（第一步纯文本清单 ≤12 字/行，第二
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -122,6 +123,26 @@ RE_EXAM_SECTION = re.compile(
 # D3 强提问语义行首：答案列表状态不能吞掉这类编号子题。
 RE_STRONG_QSTART = re.compile(
     r'^(?:什么是|什么|如何|怎么|为什么|为何|哪些|哪几|谈谈|说说|简述|简答|请解释|请描述|请说明|是否|能否)')
+
+# ---- review2 移植（2026-11-20）：问句语义/章节/答案小节词汇 ----
+# 提问动词只在行首生效，避免答案句中的问词把列表项误判成题。
+RE_QUESTION_INTENT = re.compile(
+    r'^(?:什么是|什么叫|如何|为什么|为何|区别|比较|谈谈|介绍|说说|有没有|怎么办|怎么样|怎样|怎么|'
+    r'简述|解释|说明|描述|列举|列出|有哪些|哪一种|哪一个|哪些|是否|能否|请|给定|假设|已知|'
+    r'实现一个|设计一个|设计|计算|求出|写一个|写出|手写|分析|阐述|证明|判断|你知道|你了解)')
+# 句尾疑问形态：`linux常用吗` / `用户研究分为哪两个方面` 没有行首问词也是题。
+RE_QUESTION_SUFFIX = re.compile(
+    r'(?:是什么|是什么原因|有什么区别|有什么作用|有哪些内容|会怎么样|怎么回事|是否正确|如何处理|如何解决|吗|呢|'
+    r'哪[一两二三四五六七八九十0-9]+(?:个(?:方面|问题|维度)?|种|方面|类|项)|哪几个|几种|几个|多少|'
+    r'是(?:（|\()\s*\d+\s*个空\s*(?:）|\)))[?？。]?$')
+# 答案小节引导词：这类编号标题留在父答案，不另起题。
+RE_LIST_INTRO = re.compile(
+    r'包括|分为|有如下|如下|分别|以下|特点|优点|缺点|组成|类型|阶段|步骤|'
+    r'ACID|CAP|主要有|具体如下|可以分为|适用场合|适用范围|特征')
+RE_SECTION_TITLE = re.compile(
+    r'^(?:第\s*[一二三四五六七八九十0-9]+\s*[章节篇]|'
+    r'[一二三四五六七八九十]+[、.．]\s*)?.{1,48}'
+    r'(?:面试题|基础篇|进阶篇|提高篇|专题|章节|目录|总结|概述|知识点汇总|题库)\s*[:：。．]?$')
 
 
 def _strip_all_numbering(text: str) -> str:
@@ -301,10 +322,30 @@ def strip_bold(s: str) -> str:
     return m.group(1).strip() if m else s
 
 
+def _has_question_intent(text: str) -> bool:
+    """题干/任务语义：问词在行首或句尾疑问形态；英文类型名续段（class）？）不算。"""
+    s = unicodedata.normalize("NFKC", strip_bold(str(text or "").strip()))
+    s = re.sub(r"^[^A-Za-z0-9\u3400-\u9fff]+", "", s).strip()
+    if not s:
+        return False
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:[)）])?[?？]", s):
+        return False
+    if RE_QEND.search(s) or RE_QUESTION_INTENT.search(s) or RE_QUESTION_SUFFIX.search(s):
+        return True
+    # 选择题空括号占位 + 题干引导词：没有问号也是题。
+    if (re.search(r"[（(]\s*[）)]$", s)
+            and re.match(r"^(?:以下|下列|哪(?:一|个|些|项)|哪个|哪些|何者|若|假设|已知|给定)", s)):
+        return True
+    return bool(re.match(r"^你(?:知道|了解|熟悉).{0,16}(?:哪些|什么|多少|如何|怎么)", s))
+
+
 def _is_qline(s: str) -> bool:
     """v2 问句行判定：以？结尾，或问词出现在行首 8 字内（防"做详细介绍"类行中误命中）。
     整行粗体先剥壳（`**说说 Spring AOP**` → `说说 Spring AOP`）。"""
     s = strip_bold(s.strip())
+    # 换行后的 `class）？` / `String) ?` 是上一题英文类型名的尾段，不是独立英文题。
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:[)）])?[?？]", unicodedata.normalize("NFKC", s)):
+        return False
     if RE_QEND.search(s):
         return True
     # 选择题常以空括号收尾：`瀑布模型开发流程（）`
@@ -316,9 +357,10 @@ def _is_qline(s: str) -> bool:
         return False
     if re.match(r'^(?:的|了|是|在|和|与|及|并|而|但|就|也|都|其|此|该)\s', s):
         return False
-    if re.match(r'^[A-Za-z][A-Za-z0-9_\s]*是', s):
+    # `Redis 是内存数据库` 是陈述句；`ReadWriteLock 是什么` 仍是问句。
+    if re.match(r'^[A-Za-z][A-Za-z0-9_\s]*是(?!什么|否)', s):
         return False
-    return RE_INTERROGATIVE.search(s[:8]) is not None
+    return RE_INTERROGATIVE.search(s[:8]) is not None or RE_QUESTION_SUFFIX.search(s) is not None
 
 
 def _trim_question_text(s: str) -> str:
@@ -379,9 +421,12 @@ def _is_question_heading(s: str) -> bool:
         return False
     if re.match(r'^(?:的|了|是|在|和|与|及|并|而|但|就|也|都|其|此|该)\s', s):
         return False
-    if re.match(r'^[A-Za-z][A-Za-z0-9_\s]*是', s):
+    if re.match(r'^[A-Za-z][A-Za-z0-9_\s]*是(?!什么|否)', s):
         return False
     if _is_qline(s) or RE_KPOINT.match(s):
+        return True
+    # 编号标题里问号在句中（`接口是否可继承（extends）接口？抽象类是否可实现`）也是题。
+    if re.search(r'[?？]', s) and len(s) <= 160:
         return True
     if len(s) > 60:
         return False
@@ -691,7 +736,17 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         answer_label = bool(re.match(
             r'^(?:知识点|总结|汇总|详解|概述|简介|本地方法栈|程序计数器|方法区|虚拟机栈|堆|栈)$',
             qtext.strip()))
+        # review2：明确问句/任务语义优先于题号连续性（跨章节跳号不再吞题）。
+        explicit_question = _has_question_intent(qtext)
+        # 显式 Markdown 编号题头（`## 11. Oracle JDK 和 OpenJDK 的对比`）即使没有
+        # 问词也是题；答案小节/章节标题除外。
+        explicit_question_heading = (
+            md_num_heading and len(qtext.strip()) >= 6
+            and not answer_label
+            and not RE_SECTION_TITLE.match(qtext.strip())
+            and not RE_LIST_INTRO.search(qtext.strip()))
         if (md_num_heading and not _is_question_heading(qtext)
+                and not explicit_question_heading
                 and not (sequential_heading and not answer_label)):
             list_active = False
             list_pending = False
@@ -714,7 +769,8 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                        and not qtext.rstrip().endswith(("：", ":"))
                        and _qnorm_len(qtext) >= 6)
         if (list_active and RE_LIST_ITEM.match(s) and not md_num_heading
-                and not qtext.rstrip().endswith(("?", "？")) and not strong_subq):
+                and not qtext.rstrip().endswith(("?", "？")) and not strong_subq
+                and not explicit_question):
             list_active = True
             list_pending = False
             prev_blank = False
@@ -734,6 +790,8 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             new_q = True          # 问题N：作者显式标记的题号，不依赖空行/递进口径
         elif md_num_heading:
             new_q = True          # 显式 Markdown 编号标题：无条件新题边界
+        elif explicit_question:
+            new_q = True          # review2：明确问句/任务语义优先于题号连续性
         elif last_qid is None:
             new_q = True
         elif prev_blank:
