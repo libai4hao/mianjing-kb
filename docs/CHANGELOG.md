@@ -30,6 +30,13 @@
   `v2-2026-11-20-r3`。残留：单条 OCR 粘连行（问 4 粘在问 3 答案尾，无 `## 4、` 题头）仍产
   少量碎片，属源件缺陷非系统性回归；`cut1000-regression-results.csv` 的 qid 属 zip 期 DB
   代际，与现生产库 qid 不互通，样本级状态无法逐条复核（已按文档级口径独立验证）。
+- **切题样本生成工具留挡 + 新切题器口径样本流程**：新增 `scripts/make_cut1000_samples.py`
+  （只读抽样：按 `q_norm_hash` 去重的切题样本 + 对应原始 Markdown 全文 + 逐题原文片段/前后文；
+  CSV 公式注入防护、sha256 清单、manifest/metrics、无第三方依赖自检脚本口径）。打标审核样本
+  沿用既有 `mianjing_kb/label_samples.py`（pilot100 schema）。样本数据属内部资料，落
+  `D:\pilot\5000\build\samples`，不入仓库。新切题器口径样本流程：复制基线库到隔离副本 →
+  `extract --allow-empty-overwrite` 全量重抽（清空新切题器判 0 题的旧碎片文档，保证纯新口径）→
+  以重抽副本为源抽样；全程不写生产库与基线库。
 
 ## 2026-11-19
 
