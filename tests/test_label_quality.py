@@ -29,6 +29,12 @@ def test_quality_pass():
     assert q["state"] == "PASS" and q["ok"] is True
 
 
+def test_quality_empty_does_not_block_orphan_cleanup():
+    """全是孤儿行时 JOIN 为空，门禁应 SKIP 放行，交给 merge 的 --drop-orphans。"""
+    q = label_quality.assess(_conn([]))
+    assert q["state"] == "SKIP" and q["ok"] is True
+
+
 def test_quality_blocks_code_fragment():
     rows = [(1, "#include <stdio.h>", "C++", "agree")] + [
         (i, f"什么是第{i}个知识点?", "后端", "agree") for i in range(2, 11)]

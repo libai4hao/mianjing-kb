@@ -19,8 +19,10 @@ def assess(conn, *, other_hard: float = 0.25, other_warn: float = 0.15,
         "FROM labels_staging s JOIN questions q ON q.qid=s.qid").fetchall()
     n = len(rows)
     if n == 0:
-        return {"ok": False, "state": "SKIP", "fails": [],
-                "detail": {"staged": 0, "note": "labels_staging 为空"}}
+        # 全是孤儿行时（questions JOIN 为空）不在质量门禁里判，交给 merge 的孤儿逻辑，
+        # 否则 --drop-orphans 会被门禁提前挡住。
+        return {"ok": True, "state": "SKIP", "fails": [],
+                "detail": {"staged": 0, "note": "无可校验的 staging 行（可能全是孤儿）"}}
     fragments = [r["qid"] for r in rows if is_code_fragment(r["q_text"] or "")]
     pending = [r["qid"] for r in rows if r["review_state"] == "pending"]
     other = [r["qid"] for r in rows if (r["topic"] or "") == "其他"]
