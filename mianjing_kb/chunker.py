@@ -289,6 +289,9 @@ def _is_qline(s: str) -> bool:
     s = strip_bold(s.strip())
     if RE_QEND.search(s):
         return True
+    # 选择题常以空括号收尾：`瀑布模型开发流程（）`
+    if re.search(r'[（(]\s*[)）]\s*$', s):
+        return True
     # 结论/过渡/说明句里的问词不是题干。
     if re.match(r'^(?:这就是|所以|因此|也就是说|综上|总之|那么|可见|于是|'
                 r'至于|先解释|首先|其次|再次|然后|最后|先说|再说|接着|需要)', s):
