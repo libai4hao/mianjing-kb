@@ -3,9 +3,8 @@
 import zipfile
 
 from mianjing_kb.question_freq import (
-    grams, hamming, jaccard, normalize, simhash, split_questions, text_of_docx,
+    cluster, grams, hamming, jaccard, normalize, simhash, split_questions, text_of_docx,
 )
-
 
 def test_split_keeps_question_drops_answer():
     text = (
@@ -110,3 +109,15 @@ def test_docx_keeps_auto_numbering_and_soft_break(tmp_path):
     text = text_of_docx(p)
     assert "1. 什么是 JVM\n第二行" in text
     assert "2. 说一下 GC" in text
+
+
+def test_cluster_uses_jaccard_not_simhash_hamming():
+    """同题不同措辞即使 SimHash 差 63 位也必须进候选；旧 16bit LSH 会直接漏掉。"""
+    items = [
+        ("什么是jvm内存区域划分", 0),
+        ("什么是jvm内存区域划分啊", (1 << 63) - 1),
+    ]
+    assert jaccard(grams(normalize(items[0][0])), grams(normalize(items[1][0]))) >= 0.9
+    assert hamming(items[0][1], items[1][1]) > 24
+    dsu = cluster(items, max_dist=24, min_jac=0.9)
+    assert dsu.find(0) == dsu.find(1)
