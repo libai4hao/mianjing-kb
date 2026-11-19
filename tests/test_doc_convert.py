@@ -126,7 +126,8 @@ def _run_convert(tmp_path, monkeypatch, word, how):
     _docx(root / "02-JVM" / "foo.docx")
     db_path = tmp_path / "kb.sqlite"
     _mini_db(db_path, src, note="needs_convert")
-    monkeypatch.setattr(dc, "convert", lambda _w, _s, _f: (how == "converted", how))
+    monkeypatch.setattr(dc, "_convert_one_isolated",
+                        lambda _s, _f=False, _t=dc.DOC_TIMEOUT: (how == "converted", how))
     for name, mod in _fake_win32(word).items():
         monkeypatch.setitem(sys.modules, name, mod)
     rc_code = dc.main(["--root", str(root), "--db", str(db_path), "--apply"])

@@ -24,6 +24,8 @@ import argparse
 import json
 import os
 import sys
+import tempfile
+import uuid
 import zipfile
 from datetime import datetime
 from fnmatch import fnmatch
@@ -31,10 +33,12 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, events, hashing, status, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, events, hashing, proc, status, wlock  # noqa: E402
 
 WD_FORMAT_XML_DOCUMENT = 16   # 2010+ 的 wdFormatDocumentDefault；2007 只认 12，见 convert()
 WD_FORMAT_XML_DOCUMENT_2007 = 12
+DOC_TIMEOUT = 180             # 单文件硬超时（秒）：Word COM 无法被打断，只能杀进程（T16）
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def iter_doc(root: Path):
@@ -135,6 +139,131 @@ def convert(word, src: Path, force: bool = False) -> tuple[bool, str]:
                 pass
 
 
+def _cleanup_tmp(src: Path) -> None:
+    """子进程被杀时，它的临时 docx 会留在源目录；父进程负责收尸。"""
+    for p in src.parent.glob(f".{src.stem}.tmp-*.docx"):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _job_paths() -> tuple[Path, Path]:
+    """每次转换独占的结果文件 / Word PID 文件（不进源目录，避免污染语料）。"""
+    base = Path(tempfile.gettempdir()) / f"mianjing-docjob-{uuid.uuid4().hex}"
+    return base.with_suffix(".json"), base.with_suffix(".wordpid")
+
+
+def _worker_argv(src: Path, force: bool, result: Path, pidfile: Path) -> list[str]:
+    """子进程命令行。单测会替换这个函数来注入"永不返回"的假 worker。"""
+    argv = [sys.executable, "-m", "mianjing_kb.doc_convert",
+            "--one", str(src), "--result", str(result), "--pidfile", str(pidfile)]
+    if force:
+        argv.append("--force")
+    return argv
+
+
+def _word_pid(word) -> int:
+    """Word 的 PID（用于子进程被杀后兜底清理孤儿 WINWORD）。拿不到就返回 0。"""
+    try:
+        import win32process
+        hwnd = int(word.Hwnd or 0)
+        if hwnd:
+            return int(win32process.GetWindowThreadProcessId(hwnd)[1])
+    except Exception:                                    # noqa: BLE001
+        return 0
+    return 0
+
+
+def _one(src: Path, force: bool, result: Path, pidfile: Path) -> int:
+    """子进程入口：只转一个文件，把结论写进 result JSON。
+
+    父进程靠"结果文件是否完整"区分失败与超时：超时被杀时文件不会存在。
+    这里**不碰数据库、不拿写锁**——父进程已经持有 kb 锁，子进程再拿会自我死锁。
+    """
+    payload = {"how": "failed:unknown"}
+    word = None
+    try:
+        import win32com.client as win32
+    except ImportError:
+        payload = {"how": "failed:no_pywin32"}
+    else:
+        try:
+            word = win32.DispatchEx("Word.Application")   # 独立私有实例
+            word.Visible = False
+            word.DisplayAlerts = 0
+            word.AutomationSecurity = 3                   # 禁宏
+            pid = _word_pid(word)
+            if pid:
+                try:
+                    pidfile.write_text(str(pid), encoding="utf-8")
+                except OSError:
+                    pass
+            ok, how = convert(word, src, force)
+            payload = {"how": how, "ok": bool(ok)}
+        except Exception as ex:                           # noqa: BLE001
+            payload = {"how": f"failed:{type(ex).__name__}: {str(ex)[:120]}"}
+        finally:
+            if word is not None:
+                try:
+                    word.Quit()
+                except Exception:                        # noqa: BLE001
+                    pass
+    try:
+        result.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        return 3
+    try:
+        pidfile.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return 0
+
+
+def _convert_one_isolated(src: Path, force: bool = False, timeout: int = DOC_TIMEOUT
+                          ) -> tuple[bool, str]:
+    """一个文件一个子进程：超时杀树 → 记 timeout → 继续下一件（T16）。"""
+    result, pidfile = _job_paths()
+    argv = _worker_argv(src, force, result, pidfile)
+    code, _out, err, timed_out = proc.run_with_timeout(argv, timeout, cwd=REPO_ROOT)
+    try:
+        if timed_out:
+            # 先杀子进程树（Word 是它的子进程），再按子进程写下的 PID 兜底
+            try:
+                pid = int(pidfile.read_text(encoding="utf-8").strip() or 0)
+            except (OSError, ValueError):
+                pid = 0
+            proc.kill_pid(pid)
+            _cleanup_tmp(src)
+            return False, "timeout"
+        if code != 0 or not result.exists():
+            _cleanup_tmp(src)
+            why = proc.tail(err)
+            return False, f"failed:worker_exit_{code}" + (f": {why}" if why else "")
+        payload = json.loads(result.read_text(encoding="utf-8"))
+        how = str(payload.get("how") or "failed:no_result")
+        if how not in ("converted", "exists"):
+            _cleanup_tmp(src)
+        return how in ("converted", "exists"), how
+    finally:
+        for p in (result, pidfile):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _convert_batch(files, force: bool = False, timeout: int = DOC_TIMEOUT) -> list[dict]:
+    """逐件隔离转换。任何一件超时/失败都不影响后续文件。"""
+    results = []
+    for src in files:
+        _ok, how = _convert_one_isolated(src, force, timeout)
+        results.append({"doc": str(src), "how": how})
+        if how not in ("converted", "exists"):
+            print(f"[warn] {src.name}: {how}", file=sys.stderr)
+    return results
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=".doc → .docx 并标记 superseded")
     ap.add_argument("--root", default=str(config.CORPUS_ROOT))
@@ -142,7 +271,17 @@ def main(argv=None) -> int:
     ap.add_argument("--apply", action="store_true", help="真转（否则只预览）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--force", action="store_true", help="已有 .docx 不合格（非 zip）时强制重转")
+    ap.add_argument("--timeout", type=int, default=DOC_TIMEOUT,
+                    help=f"单文件硬超时秒数（默认 {DOC_TIMEOUT}）；超时杀进程并记 timeout")
+    # 内部子进程参数（由 _worker_argv 调用，不对外承诺）
+    ap.add_argument("--one", metavar="DOC", help=argparse.SUPPRESS)
+    ap.add_argument("--result", metavar="JSON", help=argparse.SUPPRESS)
+    ap.add_argument("--pidfile", metavar="FILE", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+
+    if args.one:                     # 子进程：单文件，不碰库、不拿锁
+        return _one(Path(args.one), args.force,
+                    Path(args.result), Path(args.pidfile or (args.result or "") + ".pid"))
 
     files = sorted(iter_doc(Path(args.root)))
     if args.limit:
@@ -176,38 +315,18 @@ def main(argv=None) -> int:
 
 
 def _apply(files, args) -> int:
-    import win32com.client as win32
-
-    word = win32.DispatchEx("Word.Application")   # 独立私有实例，不劫持用户正在用的 Word
-    word.Visible = False
-    word.DisplayAlerts = 0
-    word.AutomationSecurity = 3                   # 3 = msoAutomationSecurityForceDisable，禁宏
-
-    stats = {"converted": 0, "exists": 0, "failed": 0}
-    results = []
-    try:
-        for src in files:
-            try:
-                how = convert(word, src, args.force)[1]
-            except Exception as ex:                      # noqa: BLE001
-                how = f"{type(ex).__name__}: {str(ex)[:120]}"
-                try:
-                    word.Quit()                          # 旧实例先收掉，避免 WINWORD 泄漏
-                except Exception:                        # noqa: BLE001
-                    pass
-                word = win32.DispatchEx("Word.Application")
-                word.Visible = False
-                word.DisplayAlerts = 0
-                word.AutomationSecurity = 3
-            stats[how if how in stats else "failed"] += 1
-            results.append({"doc": str(src), "how": how})
-            if how not in ("converted", "exists"):
-                print(f"[warn] {src.name}: {how}", file=sys.stderr)
-    finally:
-        try:
-            word.Quit()
-        except Exception:                                # noqa: BLE001
-            pass
+    # T16：一个文件一个子进程。Word COM 不可被打断，超时只能杀进程树；
+    # 任何一件卡死都不再阻塞整批（失败件记 how=timeout 并继续）。
+    results = _convert_batch(files, args.force, args.timeout)
+    stats = {"converted": 0, "exists": 0, "failed": 0, "timeout": 0}
+    for r in results:
+        how = r["how"]
+        if how in ("converted", "exists"):
+            stats[how] += 1
+        elif how == "timeout":
+            stats["timeout"] += 1
+        else:
+            stats["failed"] += 1
 
     superseded = 0
     now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
