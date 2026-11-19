@@ -346,6 +346,18 @@ def _tokens(text: str) -> int:
 def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
     """返回 (qid|None, q_text, style)；style ∈ {题号, 标题}。"""
     line = strip_bold(line)          # 整行粗体题号（**1. 什么是 X**）先剥壳再匹配
+    # 网页/PDF 标题常把“参考：URL”和下一节层级编号拼在一行：
+    # `参考：https://... 11.3.0 如何查看...` / `...图11.1.7 什么是 mongod？`
+    # 先去掉 URL，再取行内层级编号之后的题干，避免引用和编号进入题干。
+    line = re.sub(r'https?://\S+', ' ', line)
+    # 行内出现“11.1.7 什么是…”这类层级编号：取最后一个编号后的题干。
+    # 典型来源是网页/PDF 把“参考：URL”或上一节标题和下一节题目拼在同一行。
+    for hm in reversed(list(re.finditer(r'\d{1,3}(?:\.\d{1,3}){2,3}', line))):
+        if hm.start() <= 0:
+            continue
+        body = line[hm.end():].strip()
+        if len(body) >= 4 and not _is_codeish(body):
+            return None, body, "标题"
     nested = _match_nested_number(line)
     if nested and (re.search(r'[?？]', nested[1]) or len(nested[1]) >= 4):
         return nested[0], nested[1], "题号"
@@ -876,6 +888,17 @@ def chunk_v2(md_text: str) -> Dict:
         add(b["q_text"], a_rest, [b["source_span"][0], end], b["style"])
         for e in extra:
             add(e["q"], e["a"], e["span"], e["style"])
+
+    # 同一文档内完全重复的题干（网页标题与正文题号重复）保留答案更长的一条，
+    # 避免“参考：URL + 题号”修复后出现空答案副本。
+    dedup: Dict[str, dict] = {}
+    for it in items:
+        key = re.sub(r'\s+', '', it["q"]).lower()
+        if key not in dedup:
+            dedup[key] = it
+        elif len(it["a"]) > len(dedup[key]["a"]):
+            dedup[key] = it
+    items = list(dedup.values())
 
     # probe：孤立代码区始终暴露；items 为空时再给 1–3 个候选区块
     probe = []

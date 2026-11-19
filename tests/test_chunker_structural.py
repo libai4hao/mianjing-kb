@@ -285,3 +285,22 @@ Map 和 Collection。
     assert "说说常见的集合有哪些吧。" in qs
     assert "两者的主要区别如下：" not in qs
 
+
+def test_embedded_hierarchy_number_and_reference_link_are_split():
+    """`...图11.1.7 什么是 mongod？` / `参考：URL 11.3.0 如何...` 只保留题干。"""
+    md = """11.1.6 MongoDB 和关系型数据库术语对比图11.1.7 什么是“mongod”？
+
+mongod 是处理 MongoDB 系统的主要进程。
+
+参考：https://docs.mongodb.com/manual/sharding/ 11.3.0 如何查看使用 MongoDB 的连接？
+
+使用 db.adminCommand("connPoolStats")。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [it["q"] for it in v2["items"]]
+    assert "什么是“mongod”？" in qs
+    assert "如何查看使用 MongoDB 的连接？" in qs
+    assert not any("docs.mongodb.com" in q for q in qs)
+    assert not any("11.1.7" in q for q in qs)
+
+
