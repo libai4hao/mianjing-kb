@@ -42,7 +42,6 @@ B 是另一个概念。
 """
 
 
-@pytest.mark.xfail(strict=True, reason="D1 未修复：题干换行被硬切（阶段1 转绿）")
 def test_d1_numbered_stem_wrapped_line_is_rejoined():
     items = chunker.chunk_v2(D1_NUM_WRAP)["items"]
     qs = [it["q"] for it in items]
@@ -53,7 +52,6 @@ def test_d1_numbered_stem_wrapped_line_is_rejoined():
     assert "区别是什么" not in items[0]["a"]
 
 
-@pytest.mark.xfail(strict=True, reason="D1 未修复：问句题干换行被硬切（阶段1 转绿）")
 def test_d1_question_stem_wrapped_line_is_rejoined():
     items = chunker.chunk_v2(D1_Q_WRAP)["items"]
     qs = [it["q"] for it in items]

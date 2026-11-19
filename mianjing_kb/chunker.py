@@ -309,6 +309,32 @@ def _trim_question_text(s: str) -> str:
     return m.group(1) if m else s.strip()
 
 
+# D1 题干续行回接（docs/37 line_wrap_split）：题干以连接词/介词悬空结尾，
+# 下一内容行是问句形态的短行 → 续回题干，不另成题、不并入答案。
+RE_STEM_DANGLING = re.compile(r'[的和与或及中对把被将在是为而但则之其该等地得所并跟向从到过着了，、:：]$')
+RE_ANSWER_LEAD = re.compile(r'^(?:答案|答[：:]|解[：:]|解析|参考|示例|代码|注意|说明|综上|总之)')
+
+
+def _is_stem_continuation(prev_q: str, line: str) -> bool:
+    """line 是否为悬空题干 prev_q 的换行续段（保守：只认问句形态短行）。"""
+    s = strip_bold((line or "").strip())
+    if not s or len(s) > 60 or not prev_q:
+        return False
+    if not RE_STEM_DANGLING.search(prev_q.rstrip()):
+        return False
+    if (RE_LIST_ITEM.match(s) or RE_DECIMAL.match(s) or RE_ANSWER_LEAD.match(s)
+            or _match_question(line) is not None
+            or _is_codeish(s) or _is_promo(s) or _looks_section_line(s)):
+        return False
+    return _is_qline(s) or _is_question_heading(s)
+
+
+def _join_stem(a: str, b: str) -> str:
+    if a and b and a[-1].isascii() and a[-1].isalnum() and b[0].isascii() and b[0].isalnum():
+        return a + " " + b
+    return a + b
+
+
 def _looks_questionish(s: str) -> bool:
     """推广过滤用：像题目/问句的行不按广告剔除（不要求空行等块级条件）。"""
     s = strip_bold(s.strip())
@@ -702,6 +728,52 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         prev_blank = False
         last_problem_mark = False
 
+    # ---- D1 题干续行回接：悬空题干 + 问句形态短续行 → 并入题干 ----
+    bound_lines = {bd["line"] for bd in bounds}
+    consumed: set[int] = set()
+
+    def _is_noise(j: int) -> bool:
+        s = lines[j].strip()
+        return (not s or kinds[j] in ("page", "toc", "ack")
+                or (kinds[j] == "text" and s in watermark) or j in consumed)
+
+    def _next_content(i: int) -> int:
+        j = i + 1
+        while j < n and _is_noise(j):
+            j += 1
+        return j
+
+    rejoined: List[dict] = []
+    bi = 0
+    while bi < len(bounds):
+        bd = bounds[bi]
+        parts = list(bd["parts"])
+        last_line = bd["line"]
+        while True:
+            j = _next_content(last_line)
+            if j >= n or kinds[j] != "text":
+                break
+            if j in bound_lines:
+                nb = bounds[bi + 1] if bi + 1 < len(bounds) else None
+                if (nb is not None and nb["line"] == j and nb["style"] in ("问句", "标题")
+                        and len(nb["parts"]) == 1
+                        and all(_is_noise(k) for k in range(last_line + 1, j))
+                        and _is_stem_continuation(parts[-1][1], lines[j])):
+                    parts[-1] = (parts[-1][0], _join_stem(parts[-1][1], nb["parts"][0][1]))
+                    consumed.add(j)
+                    last_line = j
+                    bi += 1
+                    continue
+                break
+            if not _is_stem_continuation(parts[-1][1], lines[j]):
+                break
+            parts[-1] = (parts[-1][0], _join_stem(parts[-1][1], strip_bold(lines[j].strip())))
+            consumed.add(j)
+            last_line = j
+        rejoined.append({"line": bd["line"], "parts": parts, "style": bd["style"]})
+        bi += 1
+    bounds = rejoined
+
     # ---- 组块 + leftovers ----
     blocks: List[dict] = []
     leftovers: List[dict] = []
@@ -738,6 +810,8 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         # 答案区：剔除页码/目录行/水印（→ leftovers，span 保留在块区间内）
         inc, exc_runs, inc_idx = [], [], []
         for j in range(i + 1, end_line):
+            if j in consumed:      # D1 续行已并入题干，不再进答案
+                continue
             k = kinds[j]
             why = None
             if k == "page":
@@ -900,7 +974,11 @@ def _split_answers(a_text: str, a_base: int, a_segs: list | None = None):
     head = out[0]
     new_items = []
     for (idxs, s, e), seg in zip(segs[1:], out[1:]):
-        first_line = strip_bold(seg.split("\n", 1)[0].strip())   # 题干剥粗体壳
+        seg_lines = [x.strip() for x in seg.splitlines() if x.strip()]
+        first_line = strip_bold(seg_lines[0])   # 题干剥粗体壳
+        # D1：答案区内拆出的题同样做换行续接（与主通道同口径）
+        if len(seg_lines) > 1 and _is_stem_continuation(first_line, seg_lines[1]):
+            first_line = _join_stem(first_line, strip_bold(seg_lines[1]))
         # 一行里“问句 + 紧跟的答案说明”只取问句部分作题干。
         qm = re.match(r'^(.{1,120}?[?？])\s*(.{4,})$', first_line)
         if qm:
