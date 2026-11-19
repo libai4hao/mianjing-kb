@@ -169,7 +169,6 @@ _RE_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 _RE_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _RE_WECHAT = re.compile(r"(微信|weixin|wx|qq)\s*[:：号]?\s*[A-Za-z0-9_-]{5,20}", re.I)
 _RE_IDCARD = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
-_RE_URL = re.compile(r"https?://[^\s，。；）)】]+")
 _RE_NAMED_PERSON = re.compile(
     r"(?i)(?:姓名|联系人|收件人|候选人|面试者|作者|负责人|户主)\s*[:：=]\s*"
     r"[\u4e00-\u9fff·]{2,20}"
@@ -228,8 +227,10 @@ def redact(text: str) -> tuple[str, bool]:
         if new_text != text:
             hit = True
             text = new_text
-    for rx in (_RE_IDCARD, _RE_PHONE, _RE_EMAIL, _RE_WECHAT, _RE_URL):
+    for rx in (_RE_IDCARD, _RE_PHONE, _RE_EMAIL, _RE_WECHAT):
         _sub(rx)
+    # 2026-11-20：URL 不再遮罩——技术题常带文档/仓库链接，删掉会丢关键上下文；
+    # 只遮个人身份信息（姓名/电话/邮箱/证件/地址）。
     return text, hit
 
 

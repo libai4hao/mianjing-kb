@@ -560,6 +560,30 @@ def test_merge_holds_disagree_rows(mini_db, monkeypatch, tmp_path):
     assert left == 1  # 分歧行保留在 staging
 
 
+def test_merge_blocks_pending_rows(mini_db, monkeypatch, tmp_path):
+    """pending 必须人工终审，不得被 merge 静默放行。"""
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    mini_db.execute("UPDATE labels_staging SET review_state='pending' WHERE qid=1")
+    mini_db.commit()
+    out = bl.merge(mini_db)
+    assert not out["ok"] and out["gate"] == "LABEL_QUALITY"
+    assert any("pending_review" in f for f in out["fails"])
+    assert mini_db.execute("SELECT topic FROM questions WHERE qid=1").fetchone()[0] == ""
+    assert mini_db.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0] == 3
+
+
+def test_merge_blocks_code_fragment_rows(mini_db, monkeypatch, tmp_path):
+    """代码碎片进了 staging → 整批拒绝 merge，避免污染 questions.topic。"""
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    mini_db.execute("UPDATE questions SET q_text='#include <stdio.h>' WHERE qid=1")
+    mini_db.commit()
+    out = bl.merge(mini_db)
+    assert not out["ok"] and out["gate"] == "LABEL_QUALITY"
+    assert any("code_fragment" in f for f in out["fails"])
+
+
 def test_review_resolve_keep_suggest_drop(mini_db):
     """R3 终审出口：keep=agree；suggest=应用建议+agree；drop=删行；未知 token 上报。"""
     _stage(mini_db, 1, "玄学")

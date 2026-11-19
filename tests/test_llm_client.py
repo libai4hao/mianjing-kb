@@ -146,8 +146,9 @@ def test_redact_all_kinds():
     assert hit
     assert "13812345678" not in t and "me@qq.com" not in t                 # privacy-scan: allow
     assert "wx_abc123" not in t and "11010119900307867X" not in t
-    assert "https://" not in t
-    assert t.count("[联系方式]") == 5
+    # 技术文档 URL 是题干上下文，不遮罩（2026-11-20 修订）
+    assert "https://blog.example.com/post" in t
+    assert t.count("[联系方式]") == 4
 
 
 def test_redact_clean_text_noop():
