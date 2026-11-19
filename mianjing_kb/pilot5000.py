@@ -39,8 +39,8 @@ DEFAULT_CONFIG = {
     "target_max": 5500,
     "llm": {
         "provider": "online",
-        "base": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "base": "https://api.qnaigc.com/v1",
+        "model": "deepseek-v4.1-flash-1017",
         "key": "",
         "concurrency": 2,
         "price": "1,4",
