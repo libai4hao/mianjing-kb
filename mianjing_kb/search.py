@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -46,8 +47,9 @@ _JOIN = (
     " LEFT JOIN documents d ON d.doc_hash=q.doc_hash "
     " LEFT JOIN doc_contents dc ON dc.mirror_hash=q.doc_hash "
 )
-_SELECT = ("SELECT q.qid, q.q_key, q.q_text, q.qtype, q.topic, q.difficulty, q.tags_json, "
-           "q.position, q.quality, COALESCE(d.file_name, dc.md_rel) AS source, q.a_text ")
+_SELECT = ("SELECT q.qid, q.q_key, q.doc_hash, q.q_text, q.qtype, q.topic, q.difficulty, "
+           "q.tags_json, q.position, q.quality, COALESCE(d.file_name, dc.md_rel) AS source, "
+           "dc.md_rel AS source_path, q.a_text ")
 VEC_OVERSAMPLE = 4          # 多选/标签只能在 KNN 后过滤，先过采样再截断
 VEC_MAX_CANDIDATES = 512    # 过采样上限，防止极端过滤把 k 放大到全表
 
@@ -208,16 +210,176 @@ def hybrid_search(con, query: str, limit: int = 10, topic: str | None = None,
 def rag_contexts(con, query: str, limit: int = 6, topic: str | None = None,
                  qtype: str | None = None, difficulty: int | None = None,
                  position: str | None = None, quality: str | None = None,
-                 tags=None, a_max: int = 800) -> dict:
-    """P3-③：RAG 管线结构化输出——直接可作为 LLM prompt 的 context 组装体。"""
+                 tags=None, a_max: int = 800,
+                 max_context_chars: int = 6000) -> dict:
+    """P3-③：RAG 管线结构化输出——直接可作为 LLM prompt 的 context 组装体。
+
+    D-35：先按 q_norm_hash/规范化题干做精确去重，再按 canonical_id 做同簇软去重；
+    代表条目聚合来源。D-36：按检索排序分配全局字符预算，不平均截断所有答案。
+    """
+    if max_context_chars < 0:
+        raise ValueError("max_context_chars 不能为负")
     diag: dict = {}
-    rows = hybrid_search(con, query, limit, topic, qtype, difficulty, position, quality, tags,
+    # 去重会减少条数，先多取一些候选，保持去重后的排序不变。
+    pool = max(limit, min(limit * 4, 24))
+    rows = hybrid_search(con, query, pool, topic, qtype, difficulty, position, quality, tags,
                         diagnostics=diag)
-    return {"query": query, "diagnostics": diag, "contexts": [
-        {"qid": r["qid"], "question": r["q_text"][:300], "answer": (r.get("a_text") or "")[:a_max],
-         "source": r.get("source"), "topic": r["topic"], "qtype": r["qtype"],
-         "difficulty": r.get("difficulty"), "tags": r.get("tags_json"),
-         "position": r.get("position"), "quality": r.get("quality")} for r in rows]}
+    rows = [dict(r) for r in rows]
+    qnorms = _qnorm_hashes(con, [r["qid"] for r in rows])
+    for r in rows:
+        r["_qnorm_hash"] = qnorms.get(r["qid"])
+    rows = _dedupe_exact(rows)
+    rows = _dedupe_clusters(con, rows)
+    contexts = [_context_of(r, a_max) for r in rows][:limit]
+    contexts, chars = _apply_context_budget(contexts, max_context_chars)
+    return {"query": query, "diagnostics": diag, "context_chars": chars,
+            "max_context_chars": max_context_chars, "contexts": contexts}
+
+
+def _qnorm_hashes(con, qids: list[int]) -> dict[int, str]:
+    if not qids:
+        return {}
+    try:
+        rows = con.execute(
+            "SELECT qid, q_norm_hash FROM questions WHERE qid IN (%s)"
+            % ",".join("?" for _ in qids), qids).fetchall()
+        return {int(r["qid"]): (r["q_norm_hash"] or "") for r in rows}
+    except Exception:  # noqa: BLE001 —— 旧测试库/旧库没有 q_norm_hash 列
+        return {}
+
+
+def _exact_key(row: dict) -> str:
+    topic = str(row.get("topic") or "")
+    h = (row.get("_qnorm_hash") or "").strip()
+    if h:
+        return f"h:{h}|{topic}"
+    text = re.sub(r"\s+", "", (row.get("q_text") or "")).lower()
+    return f"t:{text}|{topic}"
+
+
+def _source_values(row: dict) -> list[str]:
+    out = []
+    for s in (row.get("source"), row.get("source_path"), *(row.get("_sources") or [])):
+        if s and str(s) not in out:
+            out.append(str(s))
+    return out
+
+
+def _merge_sources(rep: dict, row: dict) -> None:
+    rep["_sources"] = _source_values(rep) + [s for s in _source_values(row)
+                                             if s not in _source_values(rep)]
+    rep["_duplicates"] = int(rep.get("_duplicates", 1)) + int(row.get("_duplicates", 1))
+
+
+def _dedupe_exact(rows: list[dict]) -> list[dict]:
+    seen: dict[str, dict] = {}
+    out: list[dict] = []
+    for row in rows:
+        key = _exact_key(row)
+        if key in seen:
+            _merge_sources(seen[key], row)
+            continue
+        row["_duplicates"] = 1
+        seen[key] = row
+        out.append(row)
+    return out
+
+
+def _canonical_ids(con, rows: list[dict]) -> dict[str, str]:
+    keys = [str(r.get("q_key") or "") for r in rows if r.get("q_key")]
+    if not keys:
+        return {}
+    try:
+        q = ("SELECT q_key, canonical_id FROM canonical_dependents "
+             "WHERE q_key IN (%s)" % ",".join("?" for _ in keys))
+        return {str(r["q_key"]): str(r["canonical_id"])
+                for r in con.execute(q, keys).fetchall()}
+    except Exception:  # noqa: BLE001 —— 旧库/测试库没有簇表
+        return {}
+
+
+def _answer_ratio(a: str, b: str) -> float:
+    import difflib
+    return difflib.SequenceMatcher(None, re.sub(r"\s+", "", a),
+                                   re.sub(r"\s+", "", b)).ratio()
+
+
+def _dedupe_clusters(con, rows: list[dict]) -> list[dict]:
+    canon = _canonical_ids(con, rows)
+    out: list[dict] = []
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        cid = canon.get(str(row.get("q_key") or ""))
+        if not cid:
+            out.append(row)
+            continue
+        group = groups.setdefault(cid, [])
+        # 不同主题不得因聚类被合并；主题不同直接保留。
+        if group and row.get("topic") != group[0].get("topic"):
+            out.append(row)
+            continue
+        if not group:
+            group.append(row)
+            out.append(row)
+        elif len(group) == 1 and _answer_ratio(
+                group[0].get("a_text") or "", row.get("a_text") or "") < 0.55:
+            group.append(row)          # 答案明显不同：最多保留两个有价值变体
+            out.append(row)
+        else:
+            _merge_sources(group[0], row)
+    return out
+
+
+def _context_of(row: dict, a_max: int) -> dict:
+    sources = _source_values(row)
+    return {
+        "qid": row["qid"], "q_key": row.get("q_key"),
+        "doc_hash": row.get("doc_hash"),
+        "question": (row.get("q_text") or "")[:300],
+        "answer": (row.get("a_text") or "")[:a_max],
+        "source": sources[0] if sources else None,
+        "source_path": sources[0] if sources else None,
+        "sources": sources,
+        "topic": row.get("topic"), "qtype": row.get("qtype"),
+        "difficulty": row.get("difficulty"), "tags": row.get("tags_json"),
+        "position": row.get("position"), "quality": row.get("quality"),
+        "duplicates": int(row.get("_duplicates", 1)),
+    }
+
+
+def _apply_context_budget(contexts: list[dict], budget: int) -> tuple[list[dict], int]:
+    """按排序分配全局预算：先保证短答案，再把剩余预算给靠前的长答案。"""
+    if not contexts:
+        return [], 0
+    if budget <= 0:
+        return [], 0
+    mins = []
+    for c in contexts:
+        q_len, a_len = len(c["question"]), len(c["answer"])
+        mins.append(q_len + min(a_len, 120))
+    selected: list[dict] = []
+    used = 0
+    for c, need in zip(contexts, mins):
+        if used + need > budget:
+            continue                      # 跳过放不下的；后面更短的仍有机会
+        selected.append(c)
+        used += need
+    if not selected:
+        return [], 0
+    # 先把所有入选条目压到最小保留长度，再把剩余预算按排序追加给靠前条目。
+    full = {id(c): c["answer"] for c in selected}
+    for c in selected:
+        c["answer"] = full[id(c)][:120]
+        c["chars"] = len(c["question"]) + len(c["answer"])
+    remaining = budget - sum(c["chars"] for c in selected)
+    for c in selected:
+        original = full[id(c)]
+        add = min(max(0, len(original) - 120), remaining)
+        if add:
+            c["answer"] = original[:120 + add]
+            c["chars"] = len(c["question"]) + len(c["answer"])
+            remaining -= add
+    return selected, sum(c["chars"] for c in selected)
 
 
 def main(argv=None) -> int:

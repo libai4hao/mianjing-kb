@@ -193,3 +193,110 @@ def test_vector_filter_pushed_into_knn(tmp_path, monkeypatch):
     assert {r["topic"] for r in rows} == {"A"}
     con.close()
 
+
+def _dedupe_db(path):
+    con = sqlite3.connect(str(path))
+    con.row_factory = sqlite3.Row
+    con.executescript("""
+CREATE TABLE documents(doc_hash TEXT PRIMARY KEY, file_name TEXT);
+CREATE TABLE doc_contents(doc_id INTEGER PRIMARY KEY, md_rel TEXT, doc_hash TEXT, mirror_hash TEXT, content TEXT);
+CREATE TABLE questions(qid INTEGER PRIMARY KEY, doc_hash TEXT, q_text TEXT, a_text TEXT,
+                       qtype TEXT, topic TEXT, category TEXT, difficulty INTEGER,
+                       tags_json TEXT, position TEXT, quality TEXT, q_key TEXT, q_norm_hash TEXT);
+CREATE TABLE question_tags(qid INTEGER, tag TEXT, tag_norm TEXT);
+CREATE VIRTUAL TABLE questions_fts USING fts5(q_text, a_text, tokenize='trigram');
+""")
+    return con
+
+
+def _insert_dedupe_row(con, qid, doc, text, answer, qkey, norm, topic="Java基础"):
+    con.execute("INSERT INTO documents VALUES(?,?)", (doc, f"{doc}.pdf"))
+    con.execute("INSERT INTO questions(qid, doc_hash, q_text, a_text, qtype, topic, difficulty, q_key, q_norm_hash) "
+                "VALUES (?,?,?,?,?,?,?,?,?)", (qid, doc, text, answer, "八股", topic, 3, qkey, norm))
+    con.execute("INSERT INTO questions_fts(rowid, q_text, a_text) VALUES (?,?,?)", (qid, text, answer))
+
+
+def test_rag_exact_dedupe_by_qnorm_hash(tmp_path):
+    con = _dedupe_db(tmp_path / "dedupe.db")
+    _insert_dedupe_row(con, 1, "d1", "HashMap 的工作原理是什么", "数组加链表。", "d1:q1", "norm1")
+    _insert_dedupe_row(con, 2, "d2", "HashMap 的工作原理是什么？", "数组加链表。", "d2:q2", "norm1")
+    con.commit()
+    out = rag_contexts(con, "HashMap", 5)
+    assert len(out["contexts"]) == 1
+    assert out["contexts"][0]["sources"] == ["d1.pdf", "d2.pdf"]
+    assert out["contexts"][0]["duplicates"] == 2
+    con.close()
+
+
+def test_rag_exact_dedupe_does_not_merge_different_topics(tmp_path):
+    con = _dedupe_db(tmp_path / "topic.db")
+    _insert_dedupe_row(con, 1, "d1", "Java 集合题", "答案", "d1:q1", "same", topic="Java基础")
+    _insert_dedupe_row(con, 2, "d2", "Java 集合题", "答案", "d2:q2", "same", topic="MySQL")
+    con.commit()
+    out = rag_contexts(con, "Java 集合", 5)
+    assert len(out["contexts"]) == 2
+    con.close()
+
+
+def test_rag_cluster_dedupe_keeps_one_representative(tmp_path):
+    con = _dedupe_db(tmp_path / "cluster.db")
+    con.executescript("CREATE TABLE canonical_dependents(q_key TEXT PRIMARY KEY, canonical_id TEXT);")
+    _insert_dedupe_row(con, 1, "d1", "Java 集合 List 和 Set 区别", "List 有序。", "d1:q1", "n1")
+    _insert_dedupe_row(con, 2, "d2", "Java 集合 List 与 Set 有什么不同", "List 有序。", "d2:q2", "n2")
+    con.executemany("INSERT INTO canonical_dependents VALUES(?,?)",
+                    [("d1:q1", "cluster-1"), ("d2:q2", "cluster-1")])
+    con.commit()
+    out = rag_contexts(con, "Java 集合", 5)
+    assert len(out["contexts"]) == 1
+    assert out["contexts"][0]["duplicates"] == 2
+    con.close()
+
+
+def test_rag_cluster_keeps_second_variant_when_answer_differs(tmp_path):
+    con = _dedupe_db(tmp_path / "variant.db")
+    con.executescript("CREATE TABLE canonical_dependents(q_key TEXT PRIMARY KEY, canonical_id TEXT);")
+    _insert_dedupe_row(con, 1, "d1", "Java 集合 List 和 Set 区别", "List 有序，Set 无序。", "d1:q1", "n1")
+    _insert_dedupe_row(con, 2, "d2", "Java 集合 List 与 Set 有什么不同", "底层实现完全不同，一个数组一个哈希。", "d2:q2", "n2")
+    con.executemany("INSERT INTO canonical_dependents VALUES(?,?)",
+                    [("d1:q1", "cluster-1"), ("d2:q2", "cluster-1")])
+    con.commit()
+    out = rag_contexts(con, "Java 集合", 5)
+    assert len(out["contexts"]) == 2          # 答案明显不同 → 最多保留两个变体
+    con.close()
+
+
+def test_rag_context_budget_keeps_rank_order(tmp_path):
+    con = _dedupe_db(tmp_path / "budget.db")
+    for i in range(1, 4):
+        _insert_dedupe_row(con, i, f"d{i}", f"Java 集合题{i}", "长答案" * 400, f"d{i}:q{i}", f"n{i}")
+    con.commit()
+    out = rag_contexts(con, "Java 集合", 3, max_context_chars=500)
+    ctx = out["contexts"]
+    assert out["context_chars"] <= 500
+    assert len(ctx) == 3
+    assert len(ctx[0]["answer"]) > len(ctx[1]["answer"])   # 预算优先给排序靠前的
+    assert ctx[0]["qid"] == 1
+    con.close()
+
+
+def test_rag_context_budget_drops_only_unaffordable(tmp_path):
+    con = _dedupe_db(tmp_path / "drop.db")
+    _insert_dedupe_row(con, 1, "d1", "Java 集合长题", "长答案" * 400, "d1:q1", "n1")
+    _insert_dedupe_row(con, 2, "d2", "Java 集合短题", "短答案", "d2:q2", "n2")
+    con.commit()
+    out = rag_contexts(con, "Java 集合", 2, max_context_chars=300)
+    by_id = {c["qid"]: c for c in out["contexts"]}
+    assert set(by_id) == {1, 2}            # 短答案不会被预算误丢
+    assert len(by_id[1]["answer"]) < 800
+    assert out["context_chars"] <= 300
+    con.close()
+
+
+def test_rag_context_rejects_negative_budget(tmp_path):
+    con = _dedupe_db(tmp_path / "negative.db")
+    _insert_dedupe_row(con, 1, "d1", "Java 集合", "答案", "d1:q1", "n1")
+    con.commit()
+    with pytest.raises(ValueError):
+        rag_contexts(con, "Java 集合", 1, max_context_chars=-1)
+    con.close()
+

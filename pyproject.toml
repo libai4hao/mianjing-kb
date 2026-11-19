@@ -30,6 +30,7 @@ include = ["mianjing_kb*"]
 testpaths = ["tests"]
 addopts = "-q"
 pythonpath = ["."]
+markers = ["integration: 真实模型/网络依赖测试，普通 pytest 默认跳过（RUN_BGE_INTEGRATION=1 才跑）"]
 
 [tool.ruff]
 line-length = 110

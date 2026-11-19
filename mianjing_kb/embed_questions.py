@@ -240,8 +240,13 @@ def get_model():
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
     model = get_model()
-    return [list(v) for v in model.embed(texts)]
+    vecs = [list(v) for v in model.embed(texts)]
+    if any(len(v) != DIM for v in vecs):
+        raise ValueError(f"向量维度必须为 {DIM}，实际 {[len(v) for v in vecs]}")
+    return vecs
 
 
 def run(out_db: Path = OUT_DB, batch: int = BATCH) -> dict:

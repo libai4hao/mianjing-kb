@@ -49,6 +49,8 @@ REQUIRED_GATES = ("G1", "G2", "G3", "G4", "G5", "G8")
 KNOWN_STATES = ("PASS", "WARN", "FAIL", "SKIP")
 PUBLISH_MANIFEST = "shadow_publish.json"
 PUBLISH_HISTORY_DIR = Path("manifests") / "refresh"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+GOLDEN_MIN_RECALL = 0.10      # 首版候选基线 0.159；低于 0.10 视为检索质量退化
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
@@ -492,8 +494,33 @@ def check_reembed(shadow: Path, emb: dict) -> str | None:
     return None
 
 
+def g9_golden_queries(shadow: Path) -> dict:
+    """D-34：全量 Golden Query 检索质量门禁（软门，首版候选未人工审核时只告警）。"""
+    path = REPO_ROOT / "eval" / "golden_queries.yaml"
+    base = {"id": "G9", "name": "Golden Query 检索质量", "level": "软",
+            "details": [], "fails": []}
+    if not path.exists():
+        return {**base, "state": "FAIL", "fails": [f"Golden Query 缺失：{path}"]}
+    try:
+        from mianjing_kb import eval_retrieval as ER
+        queries = ER.load_queries(path)
+        res = ER.evaluate_golden(shadow, queries, k=10, mode="kw")
+    except Exception as ex:  # noqa: BLE001 —— 门禁必须给出明确失败，不吞异常
+        return {**base, "state": "FAIL", "fails": [f"{type(ex).__name__}: {ex}"]}
+    recall = res.get("recall_at_5")
+    reviewed = res.get("reviewed_count") or 0
+    details = [f"recall@5={recall}", f"reviewed={reviewed}/{res.get('queries')}"]
+    if reviewed < (res.get("queries") or 0):
+        return {**base, "state": "WARN", "details": details,
+                "fails": ["Golden Query 尚未全量人工审核，不阻断发布"]}
+    if recall is None or recall < GOLDEN_MIN_RECALL:
+        return {**base, "state": "FAIL", "details": details,
+                "fails": [f"Recall@5 {recall} < {GOLDEN_MIN_RECALL}"]}
+    return {**base, "state": "PASS", "details": details}
+
+
 def run_gates(shadow: Path) -> list[dict]:
-    """G1-G5 + G8 对影子库实跑（G6 打标、G7 文档一致性不在此跑）。"""
+    """G1-G5 + G8 对影子库实跑（G6 打标、G7 文档一致性不在此跑）；G9 为软门。"""
     from mianjing_kb.verify_ledger import (g1_coverage, g2_chain, g3_topic, g4_index, g5_disk,
                                g8_single_identity, load_skip_entries)
     kb_conn = sqlite3.connect(_ro_uri(Path(config.DB_PATH)), uri=True)
@@ -516,6 +543,7 @@ def run_gates(shadow: Path) -> list[dict]:
         g4_index(out_conn),
         g5_disk(kb_conn, Path(config.CORPUS_ROOT), Path(config.BUILD_DIR)),
         g8_single_identity(out_conn),
+        g9_golden_queries(shadow),
     ]
     kb_conn.close()
     out_conn.close()

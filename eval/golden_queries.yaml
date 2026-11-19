@@ -1,0 +1,396 @@
+# Golden Query 首版候选（D-34）
+# 状态：50 条候选查询，全部 reviewed: false，等待人工逐条审核后再作为发布门禁基线。
+# 相关项 q_key 来自生产检索库 20,010 题的真实题目；未由模型生成答案后自证。
+version: 1
+queries:
+  # 精确技术问题（10）
+  - query: "HashMap 的工作原理是什么"
+    topic: "Java基础"
+    category: exact
+    expect_q_keys: ["07ae97283fe38bfa:e9dbca11bfb5ffce"]
+    relevance: [{q_key: "07ae97283fe38bfa:e9dbca11bfb5ffce", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "MySQL 中有哪几种锁"
+    topic: "MySQL"
+    category: exact
+    expect_q_keys: ["0028b779a93a1305:bab04db16fefb38d"]
+    relevance: [{q_key: "0028b779a93a1305:bab04db16fefb38d", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "InnoDB 支持的四种事务隔离级别及区别"
+    topic: "MySQL"
+    category: exact
+    expect_q_keys: ["21a6a3f6574c8693:ed8025cb6c0b7ae7"]
+    relevance: [{q_key: "21a6a3f6574c8693:ed8025cb6c0b7ae7", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "什么是 Redis，简述它的优缺点"
+    topic: "Redis"
+    category: exact
+    expect_q_keys: ["20f6fd191619ffcc:3357d38d79f10738"]
+    relevance: [{q_key: "20f6fd191619ffcc:3357d38d79f10738", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "为什么会有双亲委派机制"
+    topic: "JVM"
+    category: exact
+    expect_q_keys: ["05d7ad8c9fbff55d:c77da730c1aaa041"]
+    relevance: [{q_key: "05d7ad8c9fbff55d:c77da730c1aaa041", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "Java 类加载过程是什么"
+    topic: "JVM"
+    category: exact
+    expect_q_keys: ["4cedf299823e404c:4b1c808c38d205e1"]
+    relevance: [{q_key: "4cedf299823e404c:4b1c808c38d205e1", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "什么是 Spring Boot"
+    topic: "SpringBoot"
+    category: exact
+    expect_q_keys: ["068b68b93591a044:dfc5d8f3ae1d497d"]
+    relevance: [{q_key: "068b68b93591a044:dfc5d8f3ae1d497d", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "什么是 Spring 框架，它有哪些主要模块"
+    topic: "Spring"
+    category: exact
+    expect_q_keys: ["17105e3e8c332400:b5ce9ed2fbde8e2e"]
+    relevance: [{q_key: "17105e3e8c332400:b5ce9ed2fbde8e2e", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "说一下 GET 和 POST 的区别"
+    topic: "计算机网络"
+    category: exact
+    expect_q_keys: ["1239c157c5f26cf6:1856ba1374e40477"]
+    relevance: [{q_key: "1239c157c5f26cf6:1856ba1374e40477", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "JDK 中有哪几个常用的设计模式"
+    topic: "设计模式"
+    category: exact
+    expect_q_keys: ["3afb55d83ce320e0:bf5666ba52855415"]
+    relevance: [{q_key: "3afb55d83ce320e0:bf5666ba52855415", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+
+  # 同义改写 / 口语化（10）
+  - query: "构造函数参数太多了该怎么处理"
+    topic: "Java基础"
+    category: paraphrase
+    expect_q_keys: ["0639570bc85f19ce:5b53224b6f40dbd5"]
+    relevance: [{q_key: "0639570bc85f19ce:5b53224b6f40dbd5", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "CHAR 和 VARCHAR 存储上有什么不一样"
+    topic: "MySQL"
+    category: paraphrase
+    expect_q_keys: ["0028b779a93a1305:1288a576ff86deab"]
+    relevance: [{q_key: "0028b779a93a1305:1288a576ff86deab", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "Redis 能存哪些数据类型"
+    topic: "Redis"
+    category: paraphrase
+    expect_q_keys: ["20f6fd191619ffcc:f455f058fa271406"]
+    relevance: [{q_key: "20f6fd191619ffcc:f455f058fa271406", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "GC 是干什么的，为什么需要垃圾回收"
+    topic: "JVM"
+    category: paraphrase
+    expect_q_keys: ["4cedf299823e404c:8281e036cfcbb23d"]
+    relevance: [{q_key: "4cedf299823e404c:8281e036cfcbb23d", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "Spring Boot 好在哪里"
+    topic: "SpringBoot"
+    category: paraphrase
+    expect_q_keys: ["068b68b93591a044:f400916d106bc6bf"]
+    relevance: [{q_key: "068b68b93591a044:f400916d106bc6bf", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "Spring 里用了哪些设计模式"
+    topic: "Spring"
+    category: paraphrase
+    expect_q_keys: ["275174f08f05d653:2fd8fb3617134425"]
+    relevance: [{q_key: "275174f08f05d653:2fd8fb3617134425", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "HTTP 常见状态码都有哪些"
+    topic: "计算机网络"
+    category: paraphrase
+    expect_q_keys: ["1239c157c5f26cf6:4dea637f42faf7d7"]
+    relevance: [{q_key: "1239c157c5f26cf6:4dea637f42faf7d7", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "为什么 FIFO 页面置换效果不好"
+    topic: "操作系统"
+    category: paraphrase
+    expect_q_keys: ["1538233dc6083e19:8d0692e82a1aaffd"]
+    relevance: [{q_key: "1538233dc6083e19:8d0692e82a1aaffd", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "线程怎么拿到共享变量的监视器锁"
+    topic: "并发编程"
+    category: paraphrase
+    expect_q_keys: ["0023d50cb7ceb89b:d7c94283be8eedf6"]
+    relevance: [{q_key: "0023d50cb7ceb89b:d7c94283be8eedf6", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "单例模式怎么写，懒汉和饿汉有什么区别"
+    topic: "设计模式"
+    category: paraphrase
+    expect_q_keys: ["bc4ad4d41dafbab9:d7f8cdfe4661f84b"]
+    relevance: [{q_key: "bc4ad4d41dafbab9:d7f8cdfe4661f84b", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+
+  # 多关键词 / 跨主题（10）
+  - query: "MySQL 锁和 InnoDB 事务隔离级别"
+    topic: "MySQL"
+    category: multi_keyword
+    expect_q_keys:
+      ["0028b779a93a1305:bab04db16fefb38d", "21a6a3f6574c8693:ed8025cb6c0b7ae7"]
+    relevance:
+      [{q_key: "0028b779a93a1305:bab04db16fefb38d", grade: 3},
+       {q_key: "21a6a3f6574c8693:ed8025cb6c0b7ae7", grade: 2}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "Redis 数据类型和持久化消耗的物理资源"
+    topic: "Redis"
+    category: multi_keyword
+    expect_q_keys:
+      ["20f6fd191619ffcc:f455f058fa271406", "20f6fd191619ffcc:f1f33286d0dfcfd5"]
+    relevance:
+      [{q_key: "20f6fd191619ffcc:f455f058fa271406", grade: 3},
+       {q_key: "20f6fd191619ffcc:f1f33286d0dfcfd5", grade: 2}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "JVM 类加载过程和双亲委派"
+    topic: "JVM"
+    category: multi_keyword
+    expect_q_keys:
+      ["4cedf299823e404c:4b1c808c38d205e1", "05d7ad8c9fbff55d:c77da730c1aaa041"]
+    relevance:
+      [{q_key: "4cedf299823e404c:4b1c808c38d205e1", grade: 3},
+       {q_key: "05d7ad8c9fbff55d:c77da730c1aaa041", grade: 2}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "Spring Boot 优点和 JavaConfig"
+    topic: "SpringBoot"
+    category: multi_keyword
+    expect_q_keys:
+      ["068b68b93591a044:f400916d106bc6bf", "068b68b93591a044:af99abbc4e64a12c"]
+    relevance:
+      [{q_key: "068b68b93591a044:f400916d106bc6bf", grade: 3},
+       {q_key: "068b68b93591a044:af99abbc4e64a12c", grade: 2}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "Spring 框架模块和用到的设计模式"
+    topic: "Spring"
+    category: multi_keyword
+    expect_q_keys:
+      ["17105e3e8c332400:b5ce9ed2fbde8e2e", "275174f08f05d653:2fd8fb3617134425"]
+    relevance:
+      [{q_key: "17105e3e8c332400:b5ce9ed2fbde8e2e", grade: 3},
+       {q_key: "275174f08f05d653:2fd8fb3617134425", grade: 2}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "GET POST 区别和 HTTP 状态码"
+    topic: "计算机网络"
+    category: multi_keyword
+    expect_q_keys:
+      ["1239c157c5f26cf6:1856ba1374e40477", "1239c157c5f26cf6:4dea637f42faf7d7"]
+    relevance:
+      [{q_key: "1239c157c5f26cf6:1856ba1374e40477", grade: 3},
+       {q_key: "1239c157c5f26cf6:4dea637f42faf7d7", grade: 2}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "FIFO 页面置换和时钟周期"
+    topic: "操作系统"
+    category: multi_keyword
+    expect_q_keys:
+      ["1538233dc6083e19:8d0692e82a1aaffd", "28df8ce5895392c2:26f266ceb5a08eb0"]
+    relevance:
+      [{q_key: "1538233dc6083e19:8d0692e82a1aaffd", grade: 3},
+       {q_key: "28df8ce5895392c2:26f266ceb5a08eb0", grade: 2}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "volatile 可见性和多操作原子性"
+    topic: "并发编程"
+    category: multi_keyword
+    expect_q_keys:
+      ["0023d50cb7ceb89b:2fc06d4eaaf4c209", "0023d50cb7ceb89b:35e8e857055f7f47"]
+    relevance:
+      [{q_key: "0023d50cb7ceb89b:2fc06d4eaaf4c209", grade: 3},
+       {q_key: "0023d50cb7ceb89b:35e8e857055f7f47", grade: 2}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "JDK 常用设计模式和单例模式"
+    topic: "设计模式"
+    category: multi_keyword
+    expect_q_keys:
+      ["3afb55d83ce320e0:bf5666ba52855415", "bc4ad4d41dafbab9:d7f8cdfe4661f84b"]
+    relevance:
+      [{q_key: "3afb55d83ce320e0:bf5666ba52855415", grade: 3},
+       {q_key: "bc4ad4d41dafbab9:d7f8cdfe4661f84b", grade: 2}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "堆排序和链表排序"
+    topic: "算法"
+    category: multi_keyword
+    expect_q_keys:
+      ["5570be195e5960f0:7d4b0adcac034807", "72d4de5af9548782:d809a1f5aa92c8f0"]
+    relevance:
+      [{q_key: "5570be195e5960f0:7d4b0adcac034807", grade: 3},
+       {q_key: "72d4de5af9548782:d809a1f5aa92c8f0", grade: 2}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+
+  # 短查询 / 缩写 / 歧义（8）
+  - query: "HashMap"
+    topic: "Java基础"
+    category: short
+    expect_q_keys: ["07ae97283fe38bfa:e9dbca11bfb5ffce"]
+    relevance: [{q_key: "07ae97283fe38bfa:e9dbca11bfb5ffce", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "InnoDB 隔离级别"
+    topic: "MySQL"
+    category: short
+    expect_q_keys: ["21a6a3f6574c8693:ed8025cb6c0b7ae7"]
+    relevance: [{q_key: "21a6a3f6574c8693:ed8025cb6c0b7ae7", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "Redis 锁过期"
+    topic: "Redis"
+    category: short
+    expect_q_keys: ["20f6fd191619ffcc:e01cfcea9b0da1e6"]
+    relevance: [{q_key: "20f6fd191619ffcc:e01cfcea9b0da1e6", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "双亲委派"
+    topic: "JVM"
+    category: short
+    expect_q_keys: ["05d7ad8c9fbff55d:c77da730c1aaa041"]
+    relevance: [{q_key: "05d7ad8c9fbff55d:c77da730c1aaa041", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "SpringBoot 热重载"
+    topic: "SpringBoot"
+    category: short
+    expect_q_keys: ["068b68b93591a044:f3f3ec1e0c051dd6"]
+    relevance: [{q_key: "068b68b93591a044:f3f3ec1e0c051dd6", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "GET POST"
+    topic: "计算机网络"
+    category: short
+    expect_q_keys: ["1239c157c5f26cf6:1856ba1374e40477"]
+    relevance: [{q_key: "1239c157c5f26cf6:1856ba1374e40477", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "FIFO"
+    topic: "操作系统"
+    category: short
+    expect_q_keys: ["1538233dc6083e19:8d0692e82a1aaffd"]
+    relevance: [{q_key: "1538233dc6083e19:8d0692e82a1aaffd", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "单例"
+    topic: "设计模式"
+    category: short
+    expect_q_keys: ["bc4ad4d41dafbab9:d7f8cdfe4661f84b"]
+    relevance: [{q_key: "bc4ad4d41dafbab9:d7f8cdfe4661f84b", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+
+  # 带筛选条件（6）
+  - query: "索引"
+    topic: "MySQL"
+    category: filtered
+    expect_q_keys: ["0028b779a93a1305:79b17b168c5169de"]
+    relevance: [{q_key: "0028b779a93a1305:79b17b168c5169de", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "类加载"
+    topic: "JVM"
+    category: filtered
+    expect_q_keys: ["4cedf299823e404c:115a51809f9e1502"]
+    relevance: [{q_key: "4cedf299823e404c:115a51809f9e1502", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "设计模式"
+    topic: "设计模式"
+    category: filtered
+    expect_q_keys: ["3afb55d83ce320e0:bf5666ba52855415"]
+    relevance: [{q_key: "3afb55d83ce320e0:bf5666ba52855415", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "页面置换"
+    topic: "操作系统"
+    category: filtered
+    expect_q_keys: ["1538233dc6083e19:009dbdb7dbb49933"]
+    relevance: [{q_key: "1538233dc6083e19:009dbdb7dbb49933", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "状态码"
+    topic: "计算机网络"
+    category: filtered
+    expect_q_keys: ["1239c157c5f26cf6:4dea637f42faf7d7"]
+    relevance: [{q_key: "1239c157c5f26cf6:4dea637f42faf7d7", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "Spring Boot"
+    topic: "SpringBoot"
+    category: filtered
+    expect_q_keys: ["068b68b93591a044:dfc5d8f3ae1d497d"]
+    relevance: [{q_key: "068b68b93591a044:dfc5d8f3ae1d497d", grade: 3}]
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+
+  # 无答案 / 不应命中（6）
+  - query: "如何给火箭发动机做无损探伤"
+    topic: null
+    category: no_answer
+    expect_q_keys: []
+    relevance: []
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "唐宋八大家是哪八位"
+    topic: null
+    category: no_answer
+    expect_q_keys: []
+    relevance: []
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "怎样用 SQL 计算星系红移"
+    topic: null
+    category: no_answer
+    expect_q_keys: []
+    relevance: []
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "钢琴调律需要什么工具"
+    topic: null
+    category: no_answer
+    expect_q_keys: []
+    relevance: []
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "海水稻在火星上的种植方案"
+    topic: null
+    category: no_answer
+    expect_q_keys: []
+    relevance: []
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"
+  - query: "如何训练一只猫做微积分"
+    topic: null
+    category: no_answer
+    expect_q_keys: []
+    relevance: []
+    reviewed: false
+    reviewer: "待人工审核（首版候选）"

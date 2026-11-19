@@ -15,6 +15,12 @@
   `embed_questions` staging 改 run_id 标记，启动清理历史残留，活任务/清理失败一律中止；
   `refresh` 每次构建写 `build/manifests/refresh/<build_id>.json`，发布后当前授权标记 consumed，
   `--swap-only` 只认 pending 当前清单。
+- **阶段 C RAG 质量**：新增 `eval/golden_query_schema.yaml` 与 50 条 `eval/golden_queries.yaml`
+  （首版候选 `reviewed: false`，待人工审核）；`eval_retrieval` 新增 Recall@5/MRR@10/nDCG@10/
+  无答案误命中率/分主题召回率与 `--golden`/`--report`；`refresh` 新增 G9 软门（未审只告警，
+  审核后 Recall@5 低于 0.10 判 FAIL）。`search.rag_contexts` 增加精确 + 同簇软去重、来源聚合、
+  `max_context_chars=6000` 全局预算并保留 `q_key`/来源。新增 BGE 单元契约测试与真实模型夜间集成
+  工作流（`.github/workflows/bge-integration.yml`，模型缓存 + `RUN_BGE_INTEGRATION=1`）。
 - **5,000 题预生产方案 + 标签数据结构复核**：新增 `docs/35`（切片/配置/执行/校验，明确只能影子跑）
   与 `docs/36`（12 个一级领域、稳定 code、7 题型、3 难度 band、quality_state/flags 拆分、
   增量迁移 018 与双写方案）。结论是标签 v2 落库前不跑 5,000 全量打标。

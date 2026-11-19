@@ -1,0 +1,35 @@
+# D-37 夜间真实 BGE 集成回归：固定模型 + 模型缓存，不进入普通 PR/CI。
+name: BGE Integration (nightly)
+
+on:
+  schedule:
+    - cron: "0 18 * * *"   # UTC 18:00 = 北京时间 02:00
+  workflow_dispatch:
+
+jobs:
+  bge-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      RUN_BGE_INTEGRATION: "1"
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 缓存 BGE 模型
+        uses: actions/cache@v4
+        with:
+          path: .fastembed-cache
+          key: fastembed-bge-small-zh-v1.5-${{ runner.os }}
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e . --no-deps
+      - name: 真实模型契约与检索回归
+        run: python -m pytest tests/integration -q -m integration

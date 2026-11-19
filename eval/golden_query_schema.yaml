@@ -1,0 +1,39 @@
+# Golden Query 数据集 schema（D-34）
+# 本文件只描述字段，不参与检索；实际查询见 eval/golden_queries.yaml。
+version: 1
+fields:
+  query:
+    type: string
+    required: true
+    description: 用户真实可能输入的检索词；不得由模型直接生成答案后自证。
+  topic:
+    type: string
+    required: false
+    description: 检索过滤主题；无答案/跨主题查询可为空。
+  category:
+    type: enum
+    required: true
+    values: [exact, paraphrase, multi_keyword, short, filtered, no_answer]
+  expect_q_keys:
+    type: list[string]
+    required: true
+    description: 相关题目的稳定键；无答案查询为空列表。
+  relevance:
+    type: list[object]
+    required: true
+    description: 每条相关项的 q_key 与 grade（0~3，3 为最相关）；无答案查询为空列表。
+  filters:
+    type: object
+    required: false
+    description: 可选过滤条件，支持 topic/qtype/difficulty/position/quality/tags。
+  reviewed:
+    type: boolean
+    required: true
+    description: 是否已由人工审核查询与相关项；未审核不得当作发布门禁基线。
+  reviewer:
+    type: string
+    required: false
+    description: 审核人/审核记录链接。
+  notes:
+    type: string
+    required: false
