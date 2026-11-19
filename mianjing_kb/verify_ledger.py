@@ -50,7 +50,10 @@ from mianjing_kb.kb.vocab import topic_vocab  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 SKIP_REASONS = ("no_text_layer", "garbled", "converted_only", "duplicate_of",
-                "no_question", "chunker_no_split")
+                "no_question", "chunker_no_split", "no_md_artifact")
+# G6 的 OK 判定直接决定 merge 能否继续，等级必须是硬（"软→硬"字符串永远不会进 hard_fail）
+LEVEL_HARD = "硬"
+LEVEL_SOFT = "软"
 
 
 def norm_stem(stem: str) -> str:
@@ -78,12 +81,27 @@ def mirror_hash_of(md_rel: str) -> str:
 
 
 def load_skip_log() -> dict[str, str]:
-    """meta/skip_log.json → {rel: reason}。rel 可填源相对路径或 md 相对路径（均 posix）。"""
+    """meta/skip_log.json → {rel: reason}。rel 可填源相对路径或 md 相对路径（均 posix）。
+
+    原因必须是 SKIP_REASONS 之一；`duplicate_of` 还必须带目标（note/target），否则记成
+    `duplicate_of:no_target`，由 G1/G2 当无效豁免报 FAIL——空串/拼错原因不再静默放行。
+    """
     f = config.META_DIR / "skip_log.json"
     if not f.exists():
         return {}
     data = json.loads(f.read_text(encoding="utf-8"))
-    return {x["rel"].replace("\\", "/"): x.get("reason", "") for x in data.get("items", [])}
+    out: dict[str, str] = {}
+    for x in data.get("items", []):
+        rel = x["rel"].replace("\\", "/")
+        reason = (x.get("reason") or "").strip()
+        if reason == "duplicate_of" and not (x.get("target") or x.get("note")):
+            reason = "duplicate_of:no_target"
+        out[rel] = reason
+    return out
+
+
+def skip_reason_ok(reason: str | None, allowed: tuple[str, ...] = SKIP_REASONS) -> bool:
+    return bool(reason) and reason in allowed
 
 
 def _gate(gid: str, name: str, level: str, state: str, fails: list, detail: dict, sql: str) -> dict:
@@ -104,7 +122,7 @@ def _rel_to_md_map() -> dict[str, str]:
     if log_p.exists():
         for l in json.loads(log_p.read_text(encoding="utf-8")):
             if l.get("ok") and l.get("md"):
-                m[l["rel"]] = l["md"]
+                m[l["rel"].replace("\\", "/")] = l["md"].replace("\\", "/")
     gate_p = build / "gate_report.json"
     if gate_p.exists():
         for r in json.loads(gate_p.read_text(encoding="utf-8")).get("rows", []):
@@ -139,21 +157,35 @@ def g1_coverage(kb_conn, out_conn, skip: dict[str, str]) -> dict:
     for (rel,) in out_conn.execute("SELECT DISTINCT md_rel FROM doc_contents"):
         # base_stem 剥 __hash8/_hash8 后缀 + norm_stem 归一空白/大小写，缺一不可
         md_rels_by_stem.setdefault(norm_stem(base_stem(Path(rel).stem)), []).append(rel)
+    db_mds = {x for rels in md_rels_by_stem.values() for x in rels}
 
     fails, n_skip = [], 0
+    exact_map = _rel_to_md_map()
+    n_exact = 0
     for r in rows:
         rel = f"{r['dir_path']}/{r['file_name']}" if r["dir_path"] else r["file_name"]
         stem = norm_stem(base_stem(Path(r["file_name"]).stem))
-        # 族判定（2026-11-17）：同名多源是转换口径的固有形态（华为校招面经.pdf 在多目录、
-        # 各自落同名 md），题落在族内任一 md 即视为该源已覆盖——stem 首中链接会错位误报。
-        md_rels = md_rels_by_stem.get(stem, [])
+        # 优先用转换日志/门禁报告里的精确源→md 映射；找不到才退回同名族。
+        # 同名多源时族匹配会把"另一份源转出的 md"算成本源已覆盖（review HIGH）。
+        exact = exact_map.get(rel.replace("\\", "/"))
+        if exact and exact in db_mds:
+            md_rels = [exact]
+            n_exact += 1
+        else:
+            md_rels = md_rels_by_stem.get(stem, [])
         mirrors = [mirror_hash_of(x) for x in md_rels]
         has_doc = (r["doc_hash"] in dc_doc) or bool(md_rels)
         has_q = (r["doc_hash"] in q_docs) or any(m in q_docs for m in mirrors)
         if has_doc and has_q:
             continue
         if rel in skip:
-            n_skip += 1
+            why = skip[rel]
+            if skip_reason_ok(why):
+                n_skip += 1
+                continue
+            fails.append({"rel": rel, "file_name": r["file_name"], "ext": r["ext"],
+                          "category": r["category"], "skip_reason": why,
+                          "suggest": "skip_log 原因非法：改成 SKIP_REASONS 之一"})
             continue
         fails.append({"rel": rel, "file_name": r["file_name"], "ext": r["ext"],
                       "category": r["category"],
@@ -163,7 +195,8 @@ def g1_coverage(kb_conn, out_conn, skip: dict[str, str]) -> dict:
     state = "PASS" if not fails else "FAIL"
     return _gate("G1", "源-库全覆盖", "硬", state, fails,
                  {"classified": len(rows), "skipped_by_log": n_skip,
-                  "note": "md 镜像按同名族判定（任一同 stem md 有题即覆盖），防多源错位"}, sql)
+                  "exact_rel_mapped": n_exact,
+                  "note": "优先精确源→md 映射（backfill/gate_report），找不到才按同名族判定"}, sql)
 
 
 # ---------------- G2 转换链闭环 ----------------
@@ -178,20 +211,20 @@ def g2_chain(out_conn, md_root: Path, ocr_root: Path, skip: dict[str, str]) -> d
         if md_root.exists() else set()
     db_mds = {r[0] for r in out_conn.execute("SELECT DISTINCT md_rel FROM doc_contents")}
     for rel in sorted(disk_mds - db_mds):
-        if rel in skip:
+        if skip_reason_ok(skip.get(rel)):
             continue
         fails.append({"rel": rel, "kind": "md_not_in_db", "suggest": "build_db 重建"})
 
     # ② ocr_text 有全文却无 md（350道 事故回归样本）
     if ocr_root.exists():
-        md_stems = {base_stem(p.stem) for p in md_root.rglob("*.md")} if md_root.exists() else set()
+        md_stems = {norm_stem(base_stem(p.stem)) for p in md_root.rglob("*.md")} if md_root.exists() else set()
         for txt in sorted(ocr_root.rglob("*.txt")):
             src_rel = txt.relative_to(ocr_root).as_posix()
             if src_rel.endswith(".txt"):
                 src_rel = src_rel[:-4]
-            if base_stem(Path(src_rel).stem) in md_stems:
+            if norm_stem(base_stem(Path(src_rel).stem)) in md_stems:
                 continue
-            if src_rel in skip or Path(src_rel).name in skip:
+            if skip_reason_ok(skip.get(src_rel)) or skip_reason_ok(skip.get(Path(src_rel).name)):
                 continue
             fails.append({"rel": src_rel, "kind": "ocr_text_no_md",
                           "suggest": "backfill_convert --merge-ocr / ocr_merge"})
@@ -247,18 +280,21 @@ def g4_index(out_conn) -> dict:
     try:
         n_vec = out_conn.execute("SELECT COUNT(*) FROM vec_questions").fetchone()[0]
         vec_ids = {r[0] for r in out_conn.execute("SELECT rowid FROM vec_questions")}
-    except Exception:  # noqa: BLE001 —— vec0 扩展未加载（sqlite_vec 不可用）时无法校验
-        return _gate("G4", "索引一致性", "硬", "WARN", [],
-                     {"questions": n_q, "note": "vec_questions 是 vec0 虚表且 sqlite_vec 扩展不可加载，跳过校验"},
-                     sql)
+    except Exception as ex:  # noqa: BLE001 —— vec0 扩展未加载（sqlite_vec 不可用）时无法校验
+        return _gate("G4", "索引一致性", "硬", "FAIL", [
+            {"kind": "vec_unavailable", "error": f"{type(ex).__name__}: {ex}",
+             "note": "vec_questions 存在但 sqlite_vec 扩展未加载：硬门禁不能降级 WARN 放行"}],
+            {"questions": n_q, "note": "向量表存在但扩展不可用"}, sql)
     q_ids = {r[0] for r in out_conn.execute("SELECT qid FROM questions")}
     n_fts = out_conn.execute("SELECT COUNT(*) FROM questions_fts").fetchone()[0]
+    fts_ids = {r[0] for r in out_conn.execute("SELECT rowid FROM questions_fts")}
     fails = []
     if n_vec != n_q or vec_ids != q_ids:
         fails.append({"kind": "vec_mismatch", "questions": n_q, "vec": n_vec,
                       "qid_diff": len(q_ids ^ vec_ids)})
-    if n_fts != n_q:
-        fails.append({"kind": "fts_mismatch", "questions": n_q, "fts": n_fts})
+    if n_fts != n_q or fts_ids != q_ids:
+        fails.append({"kind": "fts_mismatch", "questions": n_q, "fts": n_fts,
+                      "rowid_diff": len(q_ids ^ fts_ids)})
     state = "PASS" if not fails else "FAIL"
     return _gate("G4", "索引一致性", "硬", state, fails,
                  {"questions": n_q, "vec": n_vec, "fts": n_fts}, sql)
@@ -349,6 +385,23 @@ def audit_converted(kb_conn) -> list[dict]:
     return out
 
 
+def _trace_ok(note: str, rel: str, retire_rels: set[str], retire_names: set[str]) -> bool:
+    """退役留痕判定：必须是可核对的记录，不是"note 非空即过"。
+
+    接受：converted_to 事件/子串、明确的退役/物理删除/移出语料根措辞、retire_log 的**完整相对路径**。
+    retire_log 只有文件名时（老格式）才退回同名匹配；通用文件名（README.md）不再单独放行。
+    """
+    text = (note or "").strip()
+    markers = ("converted_to", "退役", "物理删除", "移出语料根", "quarantine", "superseded",
+               "乱码", "替代")
+    if text and any(k in text for k in markers):
+        return True
+    rel_posix = rel.replace("\\", "/")
+    if rel_posix in retire_rels:
+        return True
+    return bool(retire_names) and not retire_rels and Path(rel_posix).name in retire_names
+
+
 def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
     """classified 在盘；superseded 在 99 区或已删且留痕；99 区每件在台账。
 
@@ -360,21 +413,26 @@ def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
            "converted_to: 后继记录存在且未退役; "
            "99区: sha256(file)[:16] ∈ source_documents.doc_hash")
     fails = []
-    retire_names = set()
+    retire_names: set[str] = set()
+    retire_rels: set[str] = set()
     retire_log = build_dir / "retire_log.csv"
     if retire_log.exists():
         with retire_log.open(encoding="utf-8-sig", newline="") as f:
             for row in csv.reader(f):
                 if len(row) >= 3 and row[2].strip():
                     retire_names.add(Path(row[2].strip()).name)
+                if len(row) >= 4 and row[3].strip():
+                    retire_rels.add(row[3].strip().replace("\\", "/"))
 
     legacy_checked = 0
     for r in kb_conn.execute(
             "SELECT doc_hash, file_name, dir_path, src_path, status, note "
             f"FROM source_documents WHERE status IN {status.sql_in(status.G5_SCAN)}").fetchall():
-        src = Path(r["src_path"] or "")
+        src = Path(r["src_path"]) if (r["src_path"] or "").strip() else None
+        rel = f"{r['dir_path']}/{r['file_name']}" if r["dir_path"] else r["file_name"]
         if r["status"] in (status.CLASSIFIED, status.PROCESSING, status.PROCESSED):
-            if not src.exists():
+            # Path("") == Path(".")，空 src_path 会被 exists() 判成"在盘"——必须先判空
+            if src is None or not src.exists():
                 fails.append({"kind": "classified_src_missing", "rel": r["file_name"]})
             continue
         # superseded：在盘则须在 99 区，或 note 有留痕（converted_to 原地转换 /
@@ -393,13 +451,12 @@ def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
             if why:
                 fails.append({"kind": "converted_target_missing", "rel": r["file_name"],
                               "target": t, "legacy": legacy, "why": why})
-        if src.exists():
+        if src is not None and src.exists():
             in_99 = (r["dir_path"] or "").startswith(config.QUARANTINE_PREFIX) \
                     or config.QUARANTINE_PREFIX in str(src)
-            traced = bool((r["note"] or "").strip())
-            if not (in_99 or traced):
+            if not (in_99 or _trace_ok(r["note"], rel, retire_rels, retire_names)):
                 fails.append({"kind": "superseded_not_quarantined", "rel": r["file_name"]})
-        elif not ((r["note"] or "").strip() or r["file_name"] in retire_names):
+        elif not _trace_ok(r["note"], rel, retire_rels, retire_names):
             fails.append({"kind": "superseded_no_trace", "rel": r["file_name"]})
 
     q_dir = corpus_root / config.QUARANTINE_PREFIX
@@ -408,10 +465,13 @@ def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
         for p in q_dir.rglob("*"):
             if not p.is_file():
                 continue
-            if p.name in retire_names:
-                continue          # 退役 md 镜像（retire_log 留痕；台账只记源文档，不登记派生件）
+            rel99 = p.relative_to(corpus_root).as_posix()
+            if rel99 in retire_rels:
+                continue          # 退役 md 镜像（retire_log 完整路径留痕，台账不登记派生件）
+            if p.name in retire_names and not retire_rels:
+                continue          # 老格式只有文件名，才允许按名放行
             if hashing.sha256_file(p)[:16] not in known:
-                fails.append({"kind": "orphan_in_99", "rel": str(p.relative_to(corpus_root))})
+                fails.append({"kind": "orphan_in_99", "rel": rel99})
     state = "PASS" if not fails else "FAIL"
     return _gate("G5", "台账-磁盘一致", "硬", state, fails,
                  {"retire_log_rows": len(retire_names), "legacy_converted_checked": legacy_checked},
@@ -453,7 +513,7 @@ def g6_label(kb_conn) -> dict:
            "AND position/quality 有值时合法 AND canonical_q 有值时<=60字")
     n = kb_conn.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0]
     if n == 0:
-        return _gate("G6", "打标质量", "软→硬", "SKIP", [],
+        return _gate("G6", "打标质量", LEVEL_HARD, "SKIP", [],
                      {"staged": 0, "note": "labels_staging 为空（打标未跑或已 merge）"}, sql)
     rows = kb_conn.execute(
         "SELECT s.topic, s.qtype, s.difficulty, s.tags, s.position, s.quality, "
@@ -530,7 +590,7 @@ def g6_label(kb_conn) -> dict:
         fails.append({"kind": "topic_drift", "new_topic_ratio": round(drift, 4),
                       "new_topics": sorted(new_topics)[:10],
                       "note": "新主题占比偏高——--sample 50 人工抽查后再 merge"})
-    return _gate("G6", "打标质量", "软→硬", state, fails,
+    return _gate("G6", "打标质量", LEVEL_HARD, state, fails,
                  {"staged": n, "ok_rate": round(ok_rate, 4),
                   "new_topic_ratio": round(drift, 4),
                   "drift_baseline": drift_baseline,
@@ -538,6 +598,21 @@ def g6_label(kb_conn) -> dict:
                                "position": pos_filled / n,
                                "quality": qual_filled / n},
                   "tag_norm_hits": norm_hits}, sql)
+
+
+G6B_MIN_N = 50          # 抽检样本小于 50 时点估计没有统计效力（n=20/acc=.70 有 ~24% 概率观测≥.8）
+G6B_WEAK_MIN_N = 5      # 主题样本 <5 不进 weak_topics，避免 1 条错就触发 --review
+
+
+def _wilson_lower(k: int, n: int, z: float = 1.96) -> float:
+    """二项比例 Wilson 置信下界（95%）。点估计过线但下界过低时只记为风险，不单独挡门。"""
+    if n <= 0:
+        return 0.0
+    p = k / n
+    d = 1 + z * z / n
+    centre = p + z * z / (2 * n)
+    margin = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
+    return max(0.0, (centre - margin) / d)
 
 
 def g6b_golden(kb_conn) -> dict:
@@ -570,12 +645,14 @@ def g6b_golden(kb_conn) -> dict:
                      {"golden": n_gold, "matched": 0,
                       "note": "金标与 staging 无交集（staging 已 merge 或非同批）——样本不足，未判"},
                      sql)
-    if n < 20:
+    if n < G6B_MIN_N:
         return _gate("G6b", "金标抽检", "硬", "WARN", [],
                      {"golden": n_gold, "matched": n,
-                      "note": f"样本 {n} < 20 不足以判准确率——样本不足，未判（不等于通过）"},
+                      "note": f"样本 {n} < {G6B_MIN_N} 不足以判准确率——样本不足，未判（不等于通过）"},
                      sql)
-    topic_acc = sum(1 for r in rows if r["topic"] == r["topic_gold"]) / n
+    n_ok = sum(1 for r in rows if r["topic"] == r["topic_gold"])
+    topic_acc = n_ok / n
+    topic_lb = _wilson_lower(n_ok, n)
     qt = [r for r in rows if r["qtype_gold"]]
     qtype_acc = (sum(1 for r in qt if r["qtype"] == r["qtype_gold"]) / len(qt)) if qt else None
     df = [r for r in rows if r["difficulty_gold"]]
@@ -586,7 +663,8 @@ def g6b_golden(kb_conn) -> dict:
         by_topic.setdefault(r["topic_gold"], []).append(r["topic"] == r["topic_gold"])
         matrix.setdefault(r["topic_gold"], {})
         matrix[r["topic_gold"]][r["topic"]] = matrix[r["topic_gold"]].get(r["topic"], 0) + 1
-    weak = sorted(t for t, oks in by_topic.items() if sum(oks) / len(oks) < 0.8)
+    weak = sorted(t for t, oks in by_topic.items()
+                  if len(oks) >= G6B_WEAK_MIN_N and sum(oks) / len(oks) < 0.8)
     fails, state = [], "PASS"
     if topic_acc < 0.8:
         state = "FAIL"
@@ -594,6 +672,8 @@ def g6b_golden(kb_conn) -> dict:
                       "threshold": 0.8, "weak_topics": weak})
     return _gate("G6b", "金标抽检", "硬", state, fails,
                  {"golden": n_gold, "matched": n, "topic_acc": round(topic_acc, 4),
+                  "topic_acc_lower95": round(topic_lb, 4),
+                  "weak_min_n": G6B_WEAK_MIN_N,
                   "qtype_acc": round(qtype_acc, 4) if qtype_acc is not None else None,
                   "difficulty_acc": round(diff_acc, 4) if diff_acc is not None else None,
                   "weak_topics": weak, "matrix": matrix}, sql)
@@ -679,8 +759,23 @@ def _collect_tests(repo_root: Path) -> int:
         return -1
 
 
-def write_report(build_dir: Path, gates: list[dict], elapsed: float) -> tuple[Path, Path]:
-    """verify_report.json / .md 落盘。"""
+def _ro_uri(path: Path | str) -> str:
+    """只读 SQLite URI：用 as_uri() 做百分号编码，避免路径里的空格/#/? 破坏 URI。"""
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
+def _db_identity(path: Path | str) -> dict:
+    p = Path(path)
+    try:
+        st = p.stat()
+        return {"path": str(p), "size_bytes": st.st_size, "mtime_ns": st.st_mtime_ns}
+    except OSError:
+        return {"path": str(p), "missing": True}
+
+
+def write_report(build_dir: Path, gates: list[dict], elapsed: float,
+                 identity: dict | None = None) -> tuple[Path, Path]:
+    """verify_report.json / .md 落盘。identity 绑定数据库版本，供消费方拒绝过期报告。"""
     hard_fail = [g for g in gates if g["level"] == "硬" and g["state"] == "FAIL"]
     summary = {
         "at": datetime.now().strftime(NOW_FMT),
@@ -688,6 +783,7 @@ def write_report(build_dir: Path, gates: list[dict], elapsed: float) -> tuple[Pa
         "hard_fail": len(hard_fail),
         "verdict": "FAIL" if hard_fail else "PASS",
         "gates": {g["id"]: g["state"] for g in gates},
+        "db_identity": identity or {},
     }
     js = build_dir / "verify_report.json"
     js.write_text(json.dumps({"summary": summary, "gates_detail": gates},
@@ -695,7 +791,8 @@ def write_report(build_dir: Path, gates: list[dict], elapsed: float) -> tuple[Pa
 
     lines = [f"# 核账门禁报告（{summary['at']}）", "",
              f"- 结论：**{summary['verdict']}**（硬门禁 FAIL {len(hard_fail)} 道，耗时 {summary['elapsed_sec']}s）",
-             "- 口径：G1-G5 刷新后必跑；G6 打标后；G7 pre-commit（--docs）", ""]
+             f"- 数据库指纹：`{json.dumps(summary['db_identity'], ensure_ascii=False)}`",
+             "- 口径：G1-G5 刷新后必跑；G6/G6b 打标后；G7 pre-commit（--docs）", ""]
     for g in gates:
         n = len(g["fails"])
         lines.append(f"## {g['id']} {g['name']} — {g['state']}（{g['level']}，问题 {n} 项）")
@@ -714,9 +811,14 @@ def write_report(build_dir: Path, gates: list[dict], elapsed: float) -> tuple[Pa
 
 
 def write_backfill_plan(build_dir: Path, gates: list[dict]) -> Path:
-    """G1/G2 FAIL 项 → build/backfill_plan.csv（门禁即清单，docs/15 §2.1-3）。"""
+    """G1/G2 FAIL 项 → build/backfill_plan.csv（门禁即清单，docs/15 §2.1-3）。
+
+    只收文件级补录项；G3-G8 的结论不是"某文件该补什么"，混进来会让清单行数虚高。
+    """
     plan = []
     for g in gates:
+        if g["id"] not in ("G1", "G2"):
+            continue
         for f in g["fails"]:
             plan.append({"gate": g["id"], **f})
     out = build_dir / "backfill_plan.csv"
@@ -730,7 +832,7 @@ def write_backfill_plan(build_dir: Path, gates: list[dict]) -> Path:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="G1-G7 核账门禁（任一硬门禁 FAIL 即非 0 退出）")
+    ap = argparse.ArgumentParser(description="G1-G8/G6b 核账门禁（任一硬门禁 FAIL 即非 0 退出）")
     ap.add_argument("--docs", action="store_true", help="加跑 G7 文档一致性（pre-commit 用）")
     ap.add_argument("--audit-converted", action="store_true",
                     help="只盘点 superseded 行的 converted_to 能否解析到有效后继（T19）")
@@ -741,7 +843,7 @@ def main(argv=None) -> int:
 
     import sqlite3
     started = time.perf_counter()
-    kb_conn = sqlite3.connect(f"file:{Path(args.kb_db).as_posix()}?mode=ro", uri=True)
+    kb_conn = sqlite3.connect(_ro_uri(args.kb_db), uri=True)
     kb_conn.row_factory = sqlite3.Row
     if args.audit_converted:
         rows = audit_converted(kb_conn)
@@ -760,7 +862,7 @@ def main(argv=None) -> int:
         }, ensure_ascii=False, indent=1))
         kb_conn.close()
         return 1 if bad else 0
-    out_conn = sqlite3.connect(f"file:{Path(args.out_db).as_posix()}?mode=ro", uri=True)
+    out_conn = sqlite3.connect(_ro_uri(args.out_db), uri=True)
     out_conn.row_factory = sqlite3.Row
     try:  # vec_questions 是 vec0 虚表，校验它需要 sqlite_vec 扩展（可用则加载，G4 自行降级 WARN）
         import sqlite_vec
@@ -778,17 +880,18 @@ def main(argv=None) -> int:
         g3_topic(out_conn),
         g4_index(out_conn),
         g5_disk(kb_conn, Path(config.CORPUS_ROOT), build_dir),
-        g8_single_identity(out_conn),
         g6_label(kb_conn),
         g6b_golden(kb_conn),
+        g8_single_identity(out_conn),
     ]
     if args.docs:
         repo_root = Path(__file__).resolve().parents[1]
-        gates.append(g7_docs(repo_root, _collect_tests(repo_root)))
+        gates.insert(-1, g7_docs(repo_root, _collect_tests(repo_root)))
     kb_conn.close()
     out_conn.close()
 
-    js, md = write_report(build_dir, gates, time.perf_counter() - started)
+    identity = {"kb": _db_identity(args.kb_db), "out": _db_identity(args.out_db)}
+    js, md = write_report(build_dir, gates, time.perf_counter() - started, identity)
     plan = write_backfill_plan(build_dir, gates)
     hard_fail = [g for g in gates if g["level"] == "硬" and g["state"] == "FAIL"]
     print(json.dumps({

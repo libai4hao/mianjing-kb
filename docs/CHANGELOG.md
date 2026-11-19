@@ -8,6 +8,12 @@
 
 ## 2026-11-19
 
+- **cluster 99 区 gate 收紧**：文件级 `strong` 需每条 99 题直接匹配池题（≥0.92，不用 single-linkage
+  传递）、池样本账本状态合法、单向答案覆盖、匹配占比 ≥90% 且答案/文本覆盖达标；其余 `manual`。
+  缓存 key 带版本、失败不缓存、Word 锁文件跳过、`--limit` 结果标 `complete=false` 并写独立文件。
+- **verify_ledger 复核修复**：G5 空 `src_path` 不再被 `Path("")` 判成存在；G4 向量表在但扩展不可加载
+  改 FAIL；G6 schema FAIL 归硬门；skip_log 原因白名单；G1 优先精确源→md 映射；G6b 样本下限 50、
+  weak topic 最少 5 条；报告绑定 db 指纹；backfill_plan 只收 G1/G2。
 - **检索库重建收口**（`e22108b`）：`refresh._counts()` 查向量前加载 `sqlite-vec`；
   失败 summary 增加 `gate_fail_samples`；`refresh --reembed` 在影子库上过 G1–G8 后原子切换
   `面经库.db`，题/向量同数。

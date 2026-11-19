@@ -41,6 +41,8 @@ def corpus(tmp_path, monkeypatch):
     (tmp_path / "99d" / "无关件.md").write_text(
         _doc("Kafka 如何保证消息不重复消费", ANS_DIFF), encoding="utf-8")
     (tmp_path / "99d" / "无题讲义.md").write_text(PAD * 2, encoding="utf-8")
+    monkeypatch.setattr(cl, "load_pool_status", lambda: {
+        "pool/库内.md": {"status": "processed", "gate": None}})
     return {"root": tmp_path, "build": build}
 
 

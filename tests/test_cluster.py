@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """cluster 测试：三档阈值行为 + 端到端（临时语料）+ 99 区判定。"""
 import json
 
@@ -65,10 +65,14 @@ def tiny_corpus(tmp_path, monkeypatch):
                   f"内容本身只是占位说明，没有更多信息。" for i, q in enumerate([Q_A2])), encoding="utf-8")
     (tmp_path / "99d" / "重复件.md").write_text(
         "\n".join(f"## {i+1}. {q}\n\n答：这一题答案写得比较长，用来撑过无文本过滤的八十字符阈值，"
-                  f"内容本身只是占位说明，没有更多信息。" for i, q in enumerate([Q_A, Q_B])), encoding="utf-8")
+                  f"内容本身只是占位说明，没有更多信息。" for i, q in enumerate([Q_A, Q_A2])), encoding="utf-8")
     (tmp_path / "99d" / "孤儿.md").write_text(
         "## 1. 完全无关的题目？\n\n答：这一题答案写得比较长，用来撑过无文本过滤的八十字符阈值，"
         "内容本身只是占位说明，没有更多信息。", encoding="utf-8")
+    monkeypatch.setattr(cl, "load_pool_status", lambda: {
+        "pool/库内甲.md": {"status": "processed", "gate": None},
+        "md20/题库乙.md": {"status": "processed", "gate": None},
+    })
     return tmp_path
 
 
@@ -88,3 +92,68 @@ def test_end_to_end_verdict(tiny_corpus, tmp_path, monkeypatch):
     assert (build / "cluster_pending.csv").exists()
     assert (build / "cluster_sample50.md").exists()
 
+
+def _corpus(tmp_path, monkeypatch, pool_body: str, q99_body: str, status="processed"):
+    build = tmp_path / "build"
+    build.mkdir()
+    monkeypatch.setattr(cl.config, "CORPUS_ROOT", tmp_path)
+    monkeypatch.setattr(cl.config, "BUILD_DIR", build)
+    monkeypatch.setattr(cl, "POOL_TOPS", ["pool"])
+    monkeypatch.setattr(cl, "DIR99", "99d")
+    monkeypatch.setattr(cl, "DIR20", "md20")
+    for d in ("pool", "99d", "md20"):
+        (tmp_path / d).mkdir()
+    (tmp_path / "pool" / "池.md").write_text(pool_body, encoding="utf-8")
+    (tmp_path / "99d" / "件.md").write_text(q99_body, encoding="utf-8")
+    monkeypatch.setattr(cl, "load_pool_status", lambda: {
+        "pool/池.md": {"status": status, "gate": None}})
+    return build, tmp_path
+
+
+def test_single_match_in_large_file_is_manual_not_strong(tmp_path, monkeypatch):
+    """200 题里只命中 1 题：占比 0.5% < 90%，整件不得标 strong（review HIGH）。"""
+    _corpus(tmp_path, monkeypatch,
+                       f"## 1. {Q_A}\n\n答：" + "池答案" * 30,
+                       "\n".join(f"## {i+1}. 完全无关题{i}？\n\n答：" + "答案" * 30
+                                 for i in range(10)) + f"\n## 11. {Q_A}\n\n答：" + "答案" * 30)
+    out = tmp_path / "r.json"
+    assert cl.main(["--no-cache", "--out", str(out)]) == 0
+    d = {v["rel"]: v for v in json.loads(out.read_text(encoding="utf-8"))["verdict_detail"]}
+    rec = d["99d\\件.md"]
+    assert rec["verdict"] == "manual"
+    assert rec["match_ratio"] < cl.MIN_MATCH_RATIO
+    assert any(r.startswith("match_ratio") for r in rec["reasons"])
+
+
+def test_pool_answer_missing_is_conflict_not_strong(tmp_path, monkeypatch):
+    """99 有答案、池版本没识别出答案 → 不能判 strong（删除会丢答案）。"""
+    pool_body = f"## 1. {Q_A}\n\n答：无\n\n" + "补充说明文字" * 20
+    q99_body = f"## 1. {Q_A}\n\n答：" + "这是 99 区完整答案" * 20
+    _corpus(tmp_path, monkeypatch, pool_body, q99_body)
+    out = tmp_path / "r.json"
+    assert cl.main(["--no-cache", "--out", str(out)]) == 0
+    rec = {v["rel"]: v for v in json.loads(out.read_text(encoding="utf-8"))["verdict_detail"]}["99d\\件.md"]
+    assert rec["verdict"] == "manual"
+    assert rec["answer_conflicts"] and rec["answer_conflicts"][0]["why"] == "pool_answer_missing_or_differs"
+
+
+def test_invalid_pool_status_blocks_strong(tmp_path, monkeypatch):
+    """池样本在账本里是 rejected：即便题面同文也不能当删除见证。"""
+    body = f"## 1. {Q_A}\n\n答：" + "答案" * 30
+    _corpus(tmp_path, monkeypatch, body, body, status="rejected")
+    out = tmp_path / "r.json"
+    assert cl.main(["--no-cache", "--out", str(out)]) == 0
+    rec = {v["rel"]: v for v in json.loads(out.read_text(encoding="utf-8"))["verdict_detail"]}["99d\\件.md"]
+    assert rec["verdict"] == "manual"
+    assert any(r.startswith("pool_status_invalid") for r in rec["reasons"])
+
+
+def test_default_limit_does_not_overwrite_full_result(tiny_corpus, tmp_path, monkeypatch):
+    """无 --out + --limit 时，调试结果不得覆盖 cluster_result.json（review）。"""
+    build = tiny_corpus / "build"
+    (build / "cluster_result.json").write_text('{"old":1}', encoding="utf-8")
+    assert cl.main(["--no-cache", "--limit", "1"]) == 0
+    assert json.loads((build / "cluster_result.json").read_text(encoding="utf-8")) == {"old": 1}
+    dbg = json.loads((build / "cluster_result_limit1.json").read_text(encoding="utf-8"))
+    assert dbg["complete"] is False and dbg["limit"] == 1
+    assert (build / "cluster_pending_limit1.csv").exists()

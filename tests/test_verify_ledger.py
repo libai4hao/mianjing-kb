@@ -441,21 +441,21 @@ def test_g6b_warn_no_overlap(tmp_path):
 
 
 def test_g6b_pass_and_fail(tmp_path):
-    """20 matched：全对 PASS；5 题标错 → 0.75 FAIL + weak_topics + 混淆矩阵。"""
+    """50 matched：全对 PASS；12 题标错 → 0.76 FAIL + weak_topics + 混淆矩阵。"""
     conn = _golden_db(tmp_path)
-    for i in range(20):
+    for i in range(50):
         _pair(conn, i)
     conn.commit()
     g = vl.g6b_golden(conn)
     assert g["state"] == "PASS" and g["detail"]["topic_acc"] == 1.0
     assert g["detail"]["weak_topics"] == []
-    for i in range(5):
+    for i in range(12):
         conn.execute("UPDATE labels_staging SET topic='数据库' WHERE qid=?", (1000 + i,))
     conn.commit()
     g2 = vl.g6b_golden(conn)
-    assert g2["state"] == "FAIL" and g2["detail"]["topic_acc"] == 0.75
+    assert g2["state"] == "FAIL" and g2["detail"]["topic_acc"] == 0.76
     assert g2["detail"]["weak_topics"] == ["JVM"]
-    assert g2["detail"]["matrix"]["JVM"] == {"数据库": 5, "JVM": 15}
+    assert g2["detail"]["matrix"]["JVM"] == {"数据库": 12, "JVM": 38}
     conn.close()
 
 
@@ -576,3 +576,32 @@ def test_g7_flags_missing_doc_link(tmp_path):
     g = vl.g7_docs(tmp_path, actual_tests=0)
     assert g["state"] == "WARN"
     assert [x["kind"] for x in g["fails"]] == ["readme_doc_missing"]
+
+def test_g1_invalid_skip_reason_does_not_exempt(mini_env):
+    """空/拼错的 skip reason 不能放行；必须报 skip_reason_invalid。"""
+    out = mini_env["out"]
+    out.execute("DELETE FROM questions WHERE qid=2")
+    out.commit()
+    g = vl.g1_coverage(mini_env["kb"], out, {"02-Java进阶/乙.pdf": "typo_reason"})
+    assert g["state"] == "FAIL"
+    assert any(f.get("skip_reason") == "typo_reason" for f in g["fails"])
+
+
+def test_g5_empty_src_path_counts_as_missing(mini_env):
+    """Path('') == Path('.') 会把空 src_path 判成存在；必须先判空。"""
+    kb = mini_env["kb"]
+    kb.execute("UPDATE source_documents SET src_path='' WHERE file_name='甲.pdf'")
+    kb.commit()
+    g = vl.g5_disk(kb, mini_env["corpus"], mini_env["build"])
+    assert any(f["kind"] == "classified_src_missing" for f in g["fails"])
+
+
+def test_g6_schema_fail_is_hard_level(mini_env):
+    """G6 的 schema 不合格必须能进 hard_fail（不再用 '软→硬' 裸字符串）。"""
+    kb = mini_env["kb"]
+    kb.execute("INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, provider, "
+               "model, redacted, latency_ms, tokens, labeled_at) VALUES "
+               "(2,'','玄学',9,'oops','p','m',0,1,1,'now')")
+    kb.commit()
+    g = vl.g6_label(kb)
+    assert g["state"] == "FAIL" and g["level"] == vl.LEVEL_HARD
