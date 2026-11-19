@@ -231,7 +231,7 @@ def _is_list_item_question(qtext: str) -> bool:
         return True
     if _is_question_heading(s):
         return True
-    if re.match(r'^(?:如何|怎么|为什么|什么|哪些|哪几|是否|能否|请|谈谈|说说|介绍|解释|实现|写|设计|比较|分析|给定|已知|求|编写|编程|打印|输出|输入|判断|找出|统计|生成)', s):
+    if re.match(r'^(?:如何|怎么|为什么|什么|哪些|哪几|是否|能否|请|谈谈|说说|介绍|解释)', s):
         return True
     if re.match(r'^通过.{0,20}(?:生成|填充|输出|计算|求|实现)', s):
         return True
@@ -241,6 +241,9 @@ def _is_list_item_question(qtext: str) -> bool:
 def _looks_section_line(s: str) -> bool:
     """面经里的“阿里二面/总监面/HR面/基础篇”等无编号章节标题。"""
     if not s or len(s) > 40 or re.search(r'[?？]', s):
+        return False
+    # 完整句子（带句读）是正文，不是章节标题；否则“面试官都喜欢这么问”会重置题号。
+    if re.search(r'[。，；!！]', s):
         return False
     if RE_LIST_ITEM.match(s) or RE_KPOINT.match(s):
         return False
@@ -286,7 +289,21 @@ def _is_qline(s: str) -> bool:
     s = strip_bold(s.strip())
     if RE_QEND.search(s):
         return True
+    # 结论/过渡/说明句里的问词不是题干。
+    if re.match(r'^(?:这就是|所以|因此|也就是说|综上|总之|那么|可见|于是|'
+                r'至于|先解释|首先|其次|再次|然后|最后|先说|再说|接着|需要)', s):
+        return False
+    if re.match(r'^(?:的|了|是|在|和|与|及|并|而|但|就|也|都|其|此|该)\s', s):
+        return False
+    if re.match(r'^[A-Za-z][A-Za-z0-9_\s]*是', s):
+        return False
     return RE_INTERROGATIVE.search(s[:8]) is not None
+
+
+def _trim_question_text(s: str) -> str:
+    """一行里“问句 + 紧跟的答案说明”只保留问句部分。"""
+    m = re.match(r'^(.{1,120}?[?？])\s*(.{4,})$', s.strip())
+    return m.group(1) if m else s.strip()
 
 
 def _looks_questionish(s: str) -> bool:
@@ -309,6 +326,13 @@ def _is_question_heading(s: str) -> bool:
     if s.endswith(("：", ":")) and re.search(r'(?:如下|以下|包括|几点|几个方面)', s):
         return False
     if re.match(r'^(?:两者|二者|下面|下列|主要|具体来看|简单来说|也就是说|需要注意)', s):
+        return False
+    # 答案里的枚举/说明句，不是标题：“首先说清楚什么是缓存”。
+    if re.match(r'^(?:首先|其次|再次|然后|最后|先说|再说|接着|至于|先解释)', s):
+        return False
+    if re.match(r'^(?:的|了|是|在|和|与|及|并|而|但|就|也|都|其|此|该)\s', s):
+        return False
+    if re.match(r'^[A-Za-z][A-Za-z0-9_\s]*是', s):
         return False
     if _is_qline(s) or RE_KPOINT.match(s):
         return True
@@ -381,6 +405,12 @@ def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
         return nested[0], nested[1], "题号"
     if RE_DECIMAL.match(line):
         return None
+    # 中文逗号题号：`54，jsp静态包含和动态包含的区别`
+    m = re.match(r'^\s*(\d{1,3})\s*[，,]\s*(.+)$', line)
+    if m:
+        body = m.group(2).strip()
+        if re.search(r'[?？]', body) or _is_question_heading(body):
+            return int(m.group(1)), body, "题号"
     for pat in (RE_NUM_DOT, RE_NUM_PAREN, RE_NUM_TAIL):
         m = pat.match(line)
         if m:
@@ -487,6 +517,20 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         if not s:
             prev_blank = True
             last_problem_mark = False
+            # 空行后如果接的是列表项，说明列表还在继续；
+            # 上一行没有句末标点（跨行断句）时也视为列表续行。
+            j = i + 1
+            while j < n and not lines[j].strip():
+                j += 1
+            nxt = lines[j].strip() if j < n else ""
+            prev_open = bool(lines[i - 1].strip() and not lines[i - 1].strip().endswith(
+                ("。", "！", "？", "；", ".", "!", "?", ";", "）", ")")))
+            nxt_is_list = bool(nxt and RE_LIST_ITEM.match(nxt) and not nxt.startswith("#"))
+            nxt_is_q = bool(nxt and (_is_qline(nxt) or _is_question_heading(nxt)))
+            if nxt_is_q:
+                prev_open = False
+            if not (nxt_is_list or prev_open):
+                list_active = False
             continue
         q = _match_question(ln)
         if q is None:
@@ -526,8 +570,8 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             # 列表引导行（“如下/以下/包括/四个基本要素/BATJ 的 4 个点”）
             if len(s) <= 160 and RE_LIST_LEAD.search(s) and not RE_LIST_ITEM.match(s):
                 list_pending = True
-            if not RE_LIST_ITEM.match(s):
-                list_active = False
+            # 列表项可能跨行（“过 / 废的方法。”），非编号续行不能结束列表状态。
+            # 真正的题边界会在下方 new_q 分支重置 list_active。
             # v2 增强（2026-11-17）：问题N 纯标记行（`问题一` / `问题一：`）→ 武装下一行
             pm = RE_PROBLEM_N.match(s)
             if pm and not pm.group(2).strip():
@@ -543,13 +587,15 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                     and not inner.rstrip().endswith(("：", ":"))
                     and not _is_codeish(inner)
                     and _is_qline(inner)):
-                bounds.append({"line": i, "parts": [(None, inner)], "style": "问句"})
+                bounds.append({"line": i, "parts": [(None, _trim_question_text(inner))], "style": "问句"})
                 list_pending = False
                 list_active = False
             last_problem_mark = False
             prev_blank = False
             continue
         qid, qtext, style = q
+        qtext = re.sub(r'^\d{1,3}\s*[，,]\s*', '', qtext)
+        qtext = qtext.replace("**", "").strip().lstrip("、，,。；;：:")
         if style == "标题":
             # 章节标题（“MyBatis 面试题”“Java 并发编程（一）”）不是题；只有带
             # 提问语义的标题（“什么是 JVM？”）才作为标题题块。
@@ -606,6 +652,15 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         implicit_list = (last_qid is not None and prev_blank and not md_num_heading
                          and (qid <= last_qid or last_qid == 0)
                          and not _is_list_item_question(qtext))
+        # 已进入编号列表：后续编号行默认是答案列表项；
+        # 只有明确以问号收尾（“2. 什么是…？”）才保留为题。
+        if (list_active and RE_LIST_ITEM.match(s) and not md_num_heading
+                and not qtext.rstrip().endswith(("?", "？"))):
+            list_active = True
+            list_pending = False
+            prev_blank = False
+            last_problem_mark = False
+            continue
         if (not md_num_heading and (list_active or list_pending or implicit_list)
                 and not _is_list_item_question(qtext)):
             list_active = True
@@ -843,6 +898,10 @@ def _split_answers(a_text: str, a_base: int, a_segs: list | None = None):
     new_items = []
     for (idxs, s, e), seg in zip(segs[1:], out[1:]):
         first_line = strip_bold(seg.split("\n", 1)[0].strip())   # 题干剥粗体壳
+        # 一行里“问句 + 紧跟的答案说明”只取问句部分作题干。
+        qm = re.match(r'^(.{1,120}?[?？])\s*(.{4,})$', first_line)
+        if qm:
+            first_line = qm.group(1)
         m = RE_KPOINT.match(first_line)
         new_items.append({"q": (m.group(1) if m else first_line)[:200], "a": seg,
                           "style": "考点" if m else "问句", "_idxs": idxs})
@@ -907,16 +966,37 @@ def chunk_v2(md_text: str) -> Dict:
         for e in extra:
             add(e["q"], e["a"], e["span"], e["style"])
 
-    # 同一文档内完全重复的题干（网页标题与正文题号重复）保留答案更长的一条，
-    # 避免“参考：URL + 题号”修复后出现空答案副本。
+    # 同一文档内完全重复的题干（网页标题与正文题号重复）只做保守合并：
+    # 空答案 / 极短答案被更完整答案替换；两条都有实质答案时都保留，
+    # 避免不同章节下的同题异答被吞掉。
     dedup: Dict[str, dict] = {}
+    items_after: List[dict] = []
     for it in items:
         key = re.sub(r'\s+', '', it["q"]).lower()
         if key not in dedup:
             dedup[key] = it
-        elif len(it["a"]) > len(dedup[key]["a"]):
+            items_after.append(it)
+            continue
+        old = dedup[key]
+        if not old["a"].strip() and it["a"].strip():
+            items_after[items_after.index(old)] = it
             dedup[key] = it
-    items = list(dedup.values())
+        elif old["a"].strip() and not it["a"].strip():
+            continue
+        elif old["a"].strip() and it["a"].strip():
+            # 两条都有实质答案：若一条是另一条的前缀/子串（目录摘要 vs 正文答案），
+            # 保留更长的一条；否则都保留，交给后续 q_norm 去重/人工复核。
+            old_n = re.sub(r'\s+', '', old["a"]).lower()
+            new_n = re.sub(r'\s+', '', it["a"]).lower()
+            if old_n and new_n and (old_n in new_n or new_n in old_n):
+                if len(new_n) > len(old_n):
+                    items_after[items_after.index(old)] = it
+                    dedup[key] = it
+            else:
+                items_after.append(it)
+        else:
+            continue
+    items = items_after
 
     # probe：孤立代码区始终暴露；items 为空时再给 1–3 个候选区块
     probe = []

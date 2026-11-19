@@ -343,5 +343,112 @@ def test_h1_numbered_heading_is_a_question_boundary():
     assert [it["q"] for it in v2["items"]] == ["什么是A？", "什么是B？"]
 
 
+def test_duplicate_question_with_substantive_answers_is_kept():
+    """同一文档重复题干如果两条都有实质答案，不能直接合并掉一条。"""
+    md = """## 什么是 A？
+
+答案一，比较短。
+
+## 什么是 A？
+
+答案二，内容明显更长，不能因为题干相同就丢掉。
+"""
+    v2 = chunker.chunk_v2(md)
+    same = [it for it in v2["items"] if it["q"] == "什么是 A？"]
+    assert len(same) == 2
+
+
+def test_question_glued_with_answer_text_is_trimmed():
+    md = """## 1、自动装箱
+
+看看输出结果。
+
+为什么会出现这样的结果？输出结果表明 i1 和 i2 指向同一个对象。
+
+## 2、下一题
+
+答案。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [it["q"] for it in v2["items"]]
+    assert "为什么会出现这样的结果？" in qs
+    assert all("输出结果表明" not in q for q in qs)
+
+
+def test_sentence_with_interview_word_does_not_reset_list_state():
+    md = """## 39、说说Hashtable 与 HashMap 的区别
+
+本来不想这么写标题的，但是无奈，面试官都喜欢这么问 HashMap。
+
+1. 出生的版本不一样，Hashtable 出生于 JDK 1.0。
+2. 都实现了 Map、Cloneable、Serializable。
+
+## 40、下一题是什么？
+
+答案。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [it["q"] for it in v2["items"]]
+    assert qs == ["说说Hashtable 与 HashMap 的区别", "下一题是什么？"]
+    assert "出生的版本不一样" in v2["items"][0]["a"]
+
+
+def test_conclusion_with_question_word_is_not_a_question():
+    md = """## HashMap 的长度为什么是 2 的 N 次方？
+
+因为扩容时用位运算替代取模。
+
+这就是为什么 HashMap 的长度需要 2 的 N 次方了。
+"""
+    v2 = chunker.chunk_v2(md)
+    assert [it["q"] for it in v2["items"]] == ["HashMap 的长度为什么是 2 的 N 次方？"]
+
+
+def test_numbered_list_survives_blank_lines():
+    md = """## 1、说说实现多线程有几种方法
+
+创建线程的常用三种方式：
+
+1. 继承Thread类
+
+2. 实现Runnable接口
+
+3. 实现Callable接口
+
+## 2、下一题
+
+答案。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [it["q"] for it in v2["items"]]
+    assert qs == ["说说实现多线程有几种方法", "下一题"]
+    assert "实现Runnable接口" in v2["items"][0]["a"]
+
+
+def test_numbered_list_survives_wrapped_continuation_lines():
+    md = """## 2、如何停止一个正在运行的线程
+
+1、使用退出标志，使线程正常退出。
+
+2、使用stop方法强行终止，但是不推荐这个方法，因为stop和suspend一样都是过
+
+废的方法。
+
+3、使用interrupt方法中断线程。
+
+## 3、下一题
+
+答案。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [it["q"] for it in v2["items"]]
+    assert qs == ["如何停止一个正在运行的线程", "下一题"]
+    assert "使用interrupt方法中断线程" in v2["items"][0]["a"]
+
+
+
+
+
+
 
 
