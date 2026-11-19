@@ -264,6 +264,11 @@ def prepare(cfg: dict) -> dict:
     return plan
 
 
+def _llm_key(cfg: dict) -> str:
+    """优先 config.llm.key；其次用户环境变量 LLM_KEY（key 不进仓库）。"""
+    return str((cfg.get("llm") or {}).get("key") or os.environ.get("LLM_KEY") or "")
+
+
 def _env(cfg: dict) -> dict:
     root = Path(cfg["pilot_root"])
     env = os.environ.copy()
@@ -276,12 +281,13 @@ def _env(cfg: dict) -> dict:
         "PYTHONIOENCODING": "utf-8",
     })
     llm = cfg.get("llm") or {}
-    if llm.get("key"):
+    key = _llm_key(cfg)
+    if key:
         env.update({
             "LLM_PROVIDER": str(llm.get("provider") or "online"),
             "LLM_BASE": str(llm.get("base") or ""),
             "LLM_MODEL": str(llm.get("model") or ""),
-            "LLM_KEY": str(llm["key"]),
+            "LLM_KEY": key,
             "LLM_CONCURRENCY": str(llm.get("concurrency") or 1),
             "LLM_PRICE": str(llm.get("price") or "0,0"),
         })
@@ -323,9 +329,9 @@ def run(cfg: dict, with_label: bool = False) -> dict:
                          "--db", str(root / "build" / "面经库.db"), "--k", "10", "--mode", "kw"]),
     ]
     if with_label:
-        key = (cfg.get("llm") or {}).get("key")
+        key = _llm_key(cfg)
         if not key:
-            raise RuntimeError("with_label 需要先填配置 llm.key")
+            raise RuntimeError("with_label 需要先填配置 llm.key 或设置环境变量 LLM_KEY")
         steps += [
             ("label_check", [py, "-m", "mianjing_kb.cli", "label", "--check"]),
             ("label_dry_run", [py, "-m", "mianjing_kb.cli", "label", "--dry-run",
@@ -350,8 +356,8 @@ def label(cfg: dict) -> dict:
     db = root / "build" / "kb.sqlite"
     if not db.exists():
         raise RuntimeError(f"试跑库不存在，先执行 prepare：{db}")
-    if not (cfg.get("llm") or {}).get("key"):
-        raise RuntimeError("label 需要先填配置 llm.key")
+    if not _llm_key(cfg):
+        raise RuntimeError("label 需要先填配置 llm.key 或设置环境变量 LLM_KEY")
     env = _env(cfg)
     log = root / "build" / "pilot_run.log"
     py = cfg["python"]
