@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """gate 的端到端行为：健康 md 通过，坏字体 md 判 fail(乱码)，短文判 fail(过短)。
 
 P0-2 适配（2026-11-17 审核）：gate.py 改三态（pass/review/fail）+ rows 结构后，
@@ -53,3 +53,117 @@ def test_sentinel_data_shape():
     assert len({rel for rel, _ in CASES}) == 13                      # 无重复
     assert all(w in ("pass", "review", "fail") for _, w in CASES)
     assert all(w in ("同件", "不同件") for w, _a, _b in PAIRS)
+
+
+def test_metrics_ignores_whitespace_page_markers():
+    from mianjing_kb.gate import metrics
+    raw = "===== page 1 =====\n" + "中文内容" * 30 + "\n" * 200
+    m = metrics(raw)
+    assert m["chars"] == 120          # 空白 / 分页标记不计入长度
+    assert m["fixed"] >= 0            # 不再用 -1 冒充计数
+
+
+def test_bad_chars_allow_greek_emoji_but_reject_box_drawing():
+    from mianjing_kb.gate import metrics
+    assert metrics("λ Θ Ω μ " * 20)["bad"] == 0.0
+    assert metrics("😀" * 10)["bad"] == 0.0
+    assert metrics("■ □ " * 10)["bad"] == 1.0
+
+
+def test_md_path_keeps_dotted_stem(tmp_path, monkeypatch):
+    from mianjing_kb import gate
+    monkeypatch.setattr(gate.config, "QUESTION_MD_DIR", tmp_path)
+    e = {"category": "题库", "topic": "Java", "title": "v3.0-JavaGuide面试突击版.pdf",
+         "rel": "x.pdf"}
+    assert gate.md_path_for(e).name == "v3.0-JavaGuide面试突击版.md"
+
+
+def test_resolve_md_uses_hash_variant(tmp_path, monkeypatch):
+    from mianjing_kb import gate
+    monkeypatch.setattr(gate.config, "QUESTION_MD_DIR", tmp_path)
+    target = tmp_path / "题库" / "Java" / "foo__deadbeef.md"
+    write(target, "中文" * 100)
+    e = {"category": "题库", "topic": "Java", "title": "foo.pdf", "rel": "x.pdf",
+         "doc_hash": "deadbeef00"}
+    assert gate.resolve_md(e, {}) == target
+
+
+def test_resolve_md_does_not_bind_unrelated_same_name(tmp_path, monkeypatch):
+    from mianjing_kb import gate
+    monkeypatch.setattr(gate.config, "QUESTION_MD_DIR", tmp_path / "md")
+    other = tmp_path / "other" / "README.md"
+    write(other, "无关内容")
+    e = {"category": "题库", "topic": "Java", "title": "README.pdf", "rel": "x.pdf",
+         "doc_hash": "deadbeef00"}
+    idx = {"readme.md": [str(other)]}
+    assert gate.resolve_md(e, idx) is None
+
+
+def test_collisions_ignore_missing_and_duplicate_log_rows():
+    from mianjing_kb.gate import collisions_of
+    missing = [dict(rel="a.pdf", md="x.md", exists=False, doc_hash="a"),
+               dict(rel="b.pdf", md="x.md", exists=False, doc_hash="b")]
+    assert collisions_of(missing) == []
+    dup = [dict(rel="a.pdf", md="x.md", exists=True, doc_hash="a"),
+           dict(rel="a.pdf", md="x.md", exists=True, doc_hash="a")]
+    assert collisions_of(dup) == []
+    same = [dict(rel="a.pdf", md="x.md", exists=True, doc_hash="a"),
+            dict(rel="b.pdf", md="x.md", exists=True, doc_hash="a")]
+    assert collisions_of(same)[0]["kind"] == "同内容重复"
+    real = [dict(rel="a.pdf", md="x.md", exists=True, doc_hash="a"),
+            dict(rel="b.pdf", md="x.md", exists=True, doc_hash="b")]
+    assert collisions_of(real)[0]["kind"] == "真覆盖(丢内容)"
+
+
+def test_sentinel_all_miss_is_failure(tmp_path, monkeypatch, capsys):
+    from mianjing_kb import gate
+    monkeypatch.setattr(gate.config, "BUILD_DIR", tmp_path)
+    monkeypatch.setattr(gate.config, "QUESTION_MD_DIR", tmp_path / "md")
+    monkeypatch.setattr(gate.config, "CORPUS_ROOT", tmp_path / "corpus")
+    (tmp_path / "registry.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(gate, "CASES", [(r"missing\a.pdf", "pass")])
+    monkeypatch.setattr(gate, "PAIRS", [])
+    assert gate.run_sentinel() is False
+    assert "防护触发" in capsys.readouterr().out
+
+
+def test_audit_skips_unregistered_rows(tmp_path, monkeypatch):
+    from mianjing_kb import gate
+    build = tmp_path / "build"
+    corpus = tmp_path / "corpus"
+    md_root = tmp_path / "md"
+    build.mkdir(); corpus.mkdir(); md_root.mkdir()
+    monkeypatch.setattr(gate.config, "BUILD_DIR", build)
+    monkeypatch.setattr(gate.config, "CORPUS_ROOT", corpus)
+    monkeypatch.setattr(gate.config, "QUESTION_MD_DIR", md_root)
+    e = {"rel": "src\\foo.pdf", "title": "foo.pdf", "category": "题库", "topic": "Java"}
+    (build / "registry.json").write_text(json.dumps([e], ensure_ascii=False), encoding="utf-8")
+    (build / "convert_log.json").write_text(json.dumps([
+        {"rel": "src\\foo.pdf", "ok": True},
+        {"rel": "src\\missing.pdf", "ok": True},
+    ], ensure_ascii=False), encoding="utf-8")
+    write(md_root / "题库" / "Java" / "foo.md", "中文内容" * 60)
+    report = gate.run_audit()
+    assert report["summary"]["converted"] == 2
+    assert report["summary"]["examined"] == 1
+    assert report["summary"]["skipped_no_registry"] == 1
+
+
+def test_gate_and_textmetrics_definitions_do_not_drift():
+    from mianjing_kb.gate import cross_check
+    raw = "# 标题\n\n" + "中文内容，包含标点。ABC 123 " * 30
+    c = cross_check(raw)
+    assert c["cjk_delta"] < 0.02
+    assert c["visible_delta"] < 40
+
+
+def test_extract_gate_filter_blocks_review_and_fail():
+    from mianjing_kb.extract import _filter_by_gate
+    statuses = ({"a": "garbled"}, {"b": "low_cjk", "c": "pass"})
+    kept, skipped = _filter_by_gate([("a", "a"), ("b", "b"), ("c", "c"), ("d", "d")],
+                                    statuses, require_gate=False)
+    assert [x[0] for x in kept] == ["c", "d"]
+    assert skipped == {"garbled": 1, "low_cjk": 1}
+    kept, skipped = _filter_by_gate([("a", "a"), ("d", "d")], statuses, require_gate=True)
+    assert kept == []
+    assert skipped == {"garbled": 1, "ungated": 1}

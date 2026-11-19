@@ -219,6 +219,34 @@ def store(conn, doc_hash: str, rows: list[dict]) -> int:
     return cur.rowcount
 
 
+def _gate_statuses(conn) -> tuple[dict, dict]:
+    """source_documents.gate_result + gate_results 最新 verdict，供 T30 前置过滤。"""
+    src = {r["doc_hash"]: r["gate_result"] for r in conn.execute(
+        "SELECT doc_hash, gate_result FROM source_documents "
+        "WHERE gate_result IS NOT NULL AND gate_result <> ''")}
+    latest = {}
+    for r in conn.execute("SELECT doc_hash, verdict, checked_at FROM gate_results "
+                          "WHERE doc_hash IS NOT NULL ORDER BY checked_at"):
+        latest[r["doc_hash"]] = r["verdict"]
+    return src, latest
+
+
+def _filter_by_gate(pool, statuses, require_gate: bool):
+    """T30：只放行 pass；review/fail 记原因跳过。--require-gate 时无台账也跳过。"""
+    src, latest = statuses
+    kept, skipped = [], {}
+    for doc_hash, p in pool:
+        gate = src.get(doc_hash) or latest.get(doc_hash)
+        if gate and gate != "pass":
+            skipped[gate] = skipped.get(gate, 0) + 1
+            continue
+        if not gate and require_gate:
+            skipped["ungated"] = skipped.get("ungated", 0) + 1
+            continue
+        kept.append((doc_hash, p))
+    return kept, skipped
+
+
 def _run(args) -> int:
     conn = db.connect(args.db, create=not (args.dry_run or args.plan))
     if args.stats:
@@ -234,12 +262,16 @@ def _run(args) -> int:
         return 0
 
     pool, mapping = doc_pool(conn)
+    pool_all = pool
+    pool, gate_skipped = _filter_by_gate(pool, _gate_statuses(conn), args.require_gate)
     report_path = write_identity_report(mapping)
     if args.plan:
         print(json.dumps({
-            "pool_docs": len(pool),
+            "pool_docs": len(pool_all),
+            "pool_after_gate": len(pool),
+            "skipped_gate": gate_skipped,
             "md_mapped_sources": len(mapping.by_doc),
-            "source_only": len(pool) - len(mapping.by_doc) - len(mapping.orphans),
+            "source_only": len(pool_all) - len(mapping.by_doc) - len(mapping.orphans),
             "orphan_md": len(mapping.orphans),
             "mapping": {k: v for k, v in mapping.report.items()
                         if k not in ("mapping", "conflicts", "duplicates", "orphans_list")},
@@ -294,7 +326,7 @@ def _run(args) -> int:
     close_word()        # Word COM 只在抽取阶段用；批次结束立刻释放，不带着宿主进程进落库/统计
     if not args.dry_run:
         # 全量才清孤儿；增量只处理子集，purge 会把未在本次池里的题行误删
-        n_purged = 0 if args.incremental else purge_orphans(conn, {k for k, _ in pool})
+        n_purged = 0 if args.incremental else purge_orphans(conn, {k for k, _ in pool_all})
         n_lost = conn.execute("SELECT COUNT(*) FROM label_facts WHERE q_norm_hash NOT IN "
                               "(SELECT q_norm_hash FROM questions)").fetchone()[0]
         if n_lost:
@@ -307,6 +339,7 @@ def _run(args) -> int:
     print(json.dumps({
         "docs": n_docs, "questions": n_q, "empty_docs": n_empty, "errors": n_err,
         "incremental": args.incremental, "skipped_unchanged": skipped_unchanged,
+        "skipped_gate": gate_skipped,
         "purged_orphan_docs": n_purged if not args.dry_run else 0,
         "label_reattached": n_reattached if not args.dry_run else 0,
         "label_facts_lost": n_lost,
@@ -333,6 +366,8 @@ def main(argv=None) -> int:
                     help="只看身份映射与题池规模（不读正文、不写库）")
     ap.add_argument("--incremental", action="store_true",
                     help="只处理新增/变更文档（按 document_products 的 size/mtime 判定）")
+    ap.add_argument("--require-gate", action="store_true",
+                    help="T30：无 gate 结论的文档也跳过（默认只跳过已知 review/fail）")
     args = ap.parse_args(argv)
     if args.dry_run or args.plan or args.stats:      # 只读，不进写锁
         return _run(args)

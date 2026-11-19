@@ -8,6 +8,21 @@
 
 ## 2026-11-19
 
+- **T30 门禁结论前置到抽题**：`gate --audit` 把三态报告映射为 `gate_results` 四态
+  （`pass/low_cjk/garbled/non_content`）并同步 `source_documents.gate_result`；`extract` 在
+  `doc_pool` 后按 `doc_hash` 过滤，只抽 `pass`，`skipped_gate` 按四态计数，新增
+  `--require-gate`（无台账也跳过）。全量 `purge_orphans` 仍用过滤前身份池，避免门禁跳过误删旧题。
+- **gate.py 静默误判修复**：报告先落盘再写库；`--strict` 在真覆盖或异常率超限时返回 1；
+  `--audit`/`--md-dir` 互斥；哨兵全 MISS 触发防护失败；`run_audit` 统一走 `resolve_md`
+  （按 `doc_hash` 前 8 位选变体，通用同名文件只允许同主题目录或含 doc_hash 才绑定）；
+  `collisions_of` 过滤缺失产物、按 rel 去重、改用行内 `doc_hash`；`read_text` 改为
+  `utf-8-sig → gb18030 → replace` 并记录实际编码；长度/CJK/异常字符按可见字符统计，
+  去掉分页标记/代码围栏/Markdown 噪声；白名单放行 emoji/希腊/假名/CJK 扩展，单列
+  `U+25A0–25FF` 方框乱码；`fixed` 改为实际 NFKC 改写数；修 `md_path_for` 带点 stem 截断、
+  `md_index` 大小写、`gate_results` stale 清理、`pix_fp` 增加 `page_count`。
+- **文档同步**：`docs/19` 增 T30 门禁前置节点与四态映射；`docs/33` 更新 gate/extract
+  CLI、模块职责、`gate_results`/`source_documents` 数据表与已知边界；`docs/22`、`docs/32`、
+  `docs/项目审核报告/待办清单-2026-11-19.md` 同步 T30 状态。
 - **canonical 数据安全与增量修复**：增量候选只更新 `pending` 行，`approved/rejected` 不再被
   重置；全量重建保留 `merge_candidates`，`canonical_id` 按成员重叠粘性绑定并回写旧 ID；
   增量默认阈值对齐全量 `--jac 0.7`（0.65–0.7 候选），新增 `--candidates/--approve/--reject/
