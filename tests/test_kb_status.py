@@ -5,7 +5,7 @@ import json
 import pytest
 
 from mianjing_kb import status as ks
-from mianjing_kb.kb import config, db as kbdb
+from mianjing_kb.kb import config, db as kbdb, wlock
 
 
 @pytest.fixture()
@@ -83,3 +83,25 @@ def test_render_text_contains_sections(mini_env):
     text = ks.render_text(ks.collect())
     for section in ("[源]", "[处理]", "[题]", "[打标]", "[检索库]", "[门禁]"):
         assert section in text
+
+
+def test_lock_summary_ignores_released_permanent_advisory_lock_file(mini_env):
+    """wlock 文件永久保留；释放后不应继续显示为活跃锁。"""
+    build = mini_env
+    with wlock.write_lock("kb", tool="test", build_dir=build):
+        active = ks._lock_summary(build)
+        assert active["kb.lock"]["state"] == "ACTIVE"
+        assert active["kb.lock"]["tool"] == "test"
+
+    # 文件仍然存在，但 OS advisory lock 已释放。
+    assert (build / "locks" / "kb.lock").exists()
+    assert "kb.lock" not in ks._lock_summary(build)
+
+
+def test_lock_summary_keeps_refresh_exclusive_file_visible(mini_env):
+    """refresh.lock 采用 O_EXCL 文件互斥，残留文件仍阻止 refresh，状态页须显示。"""
+    build = mini_env
+    (build / "refresh.lock").write_text("12345", encoding="utf-8")
+    item = ks._lock_summary(build)["refresh.lock"]
+    assert item["state"] == "BLOCKING"
+    assert item["raw"] == "12345"

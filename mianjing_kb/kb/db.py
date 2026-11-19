@@ -520,9 +520,12 @@ def _version_applied(conn: sqlite3.Connection, version: str) -> bool:
 
 
 def _begin_immediate(conn: sqlite3.Connection, retries: int = BEGIN_RETRIES) -> None:
-    """拿写锁开事务；并发进程在 busy_timeout 内排队，抢不到才退避重试。"""
+    """拿写锁开事务；拒绝隐式提交调用方已有事务。"""
     if conn.in_transaction:
-        conn.commit()
+        raise RuntimeError(
+            "cannot begin migration while the connection has an active transaction; "
+            "commit or rollback it explicitly first"
+        )
     for attempt in range(retries):
         try:
             conn.execute("BEGIN IMMEDIATE")

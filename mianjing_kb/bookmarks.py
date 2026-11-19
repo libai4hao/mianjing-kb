@@ -54,7 +54,7 @@ def spans_from_toc(toc: list, page_count: int, file_name: str) -> tuple[int, lis
 
 
 def _run(args) -> int:
-    conn = db.connect(args.db, create=not args.dry_run)
+    conn = db.connect(args.db, create=not args.dry_run, readonly=args.dry_run)
     sql = (
         "SELECT doc_hash, file_name, src_path, dir_path, source_count "
         f"FROM source_documents WHERE ext = '.pdf' AND status = '{status.CLASSIFIED}' "
@@ -120,6 +120,7 @@ def _run(args) -> int:
         "elapsed_s": round(time.perf_counter() - started, 2),
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))
+    conn.close()
     return 0
 
 

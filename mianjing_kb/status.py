@@ -24,7 +24,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, status as st  # noqa: E402
+from mianjing_kb.kb import config, status as st, wlock  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 STALE_SEC = 24 * 3600          # 门禁报告超过一天且库已变，标 STALE
@@ -235,21 +235,41 @@ def _cluster_summary(build_dir: Path) -> dict:
 
 
 def _lock_summary(build_dir: Path) -> dict:
+    """只报告实际阻塞写入的锁；advisory lock 文件可永久存在，不代表锁仍活跃。
+
+    refresh.lock 使用 O_EXCL 文件存在性作为互斥协议，因此即使进程崩溃留下残件，
+    它仍会阻塞下一次 refresh，必须继续展示为 BLOCKING，不能按 advisory lock 探测。
+    """
     out = {}
     for name in ("kb.lock", "online.lock", "refresh.lock"):
         p = build_dir / "locks" / name if name != "refresh.lock" else build_dir / name
         if not p.exists():
             continue
+
+        if name == "refresh.lock":
+            locked, holder = True, None  # O_EXCL：残留文件本身仍阻止 refresh 启动
+        else:
+            locked, holder = wlock.inspect_lock(p)
+            if locked is False:
+                continue
+
         item: dict = {"path": str(p), "age_sec": None}
+        if name == "refresh.lock":
+            item["state"] = "BLOCKING"  # 活跃进程或崩溃残件，二者都会阻止 refresh
+        else:
+            item["state"] = "ACTIVE" if locked is True else "UNKNOWN"
         try:
             item["age_sec"] = int(time.time() - p.stat().st_mtime)
         except OSError:
             pass
-        try:
-            raw = p.read_text(encoding="utf-8").strip()
-            item.update(json.loads(raw) if raw.startswith("{") else {"raw": raw})
-        except (OSError, ValueError):
-            item["raw"] = None
+
+        if name == "refresh.lock":
+            try:
+                item["raw"] = p.read_text(encoding="utf-8").strip()
+            except OSError:
+                item["raw"] = None
+        else:
+            item.update(holder or {})
         out[name] = item
     return out
 

@@ -36,6 +36,21 @@ def test_upsert_and_summary(tmp_path):
     conn.close()
 
 
+def test_upsert_keeps_questions_n_when_not_provided(tmp_path):
+    """映射同步不传 questions_n 时必须保留旧题数；显式 0 才清零。"""
+    conn = kbdb.connect(tmp_path / "kb.sqlite")
+    md = tmp_path / "a.md"
+    md.write_text("题", encoding="utf-8")
+    products.upsert(conn, "h1", md_rel="a.md", md_hash="x", text_source="md",
+                    input_path=md, questions_n=7, extracted_at="now")
+    products.upsert(conn, "h1", md_rel="a.md", md_hash="x", text_source="md", input_path=md)
+    assert products.get(conn, "h1")["questions_n"] == 7
+    products.upsert(conn, "h1", md_rel="a.md", md_hash="x", text_source="md",
+                    input_path=md, questions_n=0, extracted_at="now")
+    assert products.get(conn, "h1")["questions_n"] == 0
+    conn.close()
+
+
 def test_needs_work_detects_new_and_changed(tmp_path):
     conn = kbdb.connect(tmp_path / "kb.sqlite")
     md = tmp_path / "a.md"
@@ -68,6 +83,12 @@ def test_sync_mapping_records_md_and_orphan(tmp_path):
     n = products.sync_mapping(conn, m)
     assert n == 1 and m.by_doc
     assert products.get(conn, "abcd1234ef00")["text_source"] == "md"
+    # 映射同步不得把已有题数清零。
+    products.upsert(conn, "abcd1234ef00", md_rel="题库/甲__abcd1234.md",
+                    md_hash="x", text_source="md", input_path=md, questions_n=7,
+                    extracted_at="now")
+    products.sync_mapping(conn, m)
+    assert products.get(conn, "abcd1234ef00")["questions_n"] == 7
 
     orphan_md = md_root / "题库" / "孤儿.md"
     orphan_md.write_text("1. 孤儿题？\n\n答。", encoding="utf-8")

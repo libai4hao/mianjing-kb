@@ -87,6 +87,38 @@ def _try_os_lock(fd: int) -> bool:
         raise
 
 
+def inspect_lock(path: Path | str) -> tuple[bool | None, dict | None]:
+    """检查 advisory lock 是否正被持有，不创建/删除锁文件，也不改写元数据。
+
+    返回 (locked, holder)：False 表示文件存在但当前无人持锁；True 表示已被持有；
+    None 表示无法可靠探测（例如权限问题）。永久保留的锁文件本身不代表活跃锁。
+    """
+    p = Path(path)
+    if not p.exists():
+        return False, None
+    local = _local_lock(p)
+    if local.locked():
+        return True, _read_holder(p)
+
+    fd = None
+    try:
+        flags = os.O_RDWR
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        fd = os.open(str(p), flags)
+        if _try_os_lock(fd):
+            _unlock(fd)
+            return False, None
+        return True, _read_holder(p)
+    except FileNotFoundError:
+        return False, None
+    except OSError:
+        return None, _read_holder(p)
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _unlock(fd: int) -> None:
     if sys.platform == "win32":
         import msvcrt

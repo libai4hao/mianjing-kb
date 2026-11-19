@@ -207,6 +207,9 @@ def test_incremental_skips_unchanged_and_picks_new(tmp_env, capsys):
     assert extract.main(["--db", str(config.DB_PATH), "--incremental"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["docs"] == 0 and out["skipped_unchanged"] == 1
+    # 跳过不代表清零：未重抽文档的题数必须原样保留。
+    assert conn.execute("SELECT questions_n FROM document_products "
+                        "WHERE doc_hash=?", (h1,)).fetchone()["questions_n"] == 2
 
     # 新文件 → 只处理 1 篇
     _seed_doc(conn, corpus, "b.md", MD_B)
@@ -257,6 +260,9 @@ def test_limit_skips_purge(tmp_env, capsys):
     assert out["purge_skipped"] == "limit" and out["purged_orphan_docs"] == 0
     assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash='deadbeefdeadbeef'"
                         ).fetchone()[0] == 1
+    # 限量抽取同样不得把未处理文档的题数清零。
+    rows = conn.execute("SELECT questions_n FROM document_products").fetchall()
+    assert len(rows) == 2 and all(r["questions_n"] == 2 for r in rows)
 
 
 def test_many_read_errors_skip_purge(tmp_env, capsys):

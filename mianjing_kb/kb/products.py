@@ -53,14 +53,16 @@ def upsert(conn, doc_hash: str, *, md_rel: str | None, md_hash: str | None,
         "ON CONFLICT(doc_hash) DO UPDATE SET "
         " md_rel=excluded.md_rel, md_hash=excluded.md_hash, text_source=excluded.text_source, "
         " gate_verdict=COALESCE(excluded.gate_verdict, document_products.gate_verdict), "
-        " questions_n=COALESCE(excluded.questions_n, document_products.questions_n), "
+        " questions_n=CASE WHEN ? IS NULL THEN document_products.questions_n "
+        "                   ELSE excluded.questions_n END, "
         " input_size=COALESCE(excluded.input_size, document_products.input_size), "
         " input_mtime=COALESCE(excluded.input_mtime, document_products.input_mtime), "
         " extracted_at=COALESCE(excluded.extracted_at, document_products.extracted_at), "
         " indexed_at=COALESCE(excluded.indexed_at, document_products.indexed_at), "
         " updated_at=excluded.updated_at",
-        (doc_hash, md_rel, md_hash, text_source, gate_verdict, questions_n or 0,
-         size, mtime, extracted_at, indexed_at, _now()))
+        (doc_hash, md_rel, md_hash, text_source, gate_verdict,
+         questions_n if questions_n is not None else 0,
+         size, mtime, extracted_at, indexed_at, _now(), questions_n))
 
 
 def needs_work(conn, doc_hash: str, input_path: Path) -> bool:

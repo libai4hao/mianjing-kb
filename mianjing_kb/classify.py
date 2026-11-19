@@ -446,7 +446,8 @@ def run_neighbor_vec(conn, dry_run: bool = False, show: int = 0) -> int:
 
 
 def _run(args) -> int:
-    conn = db.connect(args.db, create=not (args.dry_run or args.stats))
+    read_only = bool(args.dry_run or args.stats)
+    conn = db.connect(args.db, create=not read_only, readonly=read_only)
     rules = Rules()
 
     if args.neighbor:

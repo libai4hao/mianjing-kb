@@ -338,7 +338,8 @@ def _filter_by_gate(pool, statuses, require_gate: bool):
 
 
 def _run(args) -> int:
-    conn = db.connect(args.db, create=not (args.dry_run or args.plan or args.stats))
+    read_only = bool(args.dry_run or args.plan or args.stats)
+    conn = db.connect(args.db, create=not read_only, readonly=read_only)
     if args.stats:
         n = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
         out = {"questions": n,

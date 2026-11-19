@@ -317,3 +317,28 @@ def test_migrate_does_not_replay_applied_versions(tmp_path):
     assert before["applied_at"] == after["applied_at"]
     assert active is False and calls == ["001_init", "002_parent_dir"]
     conn.close()
+
+
+def test_begin_immediate_refuses_to_commit_caller_transaction(tmp_path):
+    """迁移事务辅助函数不得静默提交调用方尚未提交的业务事务。"""
+    import pytest
+
+    conn = db.connect(tmp_path / "kb.sqlite")
+    conn.execute(
+        "INSERT INTO document_products (doc_hash, text_source, questions_n, updated_at) "
+        "VALUES ('pending-tx', 'md', 3, 'now')")
+    assert conn.in_transaction
+
+    with pytest.raises(RuntimeError, match="active transaction"):
+        db._begin_immediate(conn)
+
+    # 拒绝调用不应提交或回滚调用方的事务；由调用方显式处理。
+    assert conn.in_transaction
+    assert conn.execute(
+        "SELECT questions_n FROM document_products WHERE doc_hash='pending-tx'"
+    ).fetchone()[0] == 3
+    conn.rollback()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM document_products WHERE doc_hash='pending-tx'"
+    ).fetchone()[0] == 0
+    conn.close()
