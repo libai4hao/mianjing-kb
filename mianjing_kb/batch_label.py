@@ -90,17 +90,22 @@ TODO_PREDICATE = (f"(q.topic IS NULL OR q.topic = '' "
                   f"OR q.topic = '{config.UNCLASSIFIED}')")
 
 
-def pick_targets(conn, limit: int = 0) -> list[dict]:
+def pick_targets(conn, limit: int = 0, qids: list[int] | None = None) -> list[dict]:
     """待打标：题级 topic 为空/未分类的题（口径=TODO_PREDICATE，docs/15 §3.5 裁切口径）。
 
     优先级：文档级主题弱（空/综合/未分类）的题先打——价值最高（docs/15 §3.5 的
     "先做 4,011 综合级"精神）；文档级主题强的靠后（题级打标是锦上添花）。
+    qids 指定时只打这批题（样本集回归用），按 qid 稳定排序。
     """
     sql = ("SELECT q.qid, q.q_text, q.a_text, q.q_norm_hash FROM questions q "
            "LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash "
-           f"WHERE {TODO_PREDICATE} "
-           "ORDER BY (sd.topic IS NULL OR sd.topic='' OR sd.topic='综合' OR sd.topic='未分类') DESC, "
-           "q.qid")
+           f"WHERE {TODO_PREDICATE} ")
+    if qids:
+        sql += "AND q.qid IN (" + ",".join(str(int(x)) for x in qids) + ") "
+        sql += "ORDER BY q.qid"
+    else:
+        sql += ("ORDER BY (sd.topic IS NULL OR sd.topic='' OR sd.topic='综合' "
+                "OR sd.topic='未分类') DESC, q.qid")
     if limit:
         sql += f" LIMIT {int(limit)}"
     return [dict(r) for r in conn.execute(sql).fetchall()]
@@ -292,13 +297,13 @@ def write_failed_csv(failed_path: Path) -> tuple[Path, int]:
 
 def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
               dry_run: bool = False, failed_path: Path | None = None,
-              label_fn=None) -> dict:
+              label_fn=None, qids: list[int] | None = None) -> dict:
     """并发打标 → staging。resume：staging 已有 qid 跳过；budget：估算成本超限即停。
 
     `label_fn` 可替换单题打标实现（离线规则/手动印入的测试用）；缺省走 LLM。
     标签配置表（taxonomy）在这里一次性加载，避免每题查库。
     """
-    targets = pick_targets(conn, limit)
+    targets = pick_targets(conn, limit, qids=qids)
     staged = {r[0] for r in conn.execute("SELECT qid FROM labels_staging").fetchall()}
     todo = [q for q in targets if q["qid"] not in staged]
     failed_path = failed_path or (Path(config.BUILD_DIR) / "label_failed.jsonl")
@@ -883,6 +888,8 @@ def main(argv=None) -> int:
     ap.add_argument("--check", action="store_true", help="health：配置/连通/待打标数/预算估算")
     ap.add_argument("--dry-run", action="store_true", help="打标但不写 staging（试输出）")
     ap.add_argument("--limit", type=int, default=0, help="最多打标 N 题（试跑）")
+    ap.add_argument("--qids-file", default="",
+                    help="只打指定 qid 清单（每行一个；样本集回归用）")
     ap.add_argument("--budget", type=float, default=10.0, help="预算封顶 ¥（超了自动停，docs/15 §3.5）")
     ap.add_argument("--sample", type=int, default=0, help="从 staging 随机抽 N 条打印（人工抽查）")
     ap.add_argument("--merge", action="store_true", help="G6 复核 + merge 进 questions")
@@ -1032,7 +1039,26 @@ def main(argv=None) -> int:
             out = merge(conn, drop_orphans=args.drop_orphans)
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if out["ok"] else 1
-        out = run_batch(cfg, conn, limit=args.limit, budget=args.budget, dry_run=args.dry_run)
+        qids = None
+        if args.qids_file:
+            p = Path(args.qids_file)
+            if not p.exists():
+                print(json.dumps({"ok": False, "error": f"qids 文件不存在: {p}"},
+                                 ensure_ascii=False, indent=1))
+                return 2
+            raw = p.read_text(encoding="utf-8")
+            try:
+                qids = [int(x) for x in raw.replace(",", " ").split()]
+            except ValueError:
+                print(json.dumps({"ok": False, "error": "qids 文件必须是整数 qid，每行一个"},
+                                 ensure_ascii=False, indent=1))
+                return 2
+            if not qids:
+                print(json.dumps({"ok": False, "error": "qids 文件为空"},
+                                 ensure_ascii=False, indent=1))
+                return 2
+        out = run_batch(cfg, conn, limit=args.limit, budget=args.budget,
+                        dry_run=args.dry_run, qids=qids)
         print(json.dumps(out, ensure_ascii=False, indent=1))
         return 0
     finally:
