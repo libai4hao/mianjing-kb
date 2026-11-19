@@ -108,6 +108,8 @@ def _counts(db_path: Path, out_db: Path) -> dict:
         con = sqlite3.connect(str(db_path))
         out["docs_classified"] = con.execute(
             f"SELECT COUNT(*) FROM source_documents WHERE status='{status.CLASSIFIED}'").fetchone()[0]
+        out["docs_ingested"] = con.execute(
+            f"SELECT COUNT(*) FROM source_documents WHERE status IN {status.sql_in(status.INGESTED)}").fetchone()[0]
         out["docs_total"] = con.execute("SELECT COUNT(*) FROM source_documents").fetchone()[0]
         out["questions"] = con.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
         con.close()

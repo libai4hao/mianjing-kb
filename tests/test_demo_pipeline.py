@@ -13,7 +13,7 @@ def test_demo_pipeline_end_to_end(tmp_path):
     steps = res["steps"]
     assert steps["intake"]["summary"]["actions"]["added"] >= 4      # 5 源件里 1 份是重复
     assert steps["intake"]["summary"]["actions"]["duplicate"] >= 1  # 内容哈希判重生效
-    assert res["counts"]["docs_classified"] >= 5
+    assert res["counts"]["docs_ingested"] >= 5
     assert res["counts"]["questions"] >= 20
     assert res["counts"]["doc_contents"] >= 5
     gates = steps["verify_ledger"]["summary"]["gates"]

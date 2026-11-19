@@ -26,6 +26,8 @@ import hashlib
 import re
 from pathlib import Path
 
+from mianjing_kb.kb import status
+
 HASH_SUFFIX = re.compile(r"(?:__|_)([0-9a-f]{8})$")
 MD_EXTS = (".md", ".txt")
 
@@ -61,10 +63,10 @@ class Mapping:
 
 
 def build(conn, md_root: Path) -> Mapping:
-    """扫 md 目录 + classified 台账，产出映射与报告（纯只读）。"""
+    """扫 md 目录 + 内容池台账（classified/processing/processed），产出映射与报告（纯只读）。"""
     m = Mapping()
     rows = conn.execute(
-        "SELECT doc_hash, file_name FROM source_documents WHERE status='classified'").fetchall()
+        f"SELECT doc_hash, file_name FROM source_documents WHERE status IN {status.sql_in(status.INGESTED)}").fetchall()
     by_prefix: dict[str, list[tuple[str, str]]] = {}
     by_stem: dict[str, list[tuple[str, str]]] = {}
     for r in rows:

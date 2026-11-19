@@ -49,8 +49,8 @@ def test_sql_in_renders_and_validates():
 
 
 def test_groups_semantics():
-    """题池只认 classified；已退役/隔离不进后继记录有效态。"""
-    assert status.EXTRACTABLE == (status.CLASSIFIED,)
+    """题池认内容池三态（含处理中/已处理）；已退役/隔离不进后继记录有效态。"""
+    assert status.EXTRACTABLE == (status.CLASSIFIED, status.PROCESSING, status.PROCESSED)
     assert set(status.RETIRED) == {status.SUPERSEDED, status.ABSENT}
     assert status.QUARANTINED not in status.SUCCESSOR_OK
     assert status.SUPERSEDED not in status.SUCCESSOR_OK

@@ -313,6 +313,64 @@ def _ensure_label_taxonomy(conn: sqlite3.Connection) -> None:
     taxonomy.seed(conn)
 
 
+def _ensure_question_freq_view(conn: sqlite3.Connection) -> None:
+    """014（Q-2，2026-11-19）：见证数口径从 `distinct doc_hash` 改为 `distinct collection`。
+
+    `docs/03` §9.3 一直写"同一 collection 只计 1 个来源"，但 004 建视图时按 doc_hash 计数，
+    同一门课 30 篇会把一道题抬成 30 个见证。本迁移重建视图，并保留 `n_distinct_docs`
+    供旧报表兼容；`collection` 为空的件回退到自身 doc_hash（不能把未知来源合成 1 个）。
+    """
+    conn.execute("DROP VIEW IF EXISTS question_freq")
+    conn.execute(
+        """
+        CREATE VIEW question_freq AS
+        SELECT q.q_norm_hash,
+               MIN(q.q_norm) AS sample_q,
+               COUNT(*) AS n_docs,
+               COUNT(DISTINCT q.doc_hash) AS n_distinct_docs,
+               COUNT(DISTINCT COALESCE(NULLIF(TRIM(sd.collection), ''),
+                                       'doc:' || q.doc_hash)) AS n_distinct_collections
+        FROM questions q
+        LEFT JOIN source_documents sd ON sd.doc_hash = q.doc_hash
+        GROUP BY q.q_norm_hash
+        HAVING COUNT(DISTINCT COALESCE(NULLIF(TRIM(sd.collection), ''),
+                                       'doc:' || q.doc_hash)) >= 2
+        ORDER BY n_distinct_collections DESC
+        """
+    )
+
+
+def _ensure_document_products(conn: sqlite3.Connection) -> None:
+    """015（Q-3，2026-11-19）：document_products 产物台账，支持增量接入。
+
+    一行 = 一个输入身份（源 doc_hash 或孤儿 md 的 `md-mirror:` hash）的**处理结果**：
+    - `text_source`：md | source | orphan（P0-1 单身份下，"题从哪份文本抽的"落成事实）；
+    - `input_size` / `input_mtime`：增量判据（没变就跳过，不重算 hash）；
+    - `questions_n` / `extracted_at`：0 题的件也算"处理过"，否则增量会每次重试；
+    - `indexed_at`：进检索库时间（refresh 写；当前先留 NULL）。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS document_products (
+          doc_hash      TEXT PRIMARY KEY,
+          md_rel        TEXT,
+          md_hash       TEXT,
+          text_source   TEXT NOT NULL,
+          gate_verdict  TEXT,
+          questions_n   INTEGER NOT NULL DEFAULT 0,
+          input_size    INTEGER,
+          input_mtime   REAL,
+          extracted_at  TEXT,
+          indexed_at    TEXT,
+          updated_at    TEXT NOT NULL,
+          CHECK (text_source IN ('md', 'source', 'orphan'))
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dp_source ON document_products(text_source)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dp_md     ON document_products(md_rel)")
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     """001：基础表（source_documents / batches 等）。脚本本身 IF NOT EXISTS，可直接重放。"""
     exec_script(conn, SCHEMA_FILE.read_text(encoding="utf-8"))
@@ -332,6 +390,8 @@ MIGRATIONS = [
     ("011_document_events", _ensure_document_events),
     ("012_label_dimensions", _ensure_label_dimensions),
     ("013_label_taxonomy", _ensure_label_taxonomy),
+    ("014_witness_collection", _ensure_question_freq_view),
+    ("015_document_products", _ensure_document_products),
 ]
 
 
@@ -396,6 +456,8 @@ REQUIRED = {
     "batches": ("batch_id", "state", "updated_at"),
     "document_events": ("doc_hash", "kind", "payload", "at"),
     "label_taxonomy": ("level1", "level2", "synonyms", "enabled", "sort"),
+    "document_products": ("doc_hash", "md_rel", "md_hash", "text_source", "questions_n",
+                          "input_size", "input_mtime", "extracted_at", "updated_at"),
 }
 
 

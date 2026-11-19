@@ -75,11 +75,11 @@ CREATE INDEX IF NOT EXISTS idx_dc_doc ON doc_contents(doc_hash);
 CREATE VIRTUAL TABLE questions_fts USING fts5(q_text, a_text, tokenize='trigram');
 CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram');
 """)
-    # ---- documents：classified 源文档 ----
+    # ---- documents：内容池源文档（classified/processing/processed） ----
     docs = src.execute(
         "SELECT doc_hash, file_name, category, topic, sub_topic, collection, source_trust, "
         "       dir_path, source_count, sources_json, note FROM source_documents "
-        f"WHERE status='{status.CLASSIFIED}'").fetchall()
+        f"WHERE status IN {status.sql_in(status.INGESTED)}").fetchall()
     out.executemany(
         "INSERT INTO documents(doc_hash, file_name, category, topic, sub_topic, collection, "
         "  source_trust, dir_path, source_count, sources_json, note) VALUES(?,?,?,?,?,?,?,?,?,?,?)",

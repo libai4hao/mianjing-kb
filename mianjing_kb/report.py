@@ -34,7 +34,7 @@ def _unsigned64(v: int) -> int:
 def load_questions(conn) -> list[dict]:
     rows = conn.execute(
         "SELECT q.doc_hash, q.seq, q.q_text, q.q_norm, q.q_norm_hash, q.simhash, q.qtype, "
-        "       sd.file_name, sd.topic "
+        "       sd.file_name, sd.topic, sd.collection "
         "FROM questions q LEFT JOIN source_documents sd ON sd.doc_hash = q.doc_hash"
     ).fetchall()
     out = []
@@ -55,6 +55,8 @@ def build_clusters(qs: list[dict], max_dist: int, min_jac: float):
     clusters = []
     for members in groups.values():
         docs = {qs[i]["doc_hash"] for i in members}
+        # 见证数口径（Q-2）：distinct collection；空 collection 回退自身 doc_hash
+        witnesses = {qs[i].get("collection") or "doc:" + qs[i]["doc_hash"] for i in members}
         norms = {qs[i]["q_norm"] for i in members}
         # 样例题：取最常见 norm 里最长的原文
         by_norm: dict[str, list[int]] = defaultdict(list)
@@ -65,19 +67,21 @@ def build_clusters(qs: list[dict], max_dist: int, min_jac: float):
         clusters.append({
             "members": members,
             "n_docs": len(docs),
+            "n_collections": len(witnesses),
+            "witness": len(witnesses),
             "doc_hashes": sorted(docs),
             "sample": qs[by_norm[best_norm][0]]["q_text"],
             "n_variants": len(norms),
             "variants": sorted(norms),
             "qtype": max(set(qtypes), key=qtypes.count),
         })
-    clusters.sort(key=lambda c: (-c["n_docs"], -len(c["members"])))
+    clusters.sort(key=lambda c: (-c["n_collections"], -c["n_docs"], -len(c["members"])))
     return clusters
 
 
 def write_report(path: Path, qs: list[dict], clusters: list, top: int, dist: int, jac: float,
                  elapsed: float) -> dict:
-    multi = [c for c in clusters if c["n_docs"] >= 2]
+    multi = [c for c in clusters if c["n_collections"] >= 2]
     n_in_multi = sum(len(c["members"]) for c in multi)
     qtype_dist = defaultdict(int)
     for q in qs:
@@ -86,17 +90,19 @@ def write_report(path: Path, qs: list[dict], clusters: list, top: int, dist: int
         "# 同题频次报告（P1-4）",
         "",
         f"- 口径：questions 表 {len(qs)} 题 → simhash LSH（dist≤{dist}, jaccard≥{jac}）聚类",
-        f"- 簇总数 {len(clusters)}；**≥2 文档的簇 {len(multi)} 个**，覆盖 {n_in_multi} 题"
+        "- 见证数 = distinct collection（同一来源集只计 1；collection 为空回退 doc_hash，Q-2 2026-11-19）",
+        f"- 簇总数 {len(clusters)}；**≥2 来源集的簇 {len(multi)} 个**，覆盖 {n_in_multi} 题"
         f"（{n_in_multi / max(len(qs), 1) * 100:.1f}%）",
         f"- qtype 分布：{json.dumps(dict(sorted(qtype_dist.items(), key=lambda x: -x[1])), ensure_ascii=False)}",
         "",
         f"## 频次 Top {min(top, len(multi))}",
         "",
-        "| # | 题目样例 | 文档数 | 变体数 | qtype |",
-        "|---|---|---|---|---|",
+        "| # | 题目样例 | 见证(collection) | 文档数 | 变体数 | qtype |",
+        "|---|---|---|---|---|---|",
     ]
     for i, c in enumerate(multi[:top], 1):
-        lines.append(f"| {i} | {c['sample'][:60]} | {c['n_docs']} | {c['n_variants']} | {c['qtype']} |")
+        lines.append(f"| {i} | {c['sample'][:60]} | {c['witness']} | {c['n_docs']} | "
+                     f"{c['n_variants']} | {c['qtype']} |")
     # 改写对样例：同簇不同 norm 的前 20 簇各取一对
     lines += ["", "## 近重复改写对样例（同簇不同措辞）", ""]
     shown = 0
@@ -116,12 +122,12 @@ def write_report(path: Path, qs: list[dict], clusters: list, top: int, dist: int
 
 
 def write_csv(path: Path, clusters: list, top: int) -> int:
-    multi = [c for c in clusters if c["n_docs"] >= 2]
+    multi = [c for c in clusters if c["n_collections"] >= 2]
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["rank", "sample_q", "n_docs", "n_variants", "qtype", "doc_hashes"])
+        w.writerow(["rank", "sample_q", "witness", "n_docs", "n_variants", "qtype", "doc_hashes"])
         for i, c in enumerate(multi[:top], 1):
-            w.writerow([i, c["sample"], c["n_docs"], c["n_variants"], c["qtype"],
+            w.writerow([i, c["sample"], c["witness"], c["n_docs"], c["n_variants"], c["qtype"],
                         " ".join(c["doc_hashes"])])
     return len(multi[:top])
 

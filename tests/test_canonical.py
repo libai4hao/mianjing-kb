@@ -71,6 +71,27 @@ def test_witness_and_topic_vote(mini_db):
     assert var["canonical_id"] == rows[N_JVM]["canonical_id"]
 
 
+def test_witness_uses_distinct_collection(mini_db):
+    """Q-2：见证数 = distinct collection——同 collection 的多篇只算 1 个来源。"""
+    mini_db.execute("UPDATE source_documents SET collection='c1' WHERE doc_hash IN ('h1','h2')")
+    mini_db.execute("UPDATE source_documents SET collection='c9' WHERE doc_hash IN ('h3','h4')")
+    mini_db.commit()
+    cn.main([])
+    rows = {r["title_norm"]: r for r in mini_db.execute(
+        "SELECT * FROM canonical_questions").fetchall()}
+    assert rows[N_JVM]["witness"] == 1          # 甲、乙同 c1 → 1 个来源
+    assert rows[N_MYSQL]["witness"] == 2        # 乙(c1) + 丙/丁(c9) → 2 个来源
+
+
+def test_witness_falls_back_to_doc_hash_when_collection_empty(mini_db):
+    mini_db.execute("UPDATE source_documents SET collection=NULL")
+    mini_db.commit()
+    cn.main([])
+    rows = {r["title_norm"]: r for r in mini_db.execute(
+        "SELECT * FROM canonical_questions").fetchall()}
+    assert rows[N_JVM]["witness"] == 2          # 空 collection 不能合成 1 个
+
+
 def test_idempotent_and_dry_run(mini_db):
     cn.main([])
     cn.main([])                                    # 重建幂等：不翻倍

@@ -8,12 +8,16 @@
 
 - md/txt 直接读文件；pdf/docx/doc 走 question_freq.extract；<80 字符的空文档记 0 题
 - 每题算 q_norm / q_norm_hash / simhash，落 meta/schema/004_questions.sql 的 questions 表
-- 频次口径：精确同文直接可用视图 question_freq；近重复簇留给 P1-4 report（simhash）
+- 频次口径：精确同文直接可用视图 question_freq（见证数 = distinct collection，014 迁移）；
+  近重复簇留给 P1-4 report（simhash）
+- 状态与产物（Q-3）：开始处理写 `processing`，成功后写 `processed` 并记 `document_products`
+  （含 size/mtime，供 `--incremental` 判"没变就跳过"）；失败留 `processing` 作为断点
 
 用法：
     python -m mianjing_kb.extract --limit 20          # 试跑 20 件
     python -m mianjing_kb.extract --stats             # 只看 questions 表分布
     python -m mianjing_kb.extract --plan              # 只看"会抽哪些身份"（不读正文、不写库）
+    python -m mianjing_kb.extract --incremental       # 只处理新增/变更文档
     python -m mianjing_kb.extract                     # 全量（幂等：同 doc 覆盖重写）
 """
 from __future__ import annotations
@@ -29,7 +33,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, mdmap, status  # noqa: E402
+from mianjing_kb.kb import config, db, mdmap, products, status  # noqa: E402
 from mianjing_kb.question_freq import close_word, extract, normalize, simhash  # noqa: E402
 from mianjing_kb.chunker import chunk_v2  # noqa: E402
 
@@ -78,7 +82,7 @@ def doc_pool(conn) -> tuple[list[tuple[str, Path]], "mdmap.Mapping"]:
         pool[doc_hash] = p
 
     for r in conn.execute(
-            f"SELECT doc_hash, src_path FROM source_documents WHERE status='{status.CLASSIFIED}'").fetchall():
+            f"SELECT doc_hash, src_path FROM source_documents WHERE status IN {status.sql_in(status.INGESTED)}").fetchall():
         doc_hash = r["doc_hash"]
         if doc_hash in pool:             # 已有产物，源文件不再重复抽
             continue
@@ -107,6 +111,28 @@ def write_identity_report(mapping) -> Path:
     out = build / "md_identity_report.json"
     out.write_text(json.dumps(mapping.report, ensure_ascii=False, indent=1), encoding="utf-8")
     return out
+
+
+def _product_loc(conn, doc_hash: str, mapping) -> tuple[str | None, str | None, str]:
+    """(md_rel, md_hash, text_source)：产物行已有的 hash 直接复用，不做二次读盘。"""
+    prod = products.get(conn, doc_hash)
+    if doc_hash in mapping.by_doc:
+        return mapping.by_doc[doc_hash][0], prod["md_hash"] if prod else None, "md"
+    if doc_hash in mapping.orphans:
+        return mapping.orphans[doc_hash][0], prod["md_hash"] if prod else None, "orphan"
+    return None, prod["md_hash"] if prod else None, "source"
+
+
+def mark_status(conn, doc_hashes: list[str], new_status: str, only_from=status.INGESTED) -> int:
+    """批量改 source_documents.status（只动内容池里的行；孤儿 md 没有台账行，自然跳过）。"""
+    n = 0
+    for i in range(0, len(doc_hashes), 500):
+        part = doc_hashes[i:i + 500]
+        cur = conn.execute(
+            f"UPDATE source_documents SET status=? WHERE doc_hash IN ({','.join('?' * len(part))}) "
+            f"AND status IN {status.sql_in(only_from)}", [new_status, *part])
+        n += cur.rowcount
+    return n
 
 
 def purge_orphans(conn, pool_keys: set[str]) -> int:
@@ -189,6 +215,8 @@ def main(argv=None) -> int:
     ap.add_argument("--stats", action="store_true", help="只看 questions 表分布")
     ap.add_argument("--plan", action="store_true",
                     help="只看身份映射与题池规模（不读正文、不写库）")
+    ap.add_argument("--incremental", action="store_true",
+                    help="只处理新增/变更文档（按 document_products 的 size/mtime 判定）")
     args = ap.parse_args(argv)
 
     conn = db.connect(args.db, create=not (args.dry_run or args.plan))
@@ -218,9 +246,21 @@ def main(argv=None) -> int:
         }, ensure_ascii=False, indent=1))
         conn.close()
         return 0
+
+    # 产物台账先落"映射事实"（extracted_at 留空），增量判据才有输入
+    if not args.dry_run:
+        products.sync_mapping(conn, mapping)
+        conn.commit()
+    pool_total = len(pool)
+    if args.incremental:
+        pool = [x for x in pool if products.needs_work(conn, x[0], x[1])]
+    skipped_unchanged = pool_total - len(pool)
     if args.limit:
         pool = pool[:args.limit]
     started = time.perf_counter()
+    if not args.dry_run and pool:
+        mark_status(conn, [h for h, _p in pool], status.PROCESSING)
+        conn.commit()
     n_docs = n_q = n_empty = n_err = n_reattached = 0
     qtype: dict[str, int] = {}
     conf: dict[str, int] = {}
@@ -229,6 +269,7 @@ def main(argv=None) -> int:
             rows = extract_doc(doc_hash, p)
         except Exception as ex:  # noqa: BLE001
             n_err += 1
+            # 失败留 processing：状态本身就是"下次从这续跑"的标记
             print(f"[warn] {p.name}: {type(ex).__name__}: {ex}", file=sys.stderr)
             continue
         n_docs += 1
@@ -240,11 +281,19 @@ def main(argv=None) -> int:
             conf[r["conf"]] = conf.get(r["conf"], 0) + 1
         if not args.dry_run:
             n_reattached += store(conn, doc_hash, rows)
+            md_rel, md_hash, text_source = _product_loc(conn, doc_hash, mapping)
+            products.upsert(conn, doc_hash, md_rel=md_rel, md_hash=md_hash,
+                            text_source=text_source, input_path=p, questions_n=len(rows),
+                            extracted_at=datetime.now().strftime(NOW_FMT))
+            mark_status(conn, [doc_hash], status.PROCESSED)
+            if (i + 1) % 50 == 0:            # 增量/长批次的分块提交（崩溃只回退当前块）
+                conn.commit()
         if (i + 1) % 200 == 0:
             print(f"[prog] {i + 1}/{len(pool)} docs, {n_q} questions", file=sys.stderr)
     close_word()        # Word COM 只在抽取阶段用；批次结束立刻释放，不带着宿主进程进落库/统计
     if not args.dry_run:
-        n_purged = purge_orphans(conn, {k for k, _ in pool})
+        # 全量才清孤儿；增量只处理子集，purge 会把未在本次池里的题行误删
+        n_purged = 0 if args.incremental else purge_orphans(conn, {k for k, _ in pool})
         n_lost = conn.execute("SELECT COUNT(*) FROM label_facts WHERE q_norm_hash NOT IN "
                               "(SELECT q_norm_hash FROM questions)").fetchone()[0]
         if n_lost:
@@ -256,6 +305,7 @@ def main(argv=None) -> int:
     elapsed = time.perf_counter() - started
     print(json.dumps({
         "docs": n_docs, "questions": n_q, "empty_docs": n_empty, "errors": n_err,
+        "incremental": args.incremental, "skipped_unchanged": skipped_unchanged,
         "purged_orphan_docs": n_purged if not args.dry_run else 0,
         "label_reattached": n_reattached if not args.dry_run else 0,
         "label_facts_lost": n_lost,
@@ -265,6 +315,7 @@ def main(argv=None) -> int:
                      "ambiguous": mapping.report.get("ambiguous", 0),
                      "multi_md_docs": mapping.report.get("docs_multi_md", 0),
                      "report": str(report_path)},
+        "products": products.summary(conn) if not args.dry_run else {},
         "qtype": qtype, "conf": conf,
     }, ensure_ascii=False, indent=1))
     conn.close()

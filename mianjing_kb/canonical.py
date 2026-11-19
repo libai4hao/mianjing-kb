@@ -2,7 +2,8 @@
 """canonical：questions 表 → 题簇落库（canonical_questions / question_variants 全量重建）。
 
 「题级吸附」的存储层（docs/03 §10.2 canonical 表，2026-11-17 落地）：
-  - canonical_questions  一行 = 一个"同一道题"（近重复簇），witness = 出现文档数（见证数）
+  - canonical_questions  一行 = 一个"同一道题"（近重复簇），witness = 见证来源数
+                          （distinct collection；collection 为空回退 doc_hash，Q-2 2026-11-19）
   - question_variants    一行 = 该题的一个变体（源 doc_hash + seq），FK 级联
 聚类复用 report.build_clusters（simhash LSH 分带 + 汉明 + 2-gram Jaccard 双确认，P1-4 同款）；
 单件簇也落库——canonical 是全量唯一题登记簿，不只存重复簇。
@@ -63,7 +64,11 @@ def build_rows(qs: list[dict], clusters: list[dict],
             if t and t != config.UNCLASSIFIED:
                 topics[t] += 1
         topic = topics.most_common(1)[0][0] if topics else None
-        rows_c.append((cid, best[:500], topic, None, c["n_docs"], now, now))
+        # Q-2（2026-11-19）：见证数 = distinct collection；collection 为空回退到 doc_hash
+        # （不能把未知来源全算成 1 个，否则少报；也不能按 doc_hash 计，否则同一门课虚高）
+        witness = len({meta.get(qs[i]["doc_hash"], ("", ""))[1]
+                       or "doc:" + qs[i]["doc_hash"] for i in c["members"]})
+        rows_c.append((cid, best[:500], topic, None, witness, now, now))
         for i in c["members"]:
             q = qs[i]
             rows_v.append((variant_id(q["doc_hash"], q["seq"]), cid, q["doc_hash"],

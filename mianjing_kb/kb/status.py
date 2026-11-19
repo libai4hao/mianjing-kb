@@ -21,11 +21,11 @@ from typing import Iterable
 
 # ---------- 单值 ----------
 PENDING = "pending_classify"      # 已登记、待分类
-CLASSIFIED = "classified"         # 已判定为可入库内容（题池唯一来源）
-PROCESSING = "processing"         # 预留：解析中
-PROCESSED = "processed"           # 预留：已出产物
+CLASSIFIED = "classified"         # 已分类、待处理（内容池入口态）
+PROCESSING = "processing"         # 处理中（extract 开始写；崩溃后由此续跑）
+PROCESSED = "processed"           # 已出产物并完成抽题（含 0 题的件；增量不再重跑）
 REJECTED = "rejected"             # 非内容（学习路线/简历模板等）
-FAILED = "failed"                 # 预留：处理失败
+FAILED = "failed"                 # 预留：处理失败（当前失败留 processing，不落此态）
 DUPLICATE = "duplicate"           # 预留：判重命中（当前判重走独立动作，不落此态）
 MOVED = "moved"                   # 预留：历史移动态
 RENAMED = "renamed"               # 预留：历史改名态
@@ -34,25 +34,26 @@ SUPERSEDED = "superseded"         # 有接替件（replaced_by / converted_to）
 QUARANTINED = "quarantined"       # 隔离区（99-重复文件待删），永不参与处理
 
 # ---------- 分组 ----------
-# 已进入内容池（题池只认 CLASSIFIED；PROCESSING/PROCESSED 是历史/预留态）
+# 已进入内容池（题池/建库/核账都按这一组；Q-3 后 processed 是真态，不再是预留）
 INGESTED = (CLASSIFIED, PROCESSING, PROCESSED)
 # extract / build_db / bookmarks / backfill 的题池口径
-EXTRACTABLE = (CLASSIFIED,)
+EXTRACTABLE = INGESTED
 # 已退役：不再读盘、不再抽题、但保留行给 G5 与 purge 审计
 RETIRED = (SUPERSEDED, ABSENT)
 # 隔离副本：既不是来源也不是接替件
 QUARANTINED_ONLY = (QUARANTINED,)
 # schema 预留 / 历史动作态：当前无工具写入，仅 CHECK 枚举与兼容读出用
-RESERVED = (PROCESSING, PROCESSED, FAILED, DUPLICATE, MOVED, RENAMED)
+RESERVED = (FAILED, DUPLICATE, MOVED, RENAMED)
 # 全量（必须与 001_init.sql 的 CHECK 枚举逐字一致）
 ALL = (
     PENDING, CLASSIFIED, PROCESSING, PROCESSED, REJECTED, FAILED,
     DUPLICATE, MOVED, RENAMED, ABSENT, SUPERSEDED, QUARANTINED,
 )
-# G5 台账-磁盘一致要扫的两态：在盘（classified）与已退役但可能仍在盘（superseded）
-G5_SCAN = (CLASSIFIED, SUPERSEDED)
-# purge 认定的"内容已收入"：classified 直接算；superseded 还要有接替件（见 purge_origin）
-PURGE_OK = G5_SCAN
+# G5 台账-磁盘一致要扫的态：内容池三态都在盘；superseded 可能仍在盘
+G5_SCAN = (CLASSIFIED, PROCESSING, PROCESSED, SUPERSEDED)
+# purge 认定的"内容已收入"：classified / processed 直接算；
+# superseded 还要有接替件（见 purge_origin）
+PURGE_OK = (CLASSIFIED, PROCESSED, SUPERSEDED)
 # converted_to 的"有效后继记录"：不能是已退役态，也不能是隔离副本
 SUCCESSOR_OK = tuple(v for v in ALL if v not in RETIRED + QUARANTINED_ONLY)
 

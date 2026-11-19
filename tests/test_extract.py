@@ -190,3 +190,40 @@ def test_pool_skips_old_md_when_hash_sibling_exists(tmp_env):
     names = {v.name for _, v in pool}
     assert new.name in names and old.name not in names
 
+
+def test_incremental_skips_unchanged_and_picks_new(tmp_env, capsys):
+    """Q-3：增量按 document_products 的 size/mtime 跳过未变件；新件照常处理。"""
+    corpus, conn = tmp_env
+    h1, _ = _seed_doc(conn, corpus, "a.md", MD_A)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["docs"] == 1 and out["incremental"] is False
+    st = conn.execute("SELECT status FROM source_documents WHERE doc_hash=?", (h1,)).fetchone()[0]
+    assert st == "processed"
+    assert conn.execute("SELECT questions_n, extracted_at FROM document_products "
+                        "WHERE doc_hash=?", (h1,)).fetchone()["questions_n"] == 2
+
+    # 第二次增量：没变 → 全跳过
+    assert extract.main(["--db", str(config.DB_PATH), "--incremental"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["docs"] == 0 and out["skipped_unchanged"] == 1
+
+    # 新文件 → 只处理 1 篇
+    _seed_doc(conn, corpus, "b.md", MD_B)
+    assert extract.main(["--db", str(config.DB_PATH), "--incremental"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["docs"] == 1 and out["skipped_unchanged"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 4
+
+
+def test_full_run_keeps_processed_docs(tmp_env, capsys):
+    """processed 不能把文档踢出题池：全量重跑仍要覆盖，且不 purge 已处理的题。"""
+    corpus, conn = tmp_env
+    _seed_doc(conn, corpus, "a.md", MD_A)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    capsys.readouterr()
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["docs"] == 1 and out["purged_orphan_docs"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 2
+

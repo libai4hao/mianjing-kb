@@ -121,16 +121,17 @@ def _rel_to_md_map() -> dict[str, str]:
 
 # ---------------- G1 源-库全覆盖 ----------------
 def g1_coverage(kb_conn, out_conn, skip: dict[str, str]) -> dict:
-    """classified 每篇：doc_contents 有行 且 有题；否则须在 skip_log 登记原因。
+    """内容池每篇（classified/processing/processed）：doc_contents 有行 且 有题；否则须在 skip_log 登记原因。
 
     md 镜像关联口径：源 file_name stem 剥 hash 后缀 ↔ doc_contents.md_rel stem 剥后缀
     （build_db 的 by_stem 同款；同名多源取首个是已知局限，报告 detail 注明）。
     """
-    sql = ("SELECT doc_hash,file_name,dir_path,src_path FROM source_documents WHERE status='classified'; "
+    pool_sql = f"status IN {status.sql_in(status.INGESTED)}"
+    sql = (f"SELECT doc_hash,file_name,dir_path,src_path FROM source_documents WHERE {pool_sql}; "
            "-- 有题判定: questions.doc_hash ∈ {源doc_hash} ∪ {md镜像mirror_hash}")
     rows = kb_conn.execute(
         "SELECT doc_hash, file_name, dir_path, src_path, category, ext "
-        "FROM source_documents WHERE status='classified'").fetchall()
+        f"FROM source_documents WHERE {pool_sql}").fetchall()
     dc_doc = {r[0] for r in out_conn.execute(
         "SELECT DISTINCT doc_hash FROM doc_contents WHERE doc_hash IS NOT NULL")}
     q_docs = {r[0] for r in out_conn.execute("SELECT DISTINCT doc_hash FROM questions")}
@@ -372,7 +373,7 @@ def g5_disk(kb_conn, corpus_root: Path, build_dir: Path) -> dict:
             "SELECT doc_hash, file_name, dir_path, src_path, status, note "
             f"FROM source_documents WHERE status IN {status.sql_in(status.G5_SCAN)}").fetchall():
         src = Path(r["src_path"] or "")
-        if r["status"] == status.CLASSIFIED:
+        if r["status"] in (status.CLASSIFIED, status.PROCESSING, status.PROCESSED):
             if not src.exists():
                 fails.append({"kind": "classified_src_missing", "rel": r["file_name"]})
             continue
