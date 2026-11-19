@@ -8,6 +8,10 @@
 
 ## 2026-11-19
 
+- **自审复核修复（c09f6cc 后）**：`--no-cache` 不再清空缓存；`--limit` 在全量结果不存在时也不占用
+  `cluster_result.json`；抽取任一件失败时结果标 `complete=false/failed=true` 并另写
+  `cluster_result_incomplete.json`；G4 的 `questions_fts` 缺失/损坏改为 FAIL 而非抛栈；
+  G1 精确映射按目录+base_stem 收敛 `__hash8` 后缀；skip 模板补齐原因枚举并注明个人数据永不入库。
 - **cluster 99 区 gate 收紧**：文件级 `strong` 需每条 99 题直接匹配池题（≥0.92，不用 single-linkage
   传递）、池样本账本状态合法、单向答案覆盖、匹配占比 ≥90% 且答案/文本覆盖达标；其余 `manual`。
   缓存 key 带版本、失败不缓存、Word 锁文件跳过、`--limit` 结果标 `complete=false` 并写独立文件。

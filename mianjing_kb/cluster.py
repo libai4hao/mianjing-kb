@@ -95,6 +95,8 @@ class TextCache:
         self.data[key] = payload
 
     def save(self):
+        if not self.enabled:
+            return              # --no-cache 只读旧缓存，不得把缓存文件清空
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".tmp")
         tmp.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")
@@ -330,7 +332,8 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None, help="结果路径（默认 build/cluster_result.json）")
     args = ap.parse_args(argv)
     out = Path(args.out) if args.out else config.BUILD_DIR / "cluster_result.json"
-    if args.limit and not args.out and out.exists():
+    if args.limit and not args.out:
+        # 调试结果永远另写一份；即使全量结果不存在，也不占用正式文件名
         out = config.BUILD_DIR / f"cluster_result_limit{args.limit}.json"
 
     R = config.CORPUS_ROOT
@@ -480,7 +483,8 @@ def main(argv=None) -> int:
 
     result = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "complete": args.limit == 0,
+        "complete": args.limit == 0 and stats["error"] == 0,
+        "failed": stats["error"] > 0,
         "limit": args.limit,
         "errors": stats["error"],
         "thresholds": {"auto": args.auto, "manual": args.manual},
@@ -496,12 +500,15 @@ def main(argv=None) -> int:
         "clusters_top": clusters_out[:300],
         "sample": sample,
     }
+    if stats["error"] and not args.out:
+        out = config.BUILD_DIR / "cluster_result_incomplete.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
     tmp.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, out)       # 原子落盘：消费方不会读到半个 JSON
 
-    suffix = "" if result["complete"] else f"_limit{args.limit}"
+    suffix = (f"_limit{args.limit}" if args.limit
+              else ("_incomplete" if stats["error"] else ""))
     pend_path = config.BUILD_DIR / f"cluster_pending{suffix}.csv"
     with pend_path.open("w", encoding="utf-8-sig", newline="") as fh:
         w = csv.writer(fh)

@@ -168,8 +168,16 @@ def g1_coverage(kb_conn, out_conn, skip: dict[str, str]) -> dict:
         # 优先用转换日志/门禁报告里的精确源→md 映射；找不到才退回同名族。
         # 同名多源时族匹配会把"另一份源转出的 md"算成本源已覆盖（review HIGH）。
         exact = exact_map.get(rel.replace("\\", "/"))
-        if exact and exact in db_mds:
-            md_rels = [exact]
+        if exact:
+            # 映射给的是"未加 __hash8"的 md 名，build_db 落盘会加后缀；按目录 + base_stem
+            # 精确收敛到实际 md_rel，找不到就判未覆盖，不再退回同名族掩盖。
+            mdp = Path(exact)
+            exact_mds = [
+                m for m in db_mds
+                if Path(m).parent.as_posix() == mdp.parent.as_posix()
+                and norm_stem(base_stem(Path(m).stem)) == norm_stem(base_stem(mdp.stem))
+            ]
+            md_rels = exact_mds
             n_exact += 1
         else:
             md_rels = md_rels_by_stem.get(stem, [])
@@ -286,8 +294,13 @@ def g4_index(out_conn) -> dict:
              "note": "vec_questions 存在但 sqlite_vec 扩展未加载：硬门禁不能降级 WARN 放行"}],
             {"questions": n_q, "note": "向量表存在但扩展不可用"}, sql)
     q_ids = {r[0] for r in out_conn.execute("SELECT qid FROM questions")}
-    n_fts = out_conn.execute("SELECT COUNT(*) FROM questions_fts").fetchone()[0]
-    fts_ids = {r[0] for r in out_conn.execute("SELECT rowid FROM questions_fts")}
+    try:
+        n_fts = out_conn.execute("SELECT COUNT(*) FROM questions_fts").fetchone()[0]
+        fts_ids = {r[0] for r in out_conn.execute("SELECT rowid FROM questions_fts")}
+    except Exception as ex:  # noqa: BLE001 —— FTS 表缺失/损坏时必须 FAIL，不能抛栈中断整轮门禁
+        return _gate("G4", "索引一致性", "硬", "FAIL", [
+            {"kind": "fts_unavailable", "error": f"{type(ex).__name__}: {ex}"}],
+            {"questions": n_q, "vec": n_vec, "note": "questions_fts 缺失或不可查询"}, sql)
     fails = []
     if n_vec != n_q or vec_ids != q_ids:
         fails.append({"kind": "vec_mismatch", "questions": n_q, "vec": n_vec,

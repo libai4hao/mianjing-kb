@@ -1,5 +1,5 @@
 {
-  "_schema": "skip_log：故意不入库的文档必须在此登记（docs/15 G1——skip_log 是一等公民，没记录就是 FAIL）。rel=源相对路径或 md 相对路径（posix，与 exclusions.json 同口径）；reason ∈ no_text_layer|garbled|converted_only|duplicate_of|no_question；note=一句话说明；decided_by/decided_at=拍板人与日期",
-  "_note": "本文件是模板：真实的 meta/skip_log.json 记录语料清单，已在 .gitignore 排除、不入库。本地首次使用时把本文件复制为 meta/skip_log.json 再往里追加 items。",
+  "_schema": "skip_log：故意不入库的文档必须在此登记（docs/15 G1——skip_log 是一等公民，没记录就是 FAIL）。rel=源相对路径或 md 相对路径（posix，与 exclusions.json 同口径）；reason ∈ no_text_layer|garbled|converted_only|duplicate_of|no_question|chunker_no_split|no_md_artifact；duplicate_of 必须带 target（目标 rel）或 note；note=一句话说明；decided_by/decided_at=拍板人与日期",
+  "_note": "本文件是模板：真实的 meta/skip_log.json 属于个人语料清单（含来源片段），已在 .gitignore 排除、永不入库。本地首次使用时把本文件复制为 meta/skip_log.json 再往里追加 items。",
   "items": []
 }

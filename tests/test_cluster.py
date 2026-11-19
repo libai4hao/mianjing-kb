@@ -157,3 +157,21 @@ def test_default_limit_does_not_overwrite_full_result(tiny_corpus, tmp_path, mon
     dbg = json.loads((build / "cluster_result_limit1.json").read_text(encoding="utf-8"))
     assert dbg["complete"] is False and dbg["limit"] == 1
     assert (build / "cluster_pending_limit1.csv").exists()
+
+def test_no_cache_does_not_wipe_cache_file(tmp_path):
+    """--no-cache 是只读旁路，不得把已有缓存清空（review 自检发现）。"""
+    p = tmp_path / "cache.json"
+    p.write_text('{"keep": 1}', encoding="utf-8")
+    c = cl.TextCache(p, enabled=False)
+    c.put("x", {"questions": []})
+    c.save()
+    assert json.loads(p.read_text(encoding="utf-8")) == {"keep": 1}
+
+
+def test_limit_without_existing_result_never_uses_full_name(tiny_corpus, tmp_path, monkeypatch):
+    """全量结果不存在时，--limit 也不得占用 cluster_result.json。"""
+    build = tiny_corpus / "build"
+    assert not (build / "cluster_result.json").exists()
+    assert cl.main(["--no-cache", "--limit", "1"]) == 0
+    assert not (build / "cluster_result.json").exists()
+    assert (build / "cluster_result_limit1.json").exists()

@@ -17,5 +17,5 @@ build/
 # SDD 过程台账（本地留挡，不入库）
 .superpowers/
 
-# 语料清单（skip_log）：记录本机收了哪些源文档，含可回溯的来源片段；只留本地
+# 个人数据：本机语料清单（skip_log）含来源片段/收件路径；永不入库，模板见 meta/skip_log.example.json
 meta/skip_log.json
