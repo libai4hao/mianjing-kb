@@ -47,7 +47,7 @@ ANSWER_AGREE = 0.45      # 答案块 Jaccard 低于此值 → 视为"同题不�
 
 DOC_EXTS = {".pdf", ".docx", ".doc", ".md", ".txt"}
 # chunker/切题口径变更必须让旧缓存整体失效；key 前缀版本号，避免 v1 的块被 v2 复用。
-CACHE_VERSION = "v2-2026-11-20"
+CACHE_VERSION = "v2-2026-11-20-r2"
 
 POOL_TOPS = ["01-Java基础", "02-Java进阶", "03-数据库", "04-前端", "05-大数据",
              "06-云计算与运维", "07-中间件与分布式", "08-计算机网络与操作系统",

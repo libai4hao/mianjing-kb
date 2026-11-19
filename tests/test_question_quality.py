@@ -53,7 +53,7 @@ def test_numbered_code_listing_is_not_split_into_questions():
     parsed = chunk_v2(md)
     assert parsed["items"] == []
     assert parsed["probe"]
-    assert all("代码片段" in x["why"] for x in parsed["probe"])
+    assert all("代码碎片" in x["why"] for x in parsed["probe"])
 
 
 def test_code_inside_a_natural_language_question_remains_answer_context():

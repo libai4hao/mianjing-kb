@@ -1,10 +1,25 @@
 # 工程变更日志（CHANGELOG）
 
-> 状态：现行 · 最后更新：2026-11-19 · 适用版本：v2-R3
+> 状态：现行 · 最后更新：2026-11-20 · 适用版本：v2-R3
 >
 > 只记**工程变更**（代码、门禁、依赖、文档结构），不记数据快照——题数、库大小会随重建漂移，
 > 一律以 `docs/29-数据基线与统计口径-2026-11-19.md` 为准。历史里程碑按日期倒序。
 > 2026-11-16 之前的记录见 `docs/archive/` 与 git 历史，本表从外部 review 落地开始。
+
+## 2026-11-20
+
+- **切题准确率重构（D1–D3）**：`chunker` 新增题干续行回接（悬空题干 + 问句形态短续行）、
+  `chunk_v2` 代码碎片出口终检（编号代码行不独立成题，内容并入父答案/leftovers）、
+  大题说明行不产题 + 强提问语义编号子题不被列表状态吞掉；新增 `tests/test_chunker_accuracy.py`。
+  公共 API 签名与输出 schema 不变；25 个基线语料快照零差异；测试库 A/B 验证 13 删 7 增均为预期修复。
+- **review2 结构修复选择性移植（S1–S5）**：复核 `review2` 累积补丁（基线为原始上传 ZIP，
+  与本仓库 lineage 不同）后，仅移植仓库缺失的 5 类结构行为：问句/任务语义优先于题号连续性、
+  TOC NFKC 兼容字符与无页码变体 + 局部大纲首现屏蔽、章节标题硬边界与 coverage 扣除、
+  行内粘连层级题号虚拟行拆分（span 精确）、强证据题干续行收回。引入
+  `tests/test_chunker_structure_regression.py`（14 例）、`tests/test_question_quality.py`（7 例）
+  与 `tests/fixtures/dev_ocr_numbered_code.md`。补丁中打标质量门禁（labelspec/verify_ledger 内联版）、
+  llm_client/pilot5000/quality_rules 旧版改动**不移植**——仓库已有更新或等价实现
+  （`label_quality.py`、URL 精洗、RPM 节流、行首问词守卫）。`cluster.CACHE_VERSION` 升 `v2-2026-11-20-r2`。
 
 ## 2026-11-19
 
