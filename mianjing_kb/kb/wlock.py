@@ -1,20 +1,9 @@
 # -*- coding: utf-8 -*-
-"""跨进程写锁（T15）：`<库目录>/locks/<name>.lock`，锁文件里记 PID + 启动时间 + 工具名。
+"""跨进程数据库写锁。
 
-锁放在**被保护数据库的同级目录**（调用方传 `build_dir=Path(db).parent`），
-而不是全局 config.BUILD_DIR：两台机器/两个测试库互不阻塞，测试也不会在真实 build
-目录里创建锁。
-
-为什么需要：`refresh.lock` 只挡住"两个 refresh"，intake / batch_label --merge /
-doc_convert --apply / review_cli 之间仍可能同时写 kb.sqlite。`busy_timeout=10000`
-只是让第二个进程**等**，长任务（intake 扫全盘可以跑 30 分钟）会等到超时，然后抛一句
-`database is locked` 的栈——用户看不出是谁在占库。
-
-语义：
-  - 拿到锁 = 创建锁文件（O_CREAT|O_EXCL，原子）；
-  - 锁文件存在且 PID 还活着 → `LockHeld`，调用方打印"谁在跑"并退出；
-  - 锁文件存在但 PID 已死（崩溃残留）→ 视为陈旧锁，改名归档（保留 `<name>.lock.stale-<pid>`）后接管；
-  - 释放只删**自己**建的锁：若锁已被后人接管（pid 变了）就不删，否则会放跑两个写者。
+锁文件使用操作系统 advisory lock（Unix: flock；Windows: msvcrt.locking）。
+锁文件本身永久保留，进程退出/崩溃时由 OS 自动释放锁；不再通过读取 PID 后
+rename/unlink 陈旧锁文件，避免 TOCTOU 接管竞争及 unlink 后双持有者问题。
 """
 from __future__ import annotations
 
@@ -22,6 +11,7 @@ import json
 import os
 import sys
 import time
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -29,11 +19,12 @@ from pathlib import Path
 from . import config
 
 LOCK_DIR_NAME = "locks"
-STALE_SUFFIX = ".stale"
+_LOCAL_GUARD = threading.Lock()
+_LOCAL_LOCKS: dict[str, threading.Lock] = {}
 
 
 class LockHeld(RuntimeError):
-    """锁被另一个活着的进程持有。"""
+    """锁被另一个线程或进程持有。"""
 
     def __init__(self, path: Path, holder: dict | None):
         self.path = path
@@ -46,140 +37,116 @@ class LockHeld(RuntimeError):
                          f"目标库={target} 起始={started}）")
 
 
-def _pid_alive(pid: int) -> bool:
-    """PID 是否还活着。优先 psutil；没有就按平台兜底（不能 import psutil 就装依赖）。"""
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    if pid == os.getpid():
-        return True
-    try:
-        import psutil
-    except ImportError:
-        psutil = None
-    if psutil is not None:
-        try:
-            return psutil.Process(pid).is_running()
-        except Exception:                                  # noqa: BLE001
-            return False
-    if sys.platform == "win32":
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        try:
-            code = ctypes.c_ulong()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                return False
-            return code.value == 259                        # STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
 def lock_dir(build_dir: Path | str | None = None) -> Path:
     d = Path(build_dir or config.BUILD_DIR) / LOCK_DIR_NAME
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
+def _local_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _LOCAL_GUARD:
+        return _LOCAL_LOCKS.setdefault(key, threading.Lock())
+
+
 def _read_holder(p: Path) -> dict | None:
+    """读取锁文件元数据；首字节为 OS 锁占位字节。"""
     try:
-        raw = p.read_text(encoding="utf-8").strip()
+        with p.open("rb") as f:
+            f.seek(1)
+            raw = f.read().decode("utf-8", errors="replace").strip()
     except OSError:
         return None
     if not raw:
         return None
     try:
-        return json.loads(raw)
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {"raw": raw}
     except json.JSONDecodeError:
         return {"raw": raw}
 
 
-def _take_over(p: Path, holder: dict | None) -> bool:
-    """把陈旧锁改名归档；只有一个进程能改名成功。"""
-    stale = p.with_name(f"{p.name}{STALE_SUFFIX}-{os.getpid()}")
+def _try_os_lock(fd: int) -> bool:
+    if sys.platform == "win32":
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    import fcntl
     try:
-        os.replace(p, stale)
-    except OSError:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
         return False
-    print(f"[warn] 接管陈旧锁 {p.name}（持有者 {(holder or {}).get('pid', '?')} 已不在）："
-          f"{holder}；归档保留在 {stale.name}（排查后可手工删）", file=sys.stderr)
-    return True
+    except OSError as ex:
+        if ex.errno in (11, 13):
+            return False
+        raise
 
 
-def _release_owned(p: Path) -> None:
-    """只删自己建的锁：若锁已被别人接管（pid 变了），删了会放跑两个写者。"""
-    holder = _read_holder(p) or {}
-    if isinstance(holder.get("pid"), int) and holder["pid"] != os.getpid():
-        print(f"[warn] 锁 {p.name} 已被 pid={holder['pid']} 接管，本次不删除", file=sys.stderr)
-        return
-    try:
-        p.unlink(missing_ok=True)
-    except OSError:
-        pass
+def _unlock(fd: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 @contextmanager
 def write_lock(name: str = "kb", tool: str = "?", *, build_dir: Path | str | None = None,
                wait_sec: float = 0.0, target: str | Path | None = None):
-    """拿写锁；拿不到抛 `LockHeld`（调用方决定打印什么、退出码多少）。
+    """获取跨进程排他锁。
 
-    `name` 区分被保护的库：`kb` = `kb.sqlite`（事实源），`online` = `面经库.db`（线上检索库）。
-    `target` 写进锁文件，冲突提示能直接说清"谁在动哪个库"。
-    `wait_sec` 只用于"短任务等一会儿"的场景（如 migrate），长任务不要等——
-    等 30 分钟不如直接告诉用户谁在跑。
+    OS 锁是唯一所有权事实；PID/工具名只用于诊断。锁文件不删除，避免进程 A
+    解锁/删除与进程 B 新建同名锁之间出现 inode/file-object 分裂。
     """
     d = lock_dir(build_dir)
     p = d / f"{name}.lock"
-
-    def _try_acquire() -> bool:
-        try:
-            fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            return False
-        try:
-            os.write(fd, json.dumps({
-                "pid": os.getpid(), "tool": tool,
-                "target": str(target) if target else ("kb.sqlite" if name == "kb" else name),
-                "started_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-            }, ensure_ascii=False).encode("utf-8"))
-        finally:
-            os.close(fd)
-        return True
-
+    local = _local_lock(p)
     deadline = time.monotonic() + max(0.0, wait_sec)
-    unreadable_until = 0.0
-    while True:
-        holder = _read_holder(p) if p.exists() else None
-        if p.exists() and holder is not None:
-            pid = holder.get("pid")
-            if isinstance(pid, int) and _pid_alive(pid):
-                if time.monotonic() < deadline:
-                    time.sleep(0.2)
-                    continue
-                raise LockHeld(p, holder)
-            # 陈旧锁：改名归档（只有一个进程能改名成功），再抢建
-            _take_over(p, holder)
-            continue
-        if p.exists():                     # 文件在但内容读不出：创建者可能正在写，给 1 秒宽限
-            if not unreadable_until:
-                unreadable_until = time.monotonic() + 1.0
-            if time.monotonic() < unreadable_until:
-                time.sleep(0.05)
-                continue
-            _take_over(p, None)
-            continue
-        if _try_acquire():
-            break
-        if time.monotonic() >= deadline:
-            raise LockHeld(p, _read_holder(p))
-        time.sleep(0.2)
+    local_wait = max(0.0, deadline - time.monotonic())
+    if not local.acquire(timeout=local_wait):
+        raise LockHeld(p, _read_holder(p))
+
+    fd = None
+    acquired = False
     try:
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        fd = os.open(str(p), flags, 0o600)
+        # Windows byte-range locking 需要文件至少有一个字节；该字节不承载 JSON。
+        if os.fstat(fd).st_size < 1:
+            os.write(fd, b"\0")
+            os.fsync(fd)
+        while not _try_os_lock(fd):
+            if time.monotonic() >= deadline:
+                raise LockHeld(p, _read_holder(p))
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        acquired = True
+
+        metadata = {
+            "pid": os.getpid(), "tool": tool,
+            "target": str(target) if target else ("kb.sqlite" if name == "kb" else name),
+            "started_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        payload = json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+        os.lseek(fd, 1, os.SEEK_SET)
+        os.write(fd, payload)
+        os.ftruncate(fd, 1 + len(payload))
+        os.fsync(fd)
         yield p
     finally:
-        _release_owned(p)
+        if fd is not None:
+            if acquired:
+                try:
+                    _unlock(fd)
+                except OSError:
+                    pass
+            os.close(fd)
+        local.release()

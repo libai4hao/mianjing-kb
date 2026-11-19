@@ -31,6 +31,19 @@ def rows(db_path: Path):
     return out
 
 
+def test_read_error_returns_nonzero(corpus, tmp_path, monkeypatch, capsys):
+    """单个文件读失败必须让 pipeline 看到非零，不能静默成功。"""
+    db_path = tmp_path / "kb.sqlite"
+
+    def boom(_p):
+        raise OSError("locked")
+
+    monkeypatch.setattr(intake.hashing, "sha256_file_sized", boom)
+    assert main(["--root", str(corpus), "--db", str(db_path)]) == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["actions"]["error"] == 3
+
+
 def test_first_scan_adds_and_quarantines(corpus, tmp_path, capsys):
     db_path = tmp_path / "kb.sqlite"
     assert main(["--root", str(corpus), "--db", str(db_path)]) == 0

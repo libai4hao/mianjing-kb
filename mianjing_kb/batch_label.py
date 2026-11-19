@@ -915,8 +915,20 @@ def main(argv=None) -> int:
     if args.concurrency:
         os.environ["LLM_CONCURRENCY"] = str(args.concurrency)
 
-    conn = db.connect(args.db)      # create=True：幂等跑 005 staging / 006 题级 topic 迁移
+    # 所有分支共用同一把 kb 写锁，并且在 db.connect 之前取得：connect 可能执行
+    # schema migration；在线 LLM 打标、review、merge 都会写 staging/事实表，不能
+    # 与 extract/intake 并行。只读命令多等一会儿也比"迁移与写入交错"安全。
+    lock = wlock.write_lock("kb", tool="batch_label", build_dir=Path(args.db).parent,
+                            target=args.db)
     try:
+        lock.__enter__()
+    except wlock.LockHeld as ex:
+        print(json.dumps({"ok": False, "err": str(ex)}, ensure_ascii=False, indent=1))
+        return 2
+
+    conn = None
+    try:
+        conn = db.connect(args.db)  # create=True：幂等跑 005 staging / 006 题级 topic 迁移
         if args.manual_template:
             out_path = Path(args.manual_out) if args.manual_out else (
                 Path(args.db).parent / "manual_label_template.csv")
@@ -932,14 +944,8 @@ def main(argv=None) -> int:
             cfg = {"provider": "offline", "model": "rules-v1", "base": "", "key": "",
                    "concurrency": 4, "timeout": 1, "json_mode": False, "price": (0.0, 0.0)}
             tax = taxonomy.load(conn)
-            try:
-                with wlock.write_lock("kb", tool="batch_label",
-                                      build_dir=Path(args.db).parent):
-                    out = run_batch(cfg, conn, limit=args.limit, budget=0.0,
-                                    label_fn=lambda c, q: label_one_offline(q, tax))
-            except wlock.LockHeld as ex:
-                print(json.dumps({"ok": False, "err": str(ex)}, ensure_ascii=False, indent=1))
-                return 2
+            out = run_batch(cfg, conn, limit=args.limit, budget=0.0,
+                            label_fn=lambda c, q: label_one_offline(q, tax))
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0
 
@@ -990,22 +996,18 @@ def main(argv=None) -> int:
             return 0 if not out["unknown"] else 1
         if args.merge:
             # merge 会写 questions/label_facts，属于不可重建的事实源 → 先热备份；
-            # 并与 intake / doc_convert / review_cli 串行（T15 跨进程写锁）
-            try:
-                with wlock.write_lock("kb", tool="batch_label",
-                                      build_dir=Path(args.db).parent):
-                    db.backup_db(args.db)
-                    out = merge(conn, drop_orphans=args.drop_orphans)
-            except wlock.LockHeld as ex:
-                print(json.dumps({"ok": False, "err": str(ex)}, ensure_ascii=False, indent=1))
-                return 2
+            # 已经在 main 入口持有 kb 写锁，这里不再重复加锁。
+            db.backup_db(args.db)
+            out = merge(conn, drop_orphans=args.drop_orphans)
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if out["ok"] else 1
         out = run_batch(cfg, conn, limit=args.limit, budget=args.budget, dry_run=args.dry_run)
         print(json.dumps(out, ensure_ascii=False, indent=1))
         return 0
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
+        lock.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

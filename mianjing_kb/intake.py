@@ -452,7 +452,8 @@ def main(argv=None) -> int:
         "ignored_by_ext": dict(by_ext.most_common(10)),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    return 0
+    # 有文件处理失败时让 pipeline/自动化看到非零；hash_collision 是已知跳过项，不计失败。
+    return 1 if actions["error"] else 0
 
 
 if __name__ == "__main__":

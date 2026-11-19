@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -46,6 +47,7 @@ KB_LOCK_WAIT_SEC = 10          # 等别的写库工具让路的上限；超时�
 LOG_NAME = "refresh_log.jsonl"
 REQUIRED_GATES = ("G1", "G2", "G3", "G4", "G5", "G8")
 KNOWN_STATES = ("PASS", "WARN", "FAIL", "SKIP")
+PUBLISH_MANIFEST = "shadow_publish.json"
 
 
 def _sidecars(p: Path) -> tuple[Path, Path]:
@@ -181,6 +183,126 @@ def _remove_shadow_sidecars(shadow: Path) -> list[str]:
         except OSError as ex:
             notes.append(f"{p.name}: {type(ex).__name__}")
     return notes
+
+
+def _checkpoint_shadow(shadow: Path) -> None:
+    """把影子 WAL 落回主文件：发布清单的 sha256 必须对应可替换的单文件。"""
+    con = sqlite3.connect(str(shadow))
+    try:
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.commit()
+    finally:
+        con.close()
+
+
+def _db_sha256(p: Path) -> str:
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _schema_version(p: Path) -> str | None:
+    con = sqlite3.connect(_ro_uri(p), uri=True)
+    try:
+        try:
+            row = con.execute("SELECT name FROM schema_version ORDER BY rowid DESC LIMIT 1").fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return str(row[0]) if row else None
+    finally:
+        con.close()
+
+
+def _vec_state(p: Path) -> tuple[int, str | None]:
+    """返回 (向量行数, question_set_hash)；无 vec0/无表时按 0/None 处理。"""
+    con = sqlite3.connect(_ro_uri(p), uri=True)
+    try:
+        try:
+            import sqlite_vec
+            con.enable_load_extension(True)
+            sqlite_vec.load(con)
+            con.enable_load_extension(False)
+        except Exception:
+            return 0, None
+        try:
+            n = int(con.execute("SELECT COUNT(*) FROM vec_questions").fetchone()[0])
+        except sqlite3.OperationalError:
+            return 0, None
+        try:
+            row = con.execute(
+                "SELECT value FROM vec_meta WHERE key='question_set_hash'").fetchone()
+            return n, (str(row[0]) if row else None)
+        except sqlite3.OperationalError:
+            return n, None
+    finally:
+        con.close()
+
+
+def _write_publish_manifest(build_dir: Path, shadow: Path, gates: list[dict]) -> Path:
+    """门禁通过后写发布清单；--swap-only 只认这份清单，不认"文件存在"。"""
+    _checkpoint_shadow(shadow)
+    vec_count, qhash = _vec_state(shadow)
+    counts = _counts(shadow)
+    gate_ids = [str(g.get("id")) for g in gates]
+    if not set(REQUIRED_GATES).issubset(gate_ids):
+        raise RuntimeError(f"门禁缺项，不能写发布清单：{sorted(set(REQUIRED_GATES) - set(gate_ids))}")
+    sha = _db_sha256(shadow)
+    manifest = {
+        "build_id": f"refresh-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{sha[:12]}",
+        "schema_version": _schema_version(shadow),
+        "question_set_hash": qhash,
+        "vector_count": vec_count,
+        "question_count": counts.get("questions"),
+        "doc_content_count": counts.get("doc_contents"),
+        "gate_verdict": "PASS",
+        "gate_ids": gate_ids,
+        "validated_at": datetime.now().isoformat(timespec="seconds"),
+        "publishable": True,
+        "db_sha256": sha,
+        "db_size": shadow.stat().st_size,
+        "shadow_name": shadow.name,
+    }
+    path = build_dir / PUBLISH_MANIFEST
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def _verify_publish_manifest(build_dir: Path, shadow: Path) -> tuple[bool, str]:
+    """--swap-only 的发布凭证校验：清单 + 数据库指纹必须同时匹配。"""
+    path = build_dir / PUBLISH_MANIFEST
+    if not path.exists():
+        return False, f"缺少发布清单 {path.name}；先用普通 refresh 跑完门禁"
+    try:
+        m = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as ex:
+        return False, f"发布清单不可读：{type(ex).__name__}: {ex}"
+    if m.get("publishable") is not True or m.get("gate_verdict") != "PASS":
+        return False, "发布清单未标记 PASS/publishable"
+    gate_ids = set(m.get("gate_ids") or [])
+    missing = set(REQUIRED_GATES) - gate_ids
+    if missing:
+        return False, f"发布清单缺少门禁：{sorted(missing)}"
+    if m.get("shadow_name") != shadow.name:
+        return False, "发布清单对应的影子库名称不一致"
+    if m.get("db_sha256") != _db_sha256(shadow):
+        return False, "影子库 sha256 与发布清单不一致（文件被替换或未跑完门禁）"
+    if m.get("schema_version") != _schema_version(shadow):
+        return False, "影子库 schema_version 与发布清单不一致"
+    vec_count, qhash = _vec_state(shadow)
+    if m.get("vector_count") != vec_count:
+        return False, f"影子库向量数 {vec_count} 与清单 {m.get('vector_count')} 不一致"
+    if m.get("question_set_hash") != qhash:
+        return False, "影子库 question_set_hash 与清单不一致"
+    counts = _counts(shadow)
+    if m.get("question_count") != counts.get("questions"):
+        return False, "影子库 questions 行数与清单不一致"
+    if m.get("doc_content_count") != counts.get("doc_contents"):
+        return False, "影子库 doc_contents 行数与清单不一致"
+    return True, "发布清单校验通过"
 
 
 def _restore(snapshot: Path, online: Path) -> str:
@@ -456,6 +578,12 @@ def main(argv=None) -> int:
                 print(json.dumps({"verdict": "ABORT", "why": f"影子库不存在：{shadow}"},
                                  ensure_ascii=False, indent=1))
                 return 2
+            ok, why = _verify_publish_manifest(build_dir, shadow)
+            if not ok:
+                print(json.dumps({"verdict": "ABORT", "why": why,
+                                  "note": "拒绝切换未经门禁/被替换的影子库"},
+                                 ensure_ascii=False, indent=1))
+                return 2
             stale = _remove_shadow_sidecars(shadow)
             if stale:
                 print(json.dumps({"verdict": "ABORT",
@@ -535,6 +663,9 @@ def main(argv=None) -> int:
                 _log(build_dir, summary)
                 print(json.dumps(summary, ensure_ascii=False, indent=1, default=str))
                 return 1
+            # 门禁全 PASS 才写发布凭证；--swap-only 之后必须凭它才能切换。
+            manifest = _write_publish_manifest(build_dir, shadow, gates)
+            summary["publish_manifest"] = manifest.name
 
         # 切换前完整性：影子必须能过 quick_check
         qc_shadow = _quick_check(shadow)

@@ -25,7 +25,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db  # noqa: E402
+from mianjing_kb.kb import config, db, wlock  # noqa: E402
 from mianjing_kb.kb import status as st  # noqa: E402  （本模块有同名局部变量/参数 status，用别名避免遮蔽）
 
 try:
@@ -445,22 +445,8 @@ def run_neighbor_vec(conn, dry_run: bool = False, show: int = 0) -> int:
     return 0
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="按规则给源文档打分类")
-    ap.add_argument("--db", default=str(config.DB_PATH))
-    ap.add_argument("--status", default=st.PENDING, help="要处理的状态，默认 pending_classify")
-    ap.add_argument("--redo", action="store_true", help="连已分类的也重判（改规则后用）")
-    ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--dry-run", action="store_true", help="不写库")
-    ap.add_argument("--stats", action="store_true", help="只打印分布")
-    ap.add_argument("--show", type=int, default=0, help="打印前 N 条判定结果")
-    ap.add_argument("--neighbor", action="store_true",
-                    help="近邻判类：给 topic=未分类 的已入库件做标题近邻投票（自动应用 ≥0.6 置信，其余出待人工清单）")
-    ap.add_argument("--vec", action="store_true",
-                    help="配合 --neighbor：改用语义向量（fastembed 标题余弦，命中同义改写），门槛 cos≥0.85+conf≥0.6")
-    args = ap.parse_args(argv)
-
-    conn = db.connect(args.db, create=not args.dry_run)
+def _run(args) -> int:
+    conn = db.connect(args.db, create=not (args.dry_run or args.stats))
     rules = Rules()
 
     if args.neighbor:
@@ -523,6 +509,35 @@ def main(argv=None) -> int:
                   f"{res['topic_source']:<11} | {rel[:90]}")
     conn.close()
     return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="按规则给源文档打分类")
+    ap.add_argument("--db", default=str(config.DB_PATH))
+    ap.add_argument("--status", default=st.PENDING, help="要处理的状态，默认 pending_classify")
+    ap.add_argument("--redo", action="store_true", help="连已分类的也重判（改规则后用）")
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--dry-run", action="store_true", help="不写库")
+    ap.add_argument("--stats", action="store_true", help="只打印分布")
+    ap.add_argument("--show", type=int, default=0, help="打印前 N 条判定结果")
+    ap.add_argument("--neighbor", action="store_true",
+                    help="近邻判类：给 topic=未分类 的已入库件做标题近邻投票（自动应用 ≥0.6 置信，其余出待人工清单）")
+    ap.add_argument("--vec", action="store_true",
+                    help="配合 --neighbor：改用语义向量（fastembed 标题余弦，命中同义改写），门槛 cos≥0.85+conf≥0.6")
+    args = ap.parse_args(argv)
+    mutating = not args.dry_run and not args.stats
+    try:
+        if mutating:
+            with wlock.write_lock("kb", tool="classify", build_dir=Path(args.db).parent,
+                                  target=args.db):
+                return _run(args)
+        return _run(args)
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex)}, ensure_ascii=False, indent=1),
+              file=sys.stderr)
+        return 2
+
+
 
 
 if __name__ == "__main__":

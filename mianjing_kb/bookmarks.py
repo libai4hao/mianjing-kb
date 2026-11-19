@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pymupdf  # noqa: E402
 
-from mianjing_kb.kb import config, db, status  # noqa: E402
+from mianjing_kb.kb import config, db, status, wlock  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
@@ -53,15 +53,8 @@ def spans_from_toc(toc: list, page_count: int, file_name: str) -> tuple[int, lis
     return len(l1), out
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="扫描 PDF 书签并落 source_count/sources_json")
-    ap.add_argument("--db", default=str(config.DB_PATH), help="数据库路径")
-    ap.add_argument("--force", action="store_true", help="已扫过的也重扫")
-    ap.add_argument("--only-merged", action="store_true", help="只处理 source_count>1 的")
-    ap.add_argument("--dry-run", action="store_true", help="只统计，不写库")
-    args = ap.parse_args(argv)
-
-    conn = db.connect(args.db)
+def _run(args) -> int:
+    conn = db.connect(args.db, create=not args.dry_run)
     sql = (
         "SELECT doc_hash, file_name, src_path, dir_path, source_count "
         f"FROM source_documents WHERE ext = '.pdf' AND status = '{status.CLASSIFIED}' "
@@ -128,6 +121,27 @@ def main(argv=None) -> int:
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="扫描 PDF 书签并落 source_count/sources_json")
+    ap.add_argument("--db", default=str(config.DB_PATH), help="数据库路径")
+    ap.add_argument("--force", action="store_true", help="已扫过的也重扫")
+    ap.add_argument("--only-merged", action="store_true", help="只处理 source_count>1 的")
+    ap.add_argument("--dry-run", action="store_true", help="只统计不写库")
+    args = ap.parse_args(argv)
+    try:
+        if not args.dry_run:
+            with wlock.write_lock("kb", tool="bookmarks", build_dir=Path(args.db).parent,
+                                  target=args.db):
+                return _run(args)
+        return _run(args)
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex)}, ensure_ascii=False, indent=1),
+              file=sys.stderr)
+        return 2
+
+
 
 
 if __name__ == "__main__":

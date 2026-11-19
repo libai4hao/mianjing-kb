@@ -274,7 +274,8 @@ def test_many_read_errors_skip_purge(tmp_env, capsys):
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (h, h, bad.name, ".md", 1, str(bad), "", "classified", "t", "now", "now"))
     conn.commit()
-    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    # 有文档解析失败：即使做了保护性跳过 purge，退出码也必须非零
+    assert extract.main(["--db", str(config.DB_PATH)]) == 1
     out = json.loads(capsys.readouterr().out)
     assert out["errors"] == 2 and out["purge_skipped"] == "errors"
     assert out["purged_orphan_docs"] == 0

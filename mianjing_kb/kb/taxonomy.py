@@ -19,7 +19,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from mianjing_kb.kb import config, db  # noqa: E402
+from mianjing_kb.kb import config, db, wlock  # noqa: E402
 
 DEFAULT_GROUPS = {
     "Java": ["JVM", "垃圾回收", "类加载", "集合", "并发", "线程池", "锁", "Spring"],
@@ -173,22 +173,7 @@ def prompt_lines(tax: dict | None = None, max_groups: int = 10, max_tags: int = 
     return "；".join(parts)
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="标签配置表管理（一级/二级预设）")
-    ap.add_argument("--db", default=str(config.DB_PATH))
-    ap.add_argument("--list", action="store_true", help="列出一二级标签（表为空/缺表回退 YAML）")
-    ap.add_argument("--json", action="store_true", help="--list 输出 JSON")
-    ap.add_argument("--add", default="", metavar="一级/二级", help='新增，如 "Java/Netty"')
-    ap.add_argument("--synonym", action="append", default=[], help="配合 --add：别名（可多次）")
-    ap.add_argument("--disable", default="", metavar="二级或一级/二级", help="停用标签")
-    ap.add_argument("--export", default="", metavar="PATH", help="导出为 YAML（一级→二级）")
-    ap.add_argument("--seed", action="store_true", help="从 meta/tag_vocab.yaml 补灌缺失项")
-    args = ap.parse_args(argv)
-
-    if not any((args.list, args.add, args.disable, args.export, args.seed)):
-        ap.print_help()
-        return 2
-
+def _run_cli(args) -> int:
     conn = db.connect(args.db, create=False)
     try:
         if args.seed:
@@ -216,6 +201,35 @@ def main(argv=None) -> int:
     finally:
         conn.close()
     return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="标签配置表管理（一级/二级预设）")
+    ap.add_argument("--db", default=str(config.DB_PATH))
+    ap.add_argument("--list", action="store_true", help="列出一二级标签（表为空/缺表回退 YAML）")
+    ap.add_argument("--json", action="store_true", help="--list 输出 JSON")
+    ap.add_argument("--add", default="", metavar="一级/二级", help='新增，如 "Java/Netty"')
+    ap.add_argument("--synonym", action="append", default=[], help="配合 --add：别名（可多次）")
+    ap.add_argument("--disable", default="", metavar="二级或一级/二级", help="停用标签")
+    ap.add_argument("--export", default="", help="导出为 YAML")
+    ap.add_argument("--seed", action="store_true", help="从 meta/tag_vocab.yaml 补灌缺失项")
+    args = ap.parse_args(argv)
+    if not any((args.list, args.add, args.disable, args.export, args.seed)):
+        ap.print_help()
+        return 2
+    mutating = bool(args.seed or args.add or args.disable)
+    try:
+        if mutating:
+            with wlock.write_lock("kb", tool="taxonomy", build_dir=Path(args.db).parent,
+                                  target=args.db):
+                return _run_cli(args)
+        return _run_cli(args)
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex)}, ensure_ascii=False, indent=1),
+              file=sys.stderr)
+        return 2
+
+
 
 
 if __name__ == "__main__":

@@ -247,8 +247,14 @@ def test_refresh_lock_refuses_concurrent_run(mini_env, capsys):
 
 def test_swap_failure_keeps_shadow_for_retry(mini_env, monkeypatch, capsys):
     monkeypatch.setattr(rf, "run_gates", _all_pass)
-    monkeypatch.setattr(rf.os, "replace", lambda *a, **k: (_ for _ in ()).throw(
-        PermissionError("in use")))
+    real_replace = rf.os.replace
+
+    def fake(src, dst, *a, **k):
+        if Path(dst) == mini_env["online"]:
+            raise PermissionError("in use")
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(rf.os, "replace", fake)
     assert rf.main([]) == 1
     out = capsys.readouterr().out
     assert "--swap-only" in out and "未动" in out
@@ -256,11 +262,33 @@ def test_swap_failure_keeps_shadow_for_retry(mini_env, monkeypatch, capsys):
     assert not (mini_env["build"] / rf.LOCK_NAME).exists()    # 锁已释放
 
 
+def test_swap_only_rejects_unvalidated_shadow(mini_env):
+    """没有发布清单的影子库不能凭"--swap-only"直接上线。"""
+    import shutil
+    shadow = mini_env["build"] / rf.SHADOW_NAME
+    shutil.copy2(mini_env["online"], shadow)
+    assert rf.main(["--swap-only"]) == 2
+    assert shadow.exists()
+
+
+def test_swap_only_rejects_tampered_shadow(mini_env):
+    """清单存在但影子库 sha256 变了：拒绝切换。"""
+    import shutil
+    shadow = mini_env["build"] / rf.SHADOW_NAME
+    shutil.copy2(mini_env["online"], shadow)
+    rf._write_publish_manifest(mini_env["build"], shadow, _all_pass(None))
+    shadow.write_bytes(shadow.read_bytes() + b"\x00")
+    assert rf.main(["--swap-only"]) == 2
+    assert shadow.exists()
+
+
 def test_swap_only_reuses_shadow(mini_env, monkeypatch):
     import shutil
-    shutil.copy2(mini_env["online"], mini_env["build"] / rf.SHADOW_NAME)
+    shadow = mini_env["build"] / rf.SHADOW_NAME
+    shutil.copy2(mini_env["online"], shadow)
+    rf._write_publish_manifest(mini_env["build"], shadow, _all_pass(None))
     assert rf.main(["--swap-only"]) == 0
-    assert not (mini_env["build"] / rf.SHADOW_NAME).exists()
+    assert not shadow.exists()
 
 
 def test_sidecar_cleanup_failure_is_warning_not_abort(mini_env, monkeypatch, capsys):

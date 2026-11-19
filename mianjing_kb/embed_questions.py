@@ -99,39 +99,93 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 
 def run(out_db: Path = OUT_DB, batch: int = BATCH) -> dict:
+    """重建向量：先在旁路库编码并校验，再事务内替换线上 vec_questions。
+
+    顺序很关键：模型加载 → 旁路编码 → 数量/题集指纹校验 → 事务切换 → 写 vec_meta。
+    任何编码/模型失败都发生在替换之前，线上旧向量表保持可用。
+    """
     import sqlite3
     import sqlite_vec
+    out_db = Path(out_db)
+    staging = out_db.with_name(f".{out_db.name}.vec-staging-{os.getpid()}.db")
+    if staging.exists():
+        staging.unlink()
     con = sqlite3.connect(str(out_db))
     con.enable_load_extension(True)
     sqlite_vec.load(con)
     con.enable_load_extension(False)
-    con.execute("DROP TABLE IF EXISTS vec_questions")
-    create_vec_table(con)
     total = con.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+    qhash = question_set_hash(con)
     started = time.perf_counter()
-    done = 0
-    model = get_model()
-    while done < total:
-        rows = con.execute(
-            "SELECT qid, q_text, topic, qtype, difficulty, q_key FROM questions "
-            "ORDER BY qid LIMIT ? OFFSET ?",
-            (batch, done)).fetchall()
-        if not rows:
-            break
-        vecs = model.embed([r[1][:500] for r in rows])
-        con.executemany(
-            "INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty, q_key) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            [(r[0], sqlite_vec.serialize_float32(list(v)),
-              r[2] or "", r[3] or "", r[4] if r[4] is not None else -1,
-              r[5] or "") for r, v in zip(rows, vecs)])
-        done += len(rows)
-        print(f"[embed] {done}/{total}", file=sys.stderr, flush=True)
-    write_vec_meta(con)
-    con.commit()
+
+    # 先初始化模型，绝不能先 DROP 旧表；模型下载/ONNX 初始化失败时旧索引仍在。
+    try:
+        model = get_model()
+    except Exception:
+        con.close()
+        raise
+
+    st = sqlite3.connect(str(staging))
+    st.enable_load_extension(True)
+    sqlite_vec.load(st)
+    st.enable_load_extension(False)
+    try:
+        st.execute(f"CREATE VIRTUAL TABLE vec_questions USING vec0({vec_schema()})")
+        done = 0
+        while True:
+            rows = con.execute(
+                "SELECT qid, q_text, topic, qtype, difficulty, q_key FROM questions "
+                "ORDER BY qid LIMIT ? OFFSET ?",
+                (batch, done)).fetchall()
+            if not rows:
+                break
+            vecs = model.embed([r[1][:500] for r in rows])
+            st.executemany(
+                "INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty, q_key) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [(r[0], sqlite_vec.serialize_float32(list(v)),
+                  r[2] or "", r[3] or "", r[4] if r[4] is not None else -1,
+                  r[5] or "") for r, v in zip(rows, vecs)])
+            done += len(rows)
+            print(f"[embed] {done}/{total}", file=sys.stderr, flush=True)
+        st.commit()
+        built = st.execute("SELECT COUNT(*) FROM vec_questions").fetchone()[0]
+        if built != total:
+            raise RuntimeError(f"旁路向量数不一致：{built} != {total}")
+        if question_set_hash(con) != qhash:
+            raise RuntimeError("编码期间 questions 题集发生变化，拒绝切换向量表")
+
+        con.execute("ATTACH DATABASE ? AS staging", (str(staging),))
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute("DROP TABLE IF EXISTS main.vec_questions")
+            create_vec_table(con)
+            con.execute(
+                "INSERT INTO main.vec_questions(rowid, embedding, topic, qtype, difficulty, q_key) "
+                "SELECT rowid, embedding, topic, qtype, difficulty, q_key FROM staging.vec_questions")
+            write_vec_meta(con, qhash)
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.execute("DETACH DATABASE staging")
+    except Exception:
+        # 模型/编码/切换任何一步失败都关闭主连接；旧 vec_questions 未被 DROP。
+        con.close()
+        raise
+    finally:
+        st.close()
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(str(staging) + suffix)
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
     n = con.execute("SELECT COUNT(*) FROM vec_questions").fetchone()[0]
     elapsed = round(time.perf_counter() - started, 1)
-    qhash = read_vec_meta(con).get("question_set_hash")
     con.close()
     return {"model": MODEL, "dim": DIM, "vectors": n, "questions": total,
             "question_set_hash": qhash,

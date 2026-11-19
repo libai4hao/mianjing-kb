@@ -475,7 +475,8 @@ def _run(args) -> int:
         "qtype": qtype, "conf": conf,
     }, ensure_ascii=False, indent=1))
     conn.close()
-    return 0
+    # 有抽取/落库失败必须让自动化看到非零：仅靠 processing 状态无法区分“全成功/部分成功”。
+    return 1 if n_err else 0
 
 
 def main(argv=None) -> int:

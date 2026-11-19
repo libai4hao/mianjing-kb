@@ -1,16 +1,27 @@
-"""跨进程写锁（T15）：互斥、持有者可见、陈旧锁可接管。"""
+# -*- coding: utf-8 -*-
+"""跨进程 OS 写锁：互斥、持有者可见、进程崩溃自动释放。"""
 import json
+import multiprocessing
+import time
 
 import pytest
 
 from mianjing_kb.kb import wlock
 
 
-def test_lock_roundtrip(tmp_path):
+def _hold_lock(build_dir, ready, release):
+    with wlock.write_lock("kb", tool="child-process", build_dir=build_dir):
+        ready.set()
+        release.wait(10)
+
+
+def test_lock_roundtrip_keeps_lock_file_and_metadata(tmp_path):
     with wlock.write_lock("kb", tool="t", build_dir=tmp_path) as p:
         assert p.exists()
-        assert json.loads(p.read_text(encoding="utf-8"))["tool"] == "t"
-    assert not p.exists()
+        assert wlock._read_holder(p)["tool"] == "t"
+    # 不删除锁文件，避免 unlink/recreate 导致不同进程锁住不同 inode。
+    assert p.exists()
+    assert wlock._read_holder(p)["tool"] == "t"
 
 
 def test_second_writer_is_rejected_with_holder_info(tmp_path):
@@ -22,37 +33,52 @@ def test_second_writer_is_rejected_with_holder_info(tmp_path):
     assert ei.value.holder.get("tool") == "intake"
 
 
-def test_stale_lock_from_dead_pid_is_taken_over(tmp_path, capsys):
+def test_dead_pid_metadata_does_not_require_rename_takeover(tmp_path):
+    """锁所有权由 OS 决定；无活跃 OS 锁时，陈旧 PID 元数据可直接覆盖。"""
     d = wlock.lock_dir(tmp_path)
-    (d / "kb.lock").write_text(json.dumps({"pid": 999999999, "tool": "ghost",
-                                           "started_at": "2026-01-01T00:00:00"}),
-                               encoding="utf-8")
-    with wlock.write_lock("kb", tool="intake", build_dir=tmp_path):
-        pass                      # 不抛异常：PID 已不在，接管成功
-    assert "接管陈旧锁" in capsys.readouterr().err
-    assert list(d.glob("kb.lock.stale-*")), "陈旧锁应归档保留，供事后排查"
+    p = d / "kb.lock"
+    p.write_bytes(b"\0" + json.dumps({"pid": 999999999, "tool": "ghost"}).encode())
+    with wlock.write_lock("kb", tool="new-owner", build_dir=tmp_path):
+        assert wlock._read_holder(p)["tool"] == "new-owner"
+    assert not list(d.glob("kb.lock.stale-*"))
 
 
-def test_release_does_not_delete_a_lock_taken_over_by_others(tmp_path, capsys):
-    """本进程被判死、锁被别人接管后再退出：不能删别人的锁，否则两个写者同时跑。"""
-    with wlock.write_lock("kb", tool="mine", build_dir=tmp_path) as p:
-        p.write_text(json.dumps({"pid": 999999999, "tool": "other",
-                                 "started_at": "2026-01-01T00:00:00"}), encoding="utf-8")
-    assert p.exists(), "锁已被后人接管，退出时不应删除"
-    assert "已被 pid=999999999 接管" in capsys.readouterr().err
+def test_unreadable_or_half_written_metadata_does_not_steal_active_lock(tmp_path):
+    with wlock.write_lock("kb", tool="owner", build_dir=tmp_path) as p:
+        # 破坏诊断元数据不会释放 OS 锁，也不会让其他写者接管。
+        with p.open("r+b") as f:
+            f.seek(1)
+            f.write(b"not-json")
+            f.truncate()
+        with pytest.raises(wlock.LockHeld):
+            with wlock.write_lock("kb", tool="other", build_dir=tmp_path):
+                pass
 
 
-def test_half_written_lock_file_gets_a_short_grace(tmp_path):
-    """锁文件建好但 JSON 还没写完（并发创建窗口）：等 1 秒宽限后按陈旧锁接管。"""
-    d = wlock.lock_dir(tmp_path)
-    (d / "kb.lock").write_text("", encoding="utf-8")
-    with wlock.write_lock("kb", tool="intake", build_dir=tmp_path):
-        pass
-    assert not (d / "kb.lock").exists()
+def test_cross_process_writer_is_rejected(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    ready, release = ctx.Event(), ctx.Event()
+    proc = ctx.Process(target=_hold_lock, args=(str(tmp_path), ready, release))
+    proc.start()
+    try:
+        assert ready.wait(8), "child did not acquire lock in time"
+        with pytest.raises(wlock.LockHeld) as ei:
+            with wlock.write_lock("kb", tool="parent", build_dir=tmp_path, wait_sec=0.1):
+                pass
+        assert ei.value.holder.get("tool") == "child-process"
+    finally:
+        release.set()
+        proc.join(8)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(3)
+    assert proc.exitcode == 0
 
 
 def test_wait_then_timeout_raises(tmp_path):
     with wlock.write_lock("kb", tool="a", build_dir=tmp_path):
+        started = time.monotonic()
         with pytest.raises(wlock.LockHeld):
-            with wlock.write_lock("kb", tool="b", build_dir=tmp_path, wait_sec=0.3):
+            with wlock.write_lock("kb", tool="b", build_dir=tmp_path, wait_sec=0.2):
                 pass
+        assert time.monotonic() - started >= 0.15
