@@ -49,6 +49,7 @@ COMMANDS = {
     "taxonomy": "kb.taxonomy",
     "probe": "probe_provider",
     "refresh": "refresh",
+    "status": "status",
     "verify": "verify_ledger",
     "purge": "purge_origin",
     "demo": "demo",
