@@ -83,3 +83,24 @@ def test_pick_targets_skips_code_fragments():
     assert [r["qid"] for r in stats["skipped_code_rows"]] == [1, 3]
     got2 = [r["qid"] for r in batch_label.pick_targets(conn, skip_code=False)]
     assert got2 == [1, 2, 3]
+
+
+def test_quality_blocks_structural_hold():
+    rows = [(1, "假如有实习经验,他会问你实习中做过的项目", "其他", "agree")] + [
+        (i, f"什么是第{i}个知识点?", "后端", "agree") for i in range(2, 11)]
+    q = label_quality.assess(_conn(rows))
+    assert q["state"] == "FAIL"
+    assert any("quality_hold" in f for f in q["fails"])
+    assert q["detail"]["quality_hold_qids"] == [1]
+
+
+def test_pick_targets_skips_structural_hold_but_keeps_normal_short_question():
+    conn = _conn([(1, "假如有实习经验,他会问你实习中做过的项目", "其他", "agree"),
+                  (2, "int 类型占几个字节", "C++", "agree"),
+                  (3, "什么是虚函数?", "C++", "agree")])
+    conn.execute("UPDATE questions SET topic='未分类'")
+    stats: dict = {}
+    got = [r["qid"] for r in batch_label.pick_targets(conn, skip_code=True, stats=stats)]
+    assert got == [2, 3]
+    assert [r["qid"] for r in stats["skipped_code_rows"]] == [1]
+    assert stats["skipped_code_rows"][0]["hold_reason"] == "残缺"

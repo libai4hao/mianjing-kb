@@ -41,6 +41,11 @@ if __package__ in (None, ""):
 from mianjing_kb.kb import config, db, labelspec, taxonomy, wlock  # noqa: E402
 from mianjing_kb.kb.vocab import OTHER_TOPIC, topic_vocab  # noqa: E402
 from mianjing_kb.chunker import is_code_fragment  # noqa: E402
+from mianjing_kb.quality_rules import (  # noqa: E402
+    code_fragment_reason,
+    deterministic_quality_flags,
+    manual_review_flags,
+)
 from mianjing_kb.llm_client import ConfigError, chat, chat_json, redact, resolve_config  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
@@ -100,7 +105,7 @@ def pick_targets(conn, limit: int = 0, qids: list[int] | None = None,
     优先级：文档级主题弱（空/综合/未分类）的题先打——价值最高（docs/15 §3.5 的
     "先做 4,011 综合级"精神）；文档级主题强的靠后（题级打标是锦上添花）。
     qids 指定时只打这批题（样本集回归用），按 qid 稳定排序。
-    skip_code：默认跳过代码行/代码碎片，防 docx 纯代码块被切成一题一行后送进 LLM。
+    skip_code：默认跳过代码行/代码碎片及确定性残缺/错配/多题混杂，防坏样本送进 LLM。
     """
     sql = ("SELECT q.qid, q.q_text, q.a_text, q.q_norm_hash FROM questions q "
            "LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash "
@@ -115,11 +120,22 @@ def pick_targets(conn, limit: int = 0, qids: list[int] | None = None,
     if skip_code:
         skipped, kept = [], []
         for r in rows:
-            (skipped if is_code_fragment(r.get("q_text") or "") else kept).append(r)
+            q_text = r.get("q_text") or ""
+            a_text = r.get("a_text") or ""
+            code_reason = code_fragment_reason(q_text)
+            flags = deterministic_quality_flags(q_text, a_text)
+            if code_reason:
+                flags.add("代码片段")
+            hold_reason = code_reason or ";".join(sorted(manual_review_flags(flags)))
+            if is_code_fragment(q_text) or hold_reason:
+                skipped.append({**r, "hold_reason": hold_reason or "legacy_code_fragment"})
+            else:
+                kept.append(r)
         if stats is not None:
             stats["skipped_code"] = len(skipped)
             stats["skipped_code_rows"] = [
-                {"qid": r["qid"], "q_text": r.get("q_text") or ""} for r in skipped]
+                {"qid": r["qid"], "q_text": r["q_text"],
+                 "hold_reason": r.get("hold_reason")} for r in skipped]
         rows = kept
     if limit:
         rows = rows[:int(limit)]
