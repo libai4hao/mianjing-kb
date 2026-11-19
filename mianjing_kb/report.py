@@ -89,7 +89,7 @@ def write_report(path: Path, qs: list[dict], clusters: list, top: int, dist: int
     lines = [
         "# 同题频次报告（P1-4）",
         "",
-        f"- 口径：questions 表 {len(qs)} 题 → simhash LSH（dist≤{dist}, jaccard≥{jac}）聚类",
+        f"- 口径：questions 表 {len(qs)} 题 → 2-gram 倒排 + Jaccard≥{jac} 精确聚类（--dist 已废弃）",
         "- 见证数 = distinct collection（同一来源集只计 1；collection 为空回退 doc_hash，Q-2 2026-11-19）",
         f"- 簇总数 {len(clusters)}；**≥2 来源集的簇 {len(multi)} 个**，覆盖 {n_in_multi} 题"
         f"（{n_in_multi / max(len(qs), 1) * 100:.1f}%）",
