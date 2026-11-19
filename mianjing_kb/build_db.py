@@ -44,6 +44,22 @@ def _base_stem(stem: str) -> str:
     return stem
 
 
+def _tags_list(raw) -> list[str]:
+    """tags 列（JSON 数组）→ 去空白后的字符串列表；坏值按空数组处理。"""
+    try:
+        vals = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(vals, list):
+        return []
+    return [str(x).strip() for x in vals if str(x).strip()]
+
+
+def _tags_json(raw) -> str:
+    """检索库只存合法 JSON 数组，避免把 kb 里的坏值原样带过去。"""
+    return json.dumps(_tags_list(raw), ensure_ascii=False)
+
+
 def build(out_db: Path | None = None) -> dict:
     # 路径在调用时取 config（T3 改名后模块常量和默认参数会跨测试/跨进程冻结成旧值）
     out_db = Path(out_db or (Path(config.BUILD_DIR) / "面经库.db"))
@@ -59,6 +75,7 @@ def build(out_db: Path | None = None) -> dict:
     out.executescript("""
 PRAGMA journal_mode=WAL;
 DROP TABLE IF EXISTS documents; DROP TABLE IF EXISTS questions;
+DROP TABLE IF EXISTS question_tags;
 DROP TABLE IF EXISTS doc_contents;
 DROP TABLE IF EXISTS questions_fts; DROP TABLE IF EXISTS docs_fts;
 -- 向量表不在本脚本建，但不能留旧表：rowid=qid 与重建后的 questions 会错位（2026-11-19 审核修复）
@@ -70,9 +87,14 @@ CREATE TABLE documents(
 CREATE TABLE questions(
   qid INTEGER PRIMARY KEY, doc_hash TEXT, seq INTEGER,
   q_text TEXT, a_text TEXT, qtype TEXT, conf TEXT,
-  q_norm_hash TEXT, topic TEXT, category TEXT);
+  q_norm_hash TEXT, topic TEXT, category TEXT,
+  difficulty INTEGER, tags_json TEXT, position TEXT, quality TEXT);
 CREATE INDEX IF NOT EXISTS idx_qdoc ON questions(doc_hash);
 CREATE INDEX IF NOT EXISTS idx_qnorm ON questions(q_norm_hash);
+CREATE TABLE question_tags(
+  qid INTEGER NOT NULL, tag TEXT NOT NULL, tag_norm TEXT NOT NULL,
+  PRIMARY KEY(qid, tag_norm));
+CREATE INDEX IF NOT EXISTS idx_qt_tag ON question_tags(tag_norm, qid);
 CREATE TABLE doc_contents(doc_id INTEGER PRIMARY KEY, md_rel TEXT, doc_hash TEXT,
   mirror_hash TEXT, content TEXT);
 CREATE INDEX IF NOT EXISTS idx_dc_mirror ON doc_contents(mirror_hash);
@@ -119,26 +141,41 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(file_name, content, tokenize='trigram')
         n_docs_content += 1
     # ---- questions ----
     # 题级 topic 优先（006 列，batch_label merge 的事实源落点）→ 文档级 → 镜像继承兜底
+    # T22：difficulty/tags/position/quality 只存在于 kb.sqlite，必须下沉到检索库才能过滤。
     qs = src.execute(
         "SELECT q.qid, q.doc_hash, q.seq, q.q_text, q.a_text, q.qtype, q.conf, q.q_norm_hash, "
-        "       COALESCE(q.topic, sd.topic, ''), COALESCE(sd.category, '') "
+        "       COALESCE(q.topic, sd.topic, ''), COALESCE(sd.category, ''), "
+        "       q.difficulty, q.tags, q.position, q.quality "
         "FROM questions q LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash").fetchall()
     out.executemany(
         "INSERT INTO questions(qid, doc_hash, seq, q_text, a_text, qtype, conf, "
-        "  q_norm_hash, topic, category) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "  q_norm_hash, topic, category, difficulty, tags_json, position, quality) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(r[0], r[1], r[2], r[3], (r[4] or "")[:8000], r[5], r[6], r[7],
-          r[8] or mirror_topic.get(r[1], ""), r[9] or mirror_cat.get(r[1], "")) for r in qs])
+          r[8] or mirror_topic.get(r[1], ""), r[9] or mirror_cat.get(r[1], ""),
+          r[10], _tags_json(r[11]), r[12], r[13]) for r in qs])
     out.executemany(
         "INSERT INTO questions_fts(rowid, q_text, a_text) VALUES(?,?,?)",
         [(r[0], r[3], (r[4] or "")[:8000]) for r in qs])
+    # T22：标签规范化索引。json 数组里的每个值落一行；同一题同标签去重，供 --tag 过滤。
+    tag_rows = []
+    for r in qs:
+        for tag in _tags_list(r[11]):
+            norm = tag.strip().lower()
+            if norm:
+                tag_rows.append((r[0], tag.strip(), norm))
+    out.executemany(
+        "INSERT OR IGNORE INTO question_tags(qid, tag, tag_norm) VALUES(?,?,?)", tag_rows)
     out.commit()
     n_doc = out.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
     n_q = out.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+    n_tags = out.execute("SELECT COUNT(*) FROM question_tags").fetchone()[0]
     elapsed = round(time.perf_counter() - started, 1)
     out.close()                     # 先关再量体积：WAL 未 checkpoint 时主文件会偏小
     size_mb = round(out_db.stat().st_size / 1e6, 1)
     src.close()
     return {"documents": n_doc, "questions": n_q, "doc_contents": n_docs_content,
+            "question_tags": n_tags,
             "size_mb": size_mb, "elapsed_sec": elapsed, "db": str(out_db),
             "vec_dropped": True, "vec_rows_before": vec_before}
 

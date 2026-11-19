@@ -153,9 +153,10 @@ def _mk_vec_pair(tmp_path, src_hash: str, dst_hash: str):
     dst = tmp_path / "shadow.db"
     s = sqlite3.connect(src)
     s.executescript("CREATE TABLE questions(qid INTEGER PRIMARY KEY, q_norm_hash TEXT);"
-                    "CREATE TABLE vec_questions(rowid INTEGER PRIMARY KEY, embedding BLOB);")
+                    "CREATE TABLE vec_questions(rowid INTEGER PRIMARY KEY, embedding BLOB, "
+                    "topic TEXT, qtype TEXT, difficulty INTEGER);")
     s.execute("INSERT INTO questions VALUES (1, ?)", (src_hash,))
-    s.execute("INSERT INTO vec_questions VALUES (1, x'00' * 4)")
+    s.execute("INSERT INTO vec_questions VALUES (1, x'00' * 4, 'JVM', '八股', 3)")
     s.commit()
     s.close()
     d = sqlite3.connect(dst)
@@ -194,7 +195,7 @@ def test_copy_vec_rejects_both_null_q_norm_hash(tmp_path):
 def test_copy_vec_rejects_orphan_vectors(tmp_path):
     src, dst = _mk_vec_pair(tmp_path, src_hash="x", dst_hash="x")
     s = sqlite3.connect(src)
-    s.execute("INSERT INTO vec_questions VALUES (99, x'00' * 4)")   # rowid 99 无对应题
+    s.execute("INSERT INTO vec_questions VALUES (99, x'00' * 4, 'JVM', '八股', 3)")   # rowid 99 无对应题
     s.commit()
     s.close()
     out = rf.copy_vec(src, dst)

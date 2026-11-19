@@ -91,6 +91,41 @@ def test_build_drops_stale_vec_table(tmp_path, monkeypatch):
     assert "questions" in tables and "doc_contents" in tables
 
 
+def test_question_tags_and_label_columns_sink(tmp_path, monkeypatch):
+    """T22：difficulty/tags/position/quality 必须进检索库，tags 另建规范化索引。"""
+    from mianjing_kb import build_db as bdb
+    from mianjing_kb.kb import config, db as kbdb
+    corpus = tmp_path / "corpus"
+    build = corpus / "21-面经数据库" / "build"
+    build.mkdir(parents=True)
+    monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
+    monkeypatch.setattr(config, "BUILD_DIR", build)
+    monkeypatch.setattr(config, "CORPUS_ROOT", corpus)
+
+    kb = kbdb.connect(build / "kb.sqlite")
+    kb.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+        "dir_path, status, batch_id, first_seen_at, last_seen_at) "
+        "VALUES ('h1', ?, '甲.pdf', '.pdf', 1, 'x/甲.pdf', '02', 'classified', 't', 'now', 'now')",
+        ("h1" + "0" * 48,))
+    kb.execute(
+        "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, qtype, conf, q_norm, "
+        "q_norm_hash, simhash, span_start, span_end, extracted_at, difficulty, tags, position, quality) "
+        "VALUES (1, 'h1', 1, '什么是JVM？', '答案', '八股', 'high', '什么是jvm', 'x', 0, 0, 1, 'now', "
+        "3, '[\"类加载\",\"JVM GC\"]', '[\"后端\"]', '[\"重复\"]')")
+    kb.commit()
+    kb.close()
+
+    out_db = build / "面经库.db"
+    bdb.build(out_db=out_db)
+    con = sqlite3.connect(str(out_db))
+    row = con.execute("SELECT difficulty, tags_json, position, quality FROM questions WHERE qid=1").fetchone()
+    tags = con.execute("SELECT tag, tag_norm FROM question_tags WHERE qid=1 ORDER BY tag_norm").fetchall()
+    con.close()
+    assert row == (3, '["类加载", "JVM GC"]', '["后端"]', '["重复"]')
+    assert tags == [("JVM GC", "jvm gc"), ("类加载", "类加载")]
+
+
 def test_mirror_topic_inheritance(tmp_path, monkeypatch):
     """G3/K12 修复：镜像题（无台账行）topic 落空串 → 继承链 源文档 topic → md_rel 目录段。"""
     from mianjing_kb import build_db as bdb

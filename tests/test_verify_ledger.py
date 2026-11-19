@@ -193,6 +193,36 @@ def test_g4_vec_mismatch_fails(mini_env):
     assert any(x["kind"] == "vec_mismatch" for x in g["fails"])
 
 
+def test_g4_vec_metadata_pass_and_mismatch():
+    """T1：vec0 带 topic/qtype/difficulty 且逐行一致才 PASS；旧表/值不一致都 FAIL。"""
+    sqlite_vec = pytest.importorskip("sqlite_vec")
+    from mianjing_kb import embed_questions as E
+
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.enable_load_extension(True)
+    sqlite_vec.load(con)
+    con.enable_load_extension(False)
+    con.executescript(
+        "CREATE TABLE questions(qid INTEGER PRIMARY KEY, topic TEXT, qtype TEXT, difficulty INTEGER);"
+        "CREATE VIRTUAL TABLE questions_fts USING fts5(q_text);"
+        "INSERT INTO questions VALUES (1,'JVM','八股',3),(2,'MySQL','八股',2);"
+        "INSERT INTO questions_fts(rowid, q_text) VALUES (1,'jvm'),(2,'mysql');")
+    E.create_vec_table(con)
+    for qid, topic, diff in ((1, "JVM", 3), (2, "MySQL", 2)):
+        con.execute("INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty) "
+                    "VALUES (?,?,?,?,?)",
+                    (qid, sqlite_vec.serialize_float32([0.0] * E.DIM), topic, "八股", diff))
+    con.commit()
+    assert vl.g4_index(con)["state"] == "PASS"
+    con.execute("UPDATE vec_questions SET topic='Redis' WHERE rowid=1")
+    con.commit()
+    g = vl.g4_index(con)
+    assert g["state"] == "FAIL"
+    assert any(x["kind"] == "vec_metadata_mismatch" for x in g["fails"])
+    con.close()
+
+
 # ---------------- G8 单身份（P0-1） ----------------
 def test_g8_pass_when_single_identity(mini_env):
     g = vl.g8_single_identity(mini_env["out"])

@@ -205,6 +205,15 @@ def copy_vec(src_db: Path, dst_db: Path) -> dict:
                           "WHERE type='table' AND name='vec_questions'").fetchone()[0]
         if not has:
             return {"ok": True, "kind": "absent", "detail": "现行库无向量表"}
+        try:
+            from mianjing_kb.embed_questions import create_vec_table, vec_metadata_ready
+            if not vec_metadata_ready(con, "vec_questions", schema="cur"):
+                return {"ok": False, "kind": "vec_schema_old",
+                        "detail": "现行向量表没有 topic/qtype/difficulty 元数据列；"
+                                  "请用 --reembed 重建"}
+        except Exception as ex:  # noqa: BLE001
+            return {"ok": False, "kind": "error",
+                    "detail": f"向量表结构检查失败 {type(ex).__name__}: {str(ex)[:80]}"}
         n_q_dst = con.execute("SELECT COUNT(*) FROM main.questions").fetchone()[0]
         # ① 两侧 q_norm_hash 同为空时，下面的对齐校验会"全等于空"而误判通过
         both_empty = con.execute(
@@ -240,10 +249,10 @@ def copy_vec(src_db: Path, dst_db: Path) -> dict:
         con.enable_load_extension(True)
         sqlite_vec.load(con)
         con.enable_load_extension(False)
-        from mianjing_kb.embed_questions import DIM
-        con.execute(f"CREATE VIRTUAL TABLE vec_questions USING vec0(embedding float[{DIM}])")
-        con.execute("INSERT INTO vec_questions(rowid, embedding) "
-                    "SELECT rowid, embedding FROM cur.vec_questions")
+        from mianjing_kb.embed_questions import create_vec_table
+        create_vec_table(con)
+        con.execute("INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty) "
+                    "SELECT rowid, embedding, topic, qtype, difficulty FROM cur.vec_questions")
         n_dst = con.execute("SELECT COUNT(*) FROM vec_questions").fetchone()[0]
         n_src = con.execute("SELECT COUNT(*) FROM cur.vec_questions").fetchone()[0]
         con.commit()

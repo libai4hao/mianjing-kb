@@ -26,9 +26,35 @@ OUT_DB = Path(config.BUILD_DIR) / "面经库.db"
 MODEL = "BAAI/bge-small-zh-v1.5"
 DIM = 512
 BATCH = 256
+# T1/T22：可下推的过滤字段进 vec0 metadata；position/quality/tags 是多选/自由文本，
+# 不能做等值 metadata，留在 questions/question_tags 侧做过采样后的 SQL 过滤。
+VEC_META_COLUMNS = ("topic", "qtype", "difficulty")
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")  # fastembed 走国内镜像
 
 _MODEL = None
+
+
+def vec_schema() -> str:
+    """vec0 建表 DDL 的唯一来源（embed / refresh.copy_vec / 测试共用）。"""
+    return (f"embedding float[{DIM}], "
+            "topic text, qtype text, difficulty integer")
+
+
+def create_vec_table(con) -> None:
+    con.execute(f"CREATE VIRTUAL TABLE vec_questions USING vec0({vec_schema()})")
+
+
+def vec_columns(con, name: str = "vec_questions", schema: str = "main") -> set[str]:
+    """vec0 的列名；name 不存在返回空集。schema 可为 cur/main（ATTACH 后校验源表）。"""
+    try:
+        return {r[0] for r in con.execute(
+            "SELECT name FROM pragma_table_info(?, ?)", (name, schema))}
+    except Exception:  # noqa: BLE001 —— 表不存在/扩展未加载
+        return set()
+
+
+def vec_metadata_ready(con, name: str = "vec_questions", schema: str = "main") -> bool:
+    return set(VEC_META_COLUMNS) <= vec_columns(con, name, schema)
 
 
 def get_model():
@@ -52,21 +78,24 @@ def run(out_db: Path = OUT_DB, batch: int = BATCH) -> dict:
     sqlite_vec.load(con)
     con.enable_load_extension(False)
     con.execute("DROP TABLE IF EXISTS vec_questions")
-    con.execute(f"CREATE VIRTUAL TABLE vec_questions USING vec0(embedding float[{DIM}])")
+    create_vec_table(con)
     total = con.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
     started = time.perf_counter()
     done = 0
     model = get_model()
     while done < total:
         rows = con.execute(
-            "SELECT qid, q_text FROM questions ORDER BY qid LIMIT ? OFFSET ?",
+            "SELECT qid, q_text, topic, qtype, difficulty FROM questions "
+            "ORDER BY qid LIMIT ? OFFSET ?",
             (batch, done)).fetchall()
         if not rows:
             break
         vecs = model.embed([r[1][:500] for r in rows])
         con.executemany(
-            "INSERT INTO vec_questions(rowid, embedding) VALUES (?, ?)",
-            [(r[0], sqlite_vec.serialize_float32(list(v))) for r, v in zip(rows, vecs)])
+            "INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(r[0], sqlite_vec.serialize_float32(list(v)),
+              r[2] or "", r[3] or "", r[4]) for r, v in zip(rows, vecs)])
         done += len(rows)
         print(f"[embed] {done}/{total}", file=sys.stderr, flush=True)
     con.commit()

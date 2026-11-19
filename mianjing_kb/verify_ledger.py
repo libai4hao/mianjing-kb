@@ -300,9 +300,14 @@ def g3_topic(out_conn) -> dict:
 
 # ---------------- G4 索引一致性 ----------------
 def g4_index(out_conn) -> dict:
-    """vec_questions / questions_fts 与 questions 行数与 qid 集合一致。"""
+    """vec_questions / questions_fts 与 questions 行数与 qid 集合一致。
+
+    T1 起 vec0 还须带 topic/qtype/difficulty 元数据，并与 questions 同行一致；
+    旧表只有 embedding 时判 FAIL——带过滤的 KNN 会静默退化成后过滤。
+    """
     sql = ("SELECT COUNT(*) FROM questions; SELECT COUNT(*) FROM vec_questions; "
-           "SELECT rowid FROM vec_questions; SELECT COUNT(*) FROM questions_fts;")
+           "SELECT rowid FROM vec_questions; SELECT COUNT(*) FROM questions_fts; "
+           "vec0 metadata: topic/qtype/difficulty 与 questions 逐行相等")
     n_q = out_conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
     has_vec = out_conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE name='vec_questions'").fetchone()[0] > 0
@@ -330,12 +335,39 @@ def g4_index(out_conn) -> dict:
     if n_vec != n_q or vec_ids != q_ids:
         fails.append({"kind": "vec_mismatch", "questions": n_q, "vec": n_vec,
                       "qid_diff": len(q_ids ^ vec_ids)})
+    # T1 元数据校验：列存在 + 逐行值一致（topic/qtype 必须非空；difficulty 允许 NULL）
+    try:
+        cols = {r[1] for r in out_conn.execute("PRAGMA table_info(vec_questions)")}
+    except Exception:  # noqa: BLE001
+        cols = set()
+    need = {"topic", "qtype", "difficulty"}
+    if not need <= cols:
+        fails.append({"kind": "vec_metadata_missing", "columns": sorted(cols),
+                      "required": sorted(need),
+                      "note": "旧 vec0 只有 embedding；必须 --reembed 重建"})
+    else:
+        meta_bad = out_conn.execute(
+            "SELECT COUNT(*) FROM vec_questions v JOIN questions q ON q.qid=v.rowid "
+            "WHERE COALESCE(v.topic,'') != COALESCE(q.topic,'') "
+            "   OR COALESCE(v.qtype,'') != COALESCE(q.qtype,'') "
+            "   OR COALESCE(CAST(v.difficulty AS TEXT),'') "
+            "      != COALESCE(CAST(q.difficulty AS TEXT),'')").fetchone()[0]
+        empty_topic = out_conn.execute(
+            "SELECT COUNT(*) FROM vec_questions WHERE COALESCE(topic,'')=''").fetchone()[0]
+        empty_qtype = out_conn.execute(
+            "SELECT COUNT(*) FROM vec_questions WHERE COALESCE(qtype,'')=''").fetchone()[0]
+        if meta_bad:
+            fails.append({"kind": "vec_metadata_mismatch", "rows": meta_bad})
+        if empty_topic or empty_qtype:
+            fails.append({"kind": "vec_metadata_empty", "topic": empty_topic,
+                          "qtype": empty_qtype})
     if n_fts != n_q or fts_ids != q_ids:
         fails.append({"kind": "fts_mismatch", "questions": n_q, "fts": n_fts,
                       "rowid_diff": len(q_ids ^ fts_ids)})
     state = "PASS" if not fails else "FAIL"
     return _gate("G4", "索引一致性", "硬", state, fails,
-                 {"questions": n_q, "vec": n_vec, "fts": n_fts}, sql)
+                 {"questions": n_q, "vec": n_vec, "fts": n_fts,
+                  "vec_metadata": sorted(need & cols)}, sql)
 
 
 # ---------------- G5 台账-磁盘一致 ----------------
