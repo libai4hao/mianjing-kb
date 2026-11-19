@@ -7,10 +7,8 @@ D2 代码行成题：docx 无 ``` 围栏，编号代码行漏过 _is_codeish →
 D3 大题说明/多题粘连：「综合大题（五道选两道…）」被当题干；
    答案列表状态把带提问语义的编号子题吞进上一题答案。
 
-阶段 0 以 xfail(strict) 挂起；对应阶段修复后必须转 passed。
+阶段 0 以 xfail(strict) 挂起；对应阶段修复后已全部转 passed（2026-11-20）。
 """
-import pytest
-
 from mianjing_kb import chunker
 
 
@@ -137,7 +135,6 @@ D3_SUBQUESTIONS_SWALLOWED = """## 1、说说数据库优化的几种方式
 """
 
 
-@pytest.mark.xfail(strict=True, reason="D3 未修复：大题说明行被当题干（阶段3 转绿）")
 def test_d3_exam_section_header_is_not_a_question():
     items = chunker.chunk_v2(D3_EXAM_SECTION)["items"]
     qs = [it["q"] for it in items]
@@ -146,7 +143,6 @@ def test_d3_exam_section_header_is_not_a_question():
     assert any("秒杀系统" in q for q in qs), qs
 
 
-@pytest.mark.xfail(strict=True, reason="D3 未修复：列表状态吞掉带提问语义的子题（阶段3 转绿）")
 def test_d3_numbered_subquestions_break_answer_list():
     items = chunker.chunk_v2(D3_SUBQUESTIONS_SWALLOWED)["items"]
     qs = [it["q"] for it in items]
