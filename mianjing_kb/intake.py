@@ -295,18 +295,19 @@ def main(argv=None) -> int:
 
     actions: Counter = Counter()
     by_ext: Counter = Counter()
-    seen_hashes: dict[str, str] = {}   # 本次扫描内存判重：dry-run 与真实运行的重复数对齐
+    seen_hashes: dict[str, tuple[str, str]] = {}   # 短指纹 -> (本次路径, 完整 sha256)
     pending_ghosts: list[tuple[str, str]] = []   # (旧 hash, 新 hash)，扫完再退役
+    collisions: list[dict] = []        # 16 位短指纹碰撞：保留双方完整 sha256/路径，算硬失败
     started = time.perf_counter()
     pending_writes = 0
 
-    def flush_batch(state: str | None = None) -> None:
+    def flush_batch(state: str | None = None, note: str | None = None) -> None:
         """提交并刷新批次进度（每 CHUNK_SIZE 件一次；final=True 时写结束状态）。"""
         nonlocal pending_writes
         if write_conn is None:
             return
-        db.update_batch(write_conn, batch,
-                        state=state or db.BATCH_RUNNING, **_batch_counts(actions))
+        db.update_batch(write_conn, batch, state=state or db.BATCH_RUNNING,
+                        note=note, **_batch_counts(actions))
         write_conn.commit()
         pending_writes = 0
 
@@ -343,13 +344,41 @@ def main(argv=None) -> int:
                 actions["candidate"] += 1
                 continue
             if doc_hash in seen_hashes:
-                # 同一批内重复：dry-run 不会写库，必须靠内存 seen 才能给出真实重复数
+                # 同一批内先按完整 sha256 二次判定：同短指纹不同全文是身份冲突，不是重复。
+                prev_rel, prev_sha = seen_hashes[doc_hash]
+                if prev_sha != sha:
+                    collisions.append({
+                        "doc_hash": doc_hash,
+                        "new_path": rel,
+                        "new_sha256": sha,
+                        "old_path": prev_rel,
+                        "old_sha256": prev_sha,
+                        "old_status": None,
+                    })
+                    print(f"[warn] {rel}: 同批 16 位短指纹撞上不同内容，按硬冲突计失败",
+                          file=sys.stderr)
+                    actions["hash_collision"] += 1
+                    continue
                 actions["duplicate"] += 1
                 continue
-            seen_hashes[doc_hash] = rel
+            seen_hashes[doc_hash] = (rel, sha)
             action, status_after = decide(conn, doc_hash, rel, p.name, quarantined, sha256=sha)
             if action == "hash_collision":
-                print(f"[warn] {rel}: 16 位短指纹撞上不同内容，跳过（需人工核对）", file=sys.stderr)
+                old = db.get_by_hash(conn, doc_hash)
+                old_rel = ""
+                if old is not None:
+                    old_rel = (f"{old['dir_path']}/{old['file_name']}"
+                               if old["dir_path"] else old["file_name"])
+                collisions.append({
+                    "doc_hash": doc_hash,
+                    "new_path": rel,
+                    "new_sha256": sha,
+                    "old_path": old_rel,
+                    "old_sha256": old["sha256"] if old is not None else None,
+                    "old_status": old["status"] if old is not None else None,
+                })
+                print(f"[warn] {rel}: 16 位短指纹撞上不同内容，按硬冲突计失败（需人工核对）",
+                      file=sys.stderr)
                 actions["hash_collision"] += 1
                 continue
             if quarantined and action == "added":
@@ -429,7 +458,11 @@ def main(argv=None) -> int:
                 if old_hash in seen_hashes:
                     continue
                 actions["ghost_retired"] += retire_hash(write_conn, old_hash, new_hash)
-            flush_batch(state=db.BATCH_COMPLETED)
+            flush_batch(state=(db.BATCH_FAILED
+                               if (actions["error"] or actions["hash_collision"])
+                               else db.BATCH_COMPLETED),
+                        note=(f"hash_collision={actions['hash_collision']}"
+                              if actions["hash_collision"] else None))
     except Exception as ex:                            # noqa: BLE001
         # 已提交的分块保留（下次重扫按 hash 幂等续）；先把批次打成 failed 再退出
         if write_conn is not None:
@@ -450,6 +483,15 @@ def main(argv=None) -> int:
         stack.close()
 
     elapsed = time.perf_counter() - started
+    collision_report = None
+    if collisions and not args.dry_run:
+        path = Path(args.db).parent / f"hash_collisions-{batch}.json"
+        try:
+            path.write_text(json.dumps({"batch": batch, "collisions": collisions},
+                                       ensure_ascii=False, indent=2), encoding="utf-8")
+            collision_report = str(path)
+        except OSError as ex:
+            print(f"[warn] 碰撞记录写入失败：{ex}", file=sys.stderr)
     summary = {
         "root": str(root),
         "batch": batch,
@@ -457,11 +499,13 @@ def main(argv=None) -> int:
         "db": args.db if conn is not None else "(no db, dry count only)",
         "elapsed_sec": round(elapsed, 2),
         "actions": dict(actions),
+        "hash_collisions": collisions,
+        "collision_report": collision_report,
         "ignored_by_ext": dict(by_ext.most_common(10)),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    # 有文件处理失败时让 pipeline/自动化看到非零；hash_collision 是已知跳过项，不计失败。
-    return 1 if actions["error"] else 0
+    # hash_collision 是身份冲突，和读取失败一样让整批非零退出。
+    return 1 if (actions["error"] or actions["hash_collision"]) else 0
 
 
 if __name__ == "__main__":

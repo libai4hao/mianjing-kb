@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "mianjing_kb"))
 
-from mianjing_kb.kb import config, db, hashing, status  # noqa: E402
+from mianjing_kb.kb import config, db, hashing, status, wlock  # noqa: E402
 
 # 审核修复（2026-11-18）：原 insert(0) 会把语料侧 tools 顶到最前，遮蔽本仓库同名模块
 # （同进程后续 from mianjing_kb.build_db import build 会解析到语料侧旧模块）；改为 append 放到末尾。
@@ -210,12 +210,7 @@ def _converter_meta(cv) -> dict:
             "convert_one_source": _converter_source(cv)}
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="同名覆盖重转（输出名带 doc_hash 后缀）")
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--extra", nargs="*", default=[], help="追加补转的语料树相对路径")
-    args = ap.parse_args(argv)
-
+def _run(args) -> int:
     try:
         jobs = losers_from_log()
     except FileNotFoundError:
@@ -264,6 +259,25 @@ def main(argv=None) -> int:
                       "failures": [r for r in results if r["ok"] is False][:30]},
                      ensure_ascii=False, indent=1))
     return 0 if fail_n == 0 else 1
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="同名覆盖重转（输出名带 doc_hash 后缀）")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--extra", nargs="*", default=[], help="追加补转的语料树相对路径")
+    args = ap.parse_args(argv)
+
+    if args.dry_run:
+        return _run(args)
+    try:
+        with wlock.write_lock("kb", tool="reconvert",
+                              build_dir=Path(config.DB_PATH).parent):
+            return _run(args)
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                          "note": "另一个写库工具在跑；等它结束再重试"},
+                         ensure_ascii=False, indent=2), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

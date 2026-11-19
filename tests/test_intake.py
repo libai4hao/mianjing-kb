@@ -566,3 +566,44 @@ def test_intake_refuses_when_another_writer_holds_lock(corpus, tmp_path, capsys)
     err = capsys.readouterr().err
     assert "batch_label" in err and "ABORT" in err
     assert not db_path.exists()                    # 拿不到锁就不建库
+
+
+def test_short_hash_collision_fails_batch_and_keeps_both_paths(tmp_path, monkeypatch, capsys):
+    """D-29：不同完整 SHA256 撞同一 16 位短指纹 → 不登记 duplicate、不覆盖旧行、整批失败。"""
+    root = tmp_path / "corpus"
+    a = root / "02-JVM" / "a.pdf"
+    b = root / "02-JVM" / "b.pdf"
+    a.parent.mkdir(parents=True)
+    a.write_bytes(b"content-a")
+
+    full_a = "a" * 16 + "0" * 48
+    full_b = "a" * 16 + "1" * 48
+
+    def fake(p):
+        digest = full_b if Path(p).name == "b.pdf" else full_a
+        return digest, Path(p).stat().st_size
+
+    monkeypatch.setattr(intake.hashing, "sha256_file_sized", fake)
+    db_path = tmp_path / "kb.sqlite"
+    assert main(["--root", str(root), "--db", str(db_path)]) == 0
+    capsys.readouterr()
+
+    b.write_bytes(b"content-b")                 # 同一短指纹，不同完整 SHA256
+    assert main(["--root", str(root), "--db", str(db_path)]) == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["actions"]["hash_collision"] == 1
+    assert len(summary["hash_collisions"]) == 1
+    hit = summary["hash_collisions"][0]
+    assert hit["new_path"].endswith("b.pdf")
+    assert hit["old_path"].endswith("a.pdf")
+    assert hit["new_sha256"] == full_b and hit["old_sha256"] == full_a
+    assert summary["collision_report"] and Path(summary["collision_report"]).exists()
+
+    data = rows(db_path)
+    assert len(data) == 1 and data[0]["file_name"] == "a.pdf"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    batch = conn.execute("SELECT state, note FROM batches WHERE batch_id=?",
+                         (summary["batch"],)).fetchone()
+    conn.close()
+    assert batch["state"] == "failed" and "hash_collision=1" in (batch["note"] or "")

@@ -52,6 +52,7 @@ COMMANDS = {
     "status": "status",
     "manifest": "manifests",
     "verify": "verify_ledger",
+    "preflight": "preflight",
     "purge": "purge_origin",
     "demo": "demo",
     "eval": "eval_retrieval",

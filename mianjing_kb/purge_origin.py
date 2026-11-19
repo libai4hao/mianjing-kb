@@ -35,7 +35,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, events, hashing, status  # noqa: E402
+from mianjing_kb.kb import config, db, events, hashing, status, wlock  # noqa: E402
 
 OK_STATUS = status.PURGE_OK
 
@@ -125,7 +125,7 @@ def _log_path(log: Path) -> Path:
     return alt
 
 
-def main(argv=None) -> int:
+def _parse(argv=None):
     ap = argparse.ArgumentParser(description="删除已收入语料的原件")
     ap.add_argument("--roots", nargs="+", required=True, help="导入源目录白名单")
     ap.add_argument("--db", default=str(config.DB_PATH))
@@ -142,7 +142,26 @@ def main(argv=None) -> int:
                     help="删除前不重算原文 sha256（快一倍，但会把'扫描后内容被换掉'的窗口留开）")
     ap.add_argument("--no-backup", action="store_true",
                     help="--apply 前不备份 kb.sqlite（默认备份到 <db>/backups，保留 5 份）")
-    args = ap.parse_args(argv)
+    return ap.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = _parse(argv)
+    # 缺 --yes 在 _main_locked 内拒绝，不持锁也不动盘。
+    if not (args.apply and args.yes):
+        return _main_locked(args)
+    try:
+        with wlock.write_lock("kb", tool="purge_origin",
+                              build_dir=Path(args.db).parent):
+            return _main_locked(args)
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                          "note": "另一个写库工具在跑；等它结束再重试"},
+                         ensure_ascii=False, indent=2), file=sys.stderr)
+        return 2
+
+
+def _main_locked(args) -> int:
     refused = False
     if args.apply and not args.yes:
         print("[refuse] --apply 必须配 --yes：这是物理删除，缺一步就只打印计划", file=sys.stderr)
