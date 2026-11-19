@@ -91,8 +91,148 @@ RE_LIST_ITEM = re.compile(r'^\s*(?:[-+•]|(?!\*)\*|[>|\]]|#{1,6}\s|\d{1,3}\s*[.
 RE_CJK = re.compile(r'[\u4e00-\u9fff]')
 RE_CODE_HEAD = re.compile(r'^\s*(?:#\s*(?:include|define|ifdef|ifndef|endif|pragma)\b|//|/\s*\*)')
 RE_CODE_CALL = re.compile(
-    r'\b(?:printf|fprintf|malloc|calloc|realloc|free|strlen|strcpy|memcpy)\s*\(')
+    r'\b(?:printf|fprintf|malloc|calloc|realloc|free|strlen|strcpy|memcpy)\s*[（(]')
 RE_CODE_ASSIGN = re.compile(r'^[A-Za-z_]\w*(?:\s*\[[^\]]*\])?\s*=\s*[^=]')
+
+# ---- 文档结构识别（2026-11-20 切题回归修复）----
+RE_TOC_HEADER = re.compile(r'^\s*(?:目\s*录|contents|table\s+of\s+contents)\s*$', re.I)
+RE_MD_NUM_HEADING = re.compile(r'^\s*#{2,6}\s+\d{1,3}(?:\s*[.、．]|\s*[)）])')
+RE_MD_H12 = re.compile(r'^\s*#{1,2}\s+\S')
+RE_LIST_LEAD = re.compile(
+    r'(?:如下|以下|下列|包括|包含|分为|分成|分别是|基本要素|几个方面|哪几种|哪些|几种|四种|三种)')
+RE_NESTED_NUM = re.compile(
+    r'^\s*(?:#{1,6}\s+)?((?:\d{1,3}\s*[.、．]\s*){2,})([^\d].+)$')
+RE_HIER_NUM = re.compile(
+    r'^\s*(?:#{1,6}\s+)?(\d{1,3}(?:\.\d{1,3}){2,3})\s+(.+)$')
+
+
+def _strip_all_numbering(text: str) -> str:
+    """去掉行首一层或多层题号/列表号，用于代码判定（不改动题干）。"""
+    s = strip_bold((text or "").strip())
+    while True:
+        m = re.match(r'^(?:#{1,6}\s+)?(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[.、．)）]\s*', s)
+        if not m:
+            break
+        s = s[m.end():].strip()
+    return s
+
+
+def _is_codeish(text: str) -> bool:
+    """行级代码判定：优先代码标点/关键字，放过“int 类型占几个字节”这类自然语言题。"""
+    s = _strip_all_numbering(text)
+    if not s:
+        return False
+    if s in ("{", "}", "};", "});", ");"):
+        return True
+    if RE_CODE_HEAD.match(s) or RE_CODE_CALL.search(s):
+        return True
+    if re.match(r'^\s*(?:if|for|while|switch|catch|return|else)\b', s, re.I):
+        return True
+    if re.match(r'^\s*而\s*[（(]', s):          # OCR 把 while 译成“而”
+        return True
+    if re.match(r'^\s*(?:const|static|unsigned|signed|struct|class|enum|typedef)\b', s, re.I):
+        return True
+    if re.match(r'^\s*(?:int|char|float|double|long|short|void|bool|size_t)\b', s, re.I):
+        # 只有带代码标点/符号的声明才判代码；纯中文题干如“int 类型占几个字节”保留。
+        return bool(re.search(r'[;=,\[\](){}*（）]', s)) or not RE_CJK.search(s)
+    if re.match(r'^\s*(?:&&|\|\|)', s):
+        return True
+    if re.match(r'^\s*\((?:\s*(?:int|char|float|double|long|short|void|bool|size_t|unsigned|signed)\b)', s, re.I) and not RE_CJK.search(s):
+        return True
+    if re.match(r'^\s*\[[^\]]+\]\s*[?？;]?\s*$', s) and not RE_CJK.search(s):
+        return True
+    if re.search(r'=', s) and not _looks_questionish(s):
+        return True
+    if re.search(r'[\[\]]', s) and re.search(r'[（）()]', s) and not _looks_questionish(s):
+        return True
+    return bool(re.search(r'(?:;|\+\+|--|->|==|!=|<=|>=|\+=|-=)', s)) and not _looks_questionish(s)
+
+
+def _toc_mask(lines: List[str]) -> set[int]:
+    """识别文首目录区，返回需要标为 toc 的行号集合。
+
+    目录经常跨行、跨页，不能只靠“点线+页码”的单行正则。这里以“目录”标题为
+    起点，以第一个非目录的 H1/H2 标题（或连续页码后的首个正文行）为终点。
+    """
+    n = len(lines)
+    start = None
+    for i in range(min(n, 240)):
+        if RE_TOC_HEADER.match(lines[i].strip()):
+            start = i
+            break
+    if start is None:
+        return set()
+    leaders = pages = 0
+    end = n
+    for j in range(start + 1, n):
+        s = lines[j].strip()
+        if not s:
+            continue
+        if RE_PAGE.match(s):
+            pages += 1
+            continue
+        if RE_TOC.search(s):
+            leaders += 1
+            continue
+        if re.fullmatch(r'[-=_—–\s]{3,}', s):
+            continue
+        # 目录条目多为 #### / 缩进 / 带页码；H1-H2 且不带点线，视为正文开始。
+        if RE_MD_H12.match(s) and not RE_TOC.search(s) and leaders >= 2:
+            end = j
+            break
+        # 无 Markdown 标题的 PDF 目录：连续页码后，首个不缩进、非目录样式行视为正文。
+        # 但若后面 2000 行内还有 H1/H2，优先等真正的正文标题，避免目录页脚提前截断。
+        future_h12 = any(RE_MD_H12.match(x.strip()) for x in lines[j:j + 2000])
+        if (pages >= 3 and not future_h12 and not s.startswith((" ", "\t"))
+                and not RE_TOC.search(s) and len(CJK.findall(s)) >= 4):
+            end = j
+            break
+    return set(range(start, end))
+
+
+def _match_nested_number(line: str) -> Optional[Tuple[int, str]]:
+    """`1. 2. 题干` / `42.3. 题干` / `11.3.1 题干` → (最后一层题号, 题干)。"""
+    m = RE_NESTED_NUM.match(line)
+    if m:
+        nums = re.findall(r'\d{1,3}', m.group(1))
+        if nums:
+            return int(nums[-1]), m.group(2).strip()
+    m = RE_HIER_NUM.match(line)
+    if m:
+        nums = re.findall(r'\d{1,3}', m.group(1))
+        if nums:
+            return int(nums[-1]), m.group(2).strip()
+    return None
+
+
+def _is_list_item_question(qtext: str) -> bool:
+    """编号列表项是否带独立提问语义；不带则默认是答案列表。"""
+    s = strip_bold((qtext or "").strip())
+    if not s:
+        return False
+    if len(s) > 160:
+        return True
+    if s.rstrip().endswith(("：", ":")):
+        return True
+    if re.search(r'[?？]', s) or _is_qline(s):
+        return True
+    if _is_question_heading(s):
+        return True
+    if re.match(r'^(?:如何|怎么|为什么|什么|哪些|哪几|是否|能否|请|谈谈|说说|介绍|解释|实现|写|设计|比较|分析|给定|已知|求|编写|编程|打印|输出|输入|判断|找出|统计|生成)', s):
+        return True
+    if re.match(r'^通过.{0,20}(?:生成|填充|输出|计算|求|实现)', s):
+        return True
+    return False
+
+
+def _looks_section_line(s: str) -> bool:
+    """面经里的“阿里二面/总监面/HR面/基础篇”等无编号章节标题。"""
+    if not s or len(s) > 40 or re.search(r'[?？]', s):
+        return False
+    if RE_LIST_ITEM.match(s) or RE_KPOINT.match(s):
+        return False
+    return bool(re.search(r'(?:面经|面试|一面|二面|三面|四面|HR面|总监面|交叉面|基础篇|进阶篇|总结篇|数据结构篇|算法篇)', s))
+
 
 
 def is_code_fragment(q: str) -> bool:
@@ -140,6 +280,36 @@ def _looks_questionish(s: str) -> bool:
     return bool(RE_QEND.search(s) or RE_INTERROGATIVE.search(s[:8]) or RE_KPOINT.match(s))
 
 
+def _is_question_heading(s: str) -> bool:
+    """章节/加粗小标题是否具备题目语义。
+
+    `_is_qline` 只查行首 8 字，像“sleep方法和wait方法有什么区别”这种
+    问词在句中的标题会漏；这里补一层“标题型问句”判定，但仍排除
+    “知识点汇总/本地方法栈/简化配置”这类答案小节。
+    """
+    s = strip_bold((s or "").strip())
+    if not s:
+        return False
+    # 列表/对比引导句先排除：“两者的主要区别如下：”虽含问词，但不是题目。
+    if s.endswith(("：", ":")) and re.search(r'(?:如下|以下|包括|几点|几个方面)', s):
+        return False
+    if re.match(r'^(?:两者|二者|下面|下列|主要|具体来看|简单来说|也就是说|需要注意)', s):
+        return False
+    if _is_qline(s) or RE_KPOINT.match(s):
+        return True
+    if len(s) > 60:
+        return False
+    if re.match(r'^(?:简单总结|总结一下|简单来说|也就是说|需要注意)', s):
+        return False
+    if s.endswith("。") and not re.search(r'[?？]', s):
+        return (len(s) <= 35 and bool(re.search(
+            r'(?:如何|怎么|为什么|为何|是什么|什么是|哪些|哪几|区别|流程|机制|作用|原理|实现方式)',
+            s)))
+    return bool(re.search(
+        r'(?:是什么|什么是|如何|怎么|为什么|为什么|为何|哪些|哪几|区别|作用|原理|流程|'
+        r'机制|优缺点|优点|缺点|使用场景|实现方式)', s))
+
+
 _QNORM_CLEAN = re.compile(r"[^\u4e00-\u9fa5a-z0-9]+")
 
 
@@ -176,6 +346,9 @@ def _tokens(text: str) -> int:
 def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
     """返回 (qid|None, q_text, style)；style ∈ {题号, 标题}。"""
     line = strip_bold(line)          # 整行粗体题号（**1. 什么是 X**）先剥壳再匹配
+    nested = _match_nested_number(line)
+    if nested and (re.search(r'[?？]', nested[1]) or len(nested[1]) >= 4):
+        return nested[0], nested[1], "题号"
     if RE_DECIMAL.match(line):
         return None
     for pat in (RE_NUM_DOT, RE_NUM_PAREN, RE_NUM_TAIL):
@@ -212,6 +385,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
 
     # ---- 第一遍：行分类 ----
     kinds: List[str] = ["text"] * n
+    toc_lines = _toc_mask(lines)
     in_code = False
     for i, ln in enumerate(lines):
         s = ln.strip()
@@ -222,11 +396,17 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         if in_code:
             kinds[i] = "code"
             continue
+        if i in toc_lines:
+            kinds[i] = "toc"
+            continue
         if s.startswith("|"):
             kinds[i] = "table"
             continue
         if s.startswith(">"):
             kinds[i] = "quote"
+            continue
+        if _is_codeish(s):
+            kinds[i] = "code"
             continue
         if _is_promo(s):   # v2: 致谢/招聘广告短行；像题目的「广告系统设计」不剔
             kinds[i] = "ack"
@@ -258,6 +438,8 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
     last_qid: Optional[int] = None
     prev_blank = True
     last_problem_mark = False   # v2 增强：问题N 纯标记行武装紧随的独立问句行
+    list_active = False         # 普通编号列表：1. 原子性 / 4. 持久性 不是题
+    list_pending = False        # 上一行是“如下/以下/四个要素”等列表引导
     for i, ln in enumerate(lines):
         if kinds[i] != "text" or ln.strip() in watermark:
             # 页码/目录/页眉/水印只是"扣除区"，不能消费块级空行；否则 `12\n3. 下一题`
@@ -266,6 +448,9 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                 prev_blank = True
             elif kinds[i] == "doc_header":
                 prev_blank = True     # 标题/文档头也是块边界，下一行可新开题
+            elif kinds[i] == "code":
+                # 代码区不重置题号：同一节里“函数代码 + 下一题”仍应连续可识别。
+                pass
             last_problem_mark = False
             continue
         s = ln.strip()
@@ -275,6 +460,44 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             continue
         q = _match_question(ln)
         if q is None:
+            # OCR/网页题库常见的“题号独占一行”：`1.` 下一行才是题干。
+            num_only = re.fullmatch(r'\d{1,3}[.、．]', s)
+            if num_only:
+                j = i + 1
+                while j < n and not lines[j].strip():
+                    j += 1
+                if j < n:
+                    nxt = lines[j].strip()
+                    if _is_promo(nxt):
+                        j += 1
+                        while j < n and not lines[j].strip():
+                            j += 1
+                        nxt = lines[j].strip() if j < n else ""
+                    if (len(nxt) >= 4 and not _is_codeish(nxt)
+                            and not _match_question(nxt)
+                            and not RE_LIST_ITEM.match(nxt)):
+                        qid_only = int(re.match(r'\d{1,3}', s).group())
+                        bounds.append({"line": j, "parts": [(qid_only, nxt)], "style": "题号"})
+                        last_qid = qid_only
+                        prev_blank = False
+                        list_active = False
+                        list_pending = False
+                        last_problem_mark = False
+                        continue
+            # 无编号章节标题（面经里的“阿里二面/HR面”）重置题号上下文：
+            # 下一节的 1. 虚函数/2. ... 不能被上一节的 20 判成列表。
+            if _looks_section_line(s):
+                last_qid = None
+                list_active = False
+                list_pending = False
+                prev_blank = True
+                last_problem_mark = False
+                continue
+            # 列表引导行（“如下/以下/包括/四个基本要素/BATJ 的 4 个点”）
+            if len(s) <= 160 and RE_LIST_LEAD.search(s) and not RE_LIST_ITEM.match(s):
+                list_pending = True
+            if not RE_LIST_ITEM.match(s):
+                list_active = False
             # v2 增强（2026-11-17）：问题N 纯标记行（`问题一` / `问题一：`）→ 武装下一行
             pm = RE_PROBLEM_N.match(s)
             if pm and not pm.group(2).strip():
@@ -285,24 +508,88 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             # R2' 同口径（空行前置或问题N 武装；非列表项、非小数、长度受限）。
             # 解锁讲解型 md（面向字节/连环炮系列：无数字题号，题干即独立问句行）。
             inner = strip_bold(s)
-            if ((prev_blank or last_problem_mark) and 0 < len(inner) <= 160
+            if ((prev_blank or last_problem_mark) and 7 < len(inner) <= 160
                     and not RE_LIST_ITEM.match(inner) and not RE_DECIMAL.match(inner)
                     and not inner.rstrip().endswith(("：", ":"))
+                    and not _is_codeish(inner)
                     and _is_qline(inner)):
                 bounds.append({"line": i, "parts": [(None, inner)], "style": "问句"})
+                list_pending = False
+                list_active = False
             last_problem_mark = False
             prev_blank = False
             continue
         qid, qtext, style = q
         if style == "标题":
+            # 章节标题（“MyBatis 面试题”“Java 并发编程（一）”）不是题；只有带
+            # 提问语义的标题（“什么是 JVM？”）才作为标题题块。
+            if (_is_codeish(qtext)
+                    or re.match(r'^(?:有一点|注意|总结|如下|以下|主要|首先|其次|最后)', qtext)
+                    or not _is_question_heading(qtext)):
+                last_qid = None if (s.startswith("# ") or _looks_section_line(qtext)
+                                    or "面试题" in qtext) else last_qid
+                list_active = False
+                list_pending = False
+                prev_blank = True
+                last_problem_mark = False
+                continue
             bounds.append({"line": i, "parts": [(None, qtext)], "style": "标题"})
-            # 标题是块边界：下一行编号即使紧贴标题也应能新开题，不能被当成续行。
+            last_qid = qid if qid is not None else 0
+            list_active = False
+            list_pending = False
             prev_blank = True
             last_problem_mark = False
             continue
+        # 普通编号列表（ACID 的 1./2./3./4.）在“列表引导”后不是题。
+        # 另一个来源：上一题后面紧跟的无标题编号行（答案里的 1、2、3、…），
+        # 若没有提问语义，默认是答案列表；显式 Markdown 编号标题不受此限。
+        md_num_heading = bool(RE_MD_NUM_HEADING.match(s))
+        bold_only_heading = bool(re.match(r'^\s*\*\*', s) and re.search(r'\*\*\s*$', s))
+        chinese_num_item = bool(re.match(r'^\s*[一二三四五六七八九十]+[、.．]', s))
+        if (chinese_num_item and not _is_question_heading(qtext)
+                and len(qtext.strip()) <= 20):
+            list_active = False
+            list_pending = False
+            prev_blank = False
+            last_problem_mark = False
+            continue
+        # Markdown 编号标题/加粗小标题如果是“知识点汇总/本地方法栈”这类答案小节，
+        # 不是新题。显式编号且题号连续时仍按题处理（030 这类整篇 ## N、题）；
+        # 非连续编号只有带提问语义才作为题边界（073 的 q11/q12）。
+        sequential_heading = (qid == 1 if last_qid is None else qid == last_qid + 1)
+        answer_label = bool(re.match(
+            r'^(?:知识点|总结|汇总|详解|概述|简介|本地方法栈|程序计数器|方法区|虚拟机栈|堆|栈)$',
+            qtext.strip()))
+        if (md_num_heading and not _is_question_heading(qtext)
+                and not (sequential_heading and not answer_label)):
+            list_active = False
+            list_pending = False
+            prev_blank = False
+            last_problem_mark = False
+            continue
+        if bold_only_heading and not md_num_heading and not _is_question_heading(qtext):
+            list_active = False
+            list_pending = False
+            prev_blank = False
+            last_problem_mark = False
+            continue
+        implicit_list = (last_qid is not None and prev_blank and not md_num_heading
+                         and (qid <= last_qid or last_qid == 0)
+                         and not _is_list_item_question(qtext))
+        if (not md_num_heading and (list_active or list_pending or implicit_list)
+                and not _is_list_item_question(qtext)):
+            list_active = True
+            list_pending = False
+            prev_blank = False
+            last_problem_mark = False
+            continue
+        list_pending = False
+        list_active = False
         new_q = False
         if RE_PROBLEM_N.match(s):
             new_q = True          # 问题N：作者显式标记的题号，不依赖空行/递进口径
+        elif md_num_heading:
+            new_q = True          # 显式 Markdown 编号标题：无条件新题边界
         elif last_qid is None:
             new_q = True
         elif prev_blank:
@@ -510,6 +797,7 @@ def _split_answers(a_text: str, a_base: int, a_segs: list | None = None):
         if (prev_blank and 0 < len(inner) <= 120 and not RE_LIST_ITEM.match(inner)
                 and not RE_DECIMAL.match(inner)
                 and not inner.rstrip().endswith(("：", ":"))
+                and not _is_codeish(inner)
                 and _qnorm_len(inner) >= 6
                 and (RE_KPOINT.match(inner) or _is_qline(inner))):
             flush(starts[i])
@@ -589,8 +877,13 @@ def chunk_v2(md_text: str) -> Dict:
         for e in extra:
             add(e["q"], e["a"], e["span"], e["style"])
 
-    # probe：items 为空时给 1–3 个候选区块
+    # probe：孤立代码区始终暴露；items 为空时再给 1–3 个候选区块
     probe = []
+    for l in res["leftovers"]:
+        if l["why"] == "块前代码" and l["span"][1] - l["span"][0] >= 80:
+            probe.append({"span": l["span"], "why": "孤立代码区"})
+            if len(probe) >= 3:
+                break
     if not items:
         lines = md_text.splitlines(keepends=True)
         starts, pos = [], 0
