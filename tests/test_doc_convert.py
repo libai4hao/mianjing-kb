@@ -14,6 +14,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 from mianjing_kb import doc_convert as dc  # noqa: E402
 from mianjing_kb import reconvert as rc    # noqa: E402
+from mianjing_kb.kb import config  # noqa: E402
 from kb import db, events, hashing  # noqa: E402
 
 
@@ -211,6 +212,9 @@ def test_reconvert_failed_job_exit_code_and_per_file_log(tmp_path, monkeypatch):
         {"rel": "B/x.pdf", "category": "题库", "topic": "综合", "ok": True},
     ]), encoding="utf-8")
     monkeypatch.setattr(rc, "BUILD", tmp_path)
+    kb_path = tmp_path / "kb.sqlite"
+    db.connect(kb_path).close()
+    monkeypatch.setattr(config, "DB_PATH", kb_path)
     monkeypatch.setattr(rc, "convert_one", object())
     monkeypatch.setattr(rc, "_converter_meta", lambda _cv: {})
     monkeypatch.setattr(rc, "convert_one_entry",

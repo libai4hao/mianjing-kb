@@ -70,6 +70,9 @@ def run(work: Path, *, quiet: bool = False) -> dict:
         "KB_CORPUS_ROOT": str(corpus),
         "KB_BUILD_DIR": str(build),
         "KB_DB": str(db_path),
+        # Windows runner 控制台默认 cp1252；子进程 print 中文 JSON 会直接 UnicodeEncodeError。
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
     })
 
     result: dict = {"work": str(work), "corpus": str(corpus), "db": str(db_path), "steps": {}}

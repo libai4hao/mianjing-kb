@@ -124,7 +124,9 @@ def test_cli_writes_report_and_exit_codes(tmp_path):
     rc = ec.main(["--pairs", str(p), "--skip-corpus", "--out-md", str(out)])
     assert rc == 0 and "Precision" in out.read_text(encoding="utf-8")
     # H1 在默认阈值会被并（hamming 6 / jac 0.75）→ P=0.5, F1<0.99
-    assert ec.main(["--pairs", str(p), "--skip-corpus", "--min-f1", "0.99"]) == 1
+    out2 = tmp_path / "r2.md"
+    assert ec.main(["--pairs", str(p), "--skip-corpus", "--min-f1", "0.99",
+                    "--out-md", str(out2)]) == 1
 
 
 def test_cli_missing_pairs_returns_2(tmp_path):
