@@ -24,6 +24,10 @@ OUT_DB = Path(config.BUILD_DIR) / "面经库.db"
 RRF_K = 60
 
 
+class VectorUnavailable(RuntimeError):
+    """向量模型不可用（未下载/ONNX 初始化失败/推理异常），可安全降级到关键词。"""
+
+
 def _con(db_path: Path):
     import sqlite3
     con = sqlite3.connect(str(db_path))
@@ -95,17 +99,19 @@ def keyword_search(con, query: str, limit: int = 10, topic: str | None = None,
         fts_query = '"' + query.replace('"', '""') + '"'
         rows = con.execute(
             _SELECT + "FROM questions_fts f JOIN questions q ON q.qid=f.rowid" + _JOIN +
-            "WHERE questions_fts MATCH ?" + filt + " LIMIT ?",
+            "WHERE questions_fts MATCH ?" + filt + " ORDER BY rank LIMIT ?",
             [fts_query, *params, limit]).fetchall()
         if not rows:
             rows = con.execute(
                 _SELECT + "FROM questions q" + _JOIN +
-                "WHERE (q.q_text LIKE ? OR q.a_text LIKE ?)" + filt + " LIMIT ?",
+                "WHERE (q.q_text LIKE ? OR q.a_text LIKE ?)" + filt +
+                " ORDER BY q.qid LIMIT ?",
                 [f"%{query}%", f"%{query}%", *params, limit]).fetchall()
     else:
         rows = con.execute(
             _SELECT + "FROM questions q" + _JOIN +
-            "WHERE (q.q_text LIKE ? OR q.a_text LIKE ?)" + filt + " LIMIT ?",
+            "WHERE (q.q_text LIKE ? OR q.a_text LIKE ?)" + filt +
+            " ORDER BY q.qid LIMIT ?",
             [f"%{query}%", f"%{query}%", *params, limit]).fetchall()
     return [dict(r) for r in rows]
 
@@ -120,11 +126,16 @@ def vector_search(con, query: str, limit: int = 10, topic: str | None = None,
                   position: str | None = None, quality: str | None = None,
                   tags=None) -> list[dict]:
     from mianjing_kb.embed_questions import embed_texts, vec_metadata_ready  # 惰性加载模型
-    vec = embed_texts([query])[0]
+    try:
+        vec = embed_texts([query])[0]
+    except Exception as ex:  # noqa: BLE001 —— 模型下载/ONNX/推理失败统一视为可降级
+        raise VectorUnavailable(f"向量模型不可用：{type(ex).__name__}: {ex}") from ex
     import sqlite_vec
     meta = vec_metadata_ready(con)
-    # 标量字段可下推；多选/标签只能在 KNN 后过滤，所以先算出是否存在后过滤条件。
-    post = bool(position or quality or tags)
+    # 标量字段可下推；多选/标签只能在 KNN 后过滤。旧表没有 metadata 时，
+    # topic/qtype/difficulty 也是后过滤，必须一起纳入过采样判断。
+    post = bool(position or quality or tags
+                or (not meta and (topic or qtype or difficulty is not None)))
     filt, params = _sql_filters(
         None if meta else topic, None if meta else qtype,
         None if meta else difficulty, position, quality, tags)
@@ -170,11 +181,22 @@ def rrf_fuse(rank_a: list[int], rank_b: list[int], k: int = RRF_K) -> list[tuple
 def hybrid_search(con, query: str, limit: int = 10, topic: str | None = None,
                   qtype: str | None = None, difficulty: int | None = None,
                   position: str | None = None, quality: str | None = None,
-                  tags=None, pool: int = 30) -> list[dict]:
+                  tags=None, pool: int = 30, diagnostics: dict | None = None) -> list[dict]:
     kw = keyword_search(con, query, pool, topic, qtype, difficulty, position, quality, tags)
     if not has_vec_table(con):
+        if diagnostics is not None:
+            diagnostics["vector"] = "absent"
         return kw[:limit]
-    vs = vector_search(con, query, pool, topic, qtype, difficulty, position, quality, tags)
+    try:
+        vs = vector_search(con, query, pool, topic, qtype, difficulty, position, quality, tags)
+    except VectorUnavailable as ex:
+        # 模型/推理不可用 → 关键词降级；向量表损坏等其它错误不吞。
+        if diagnostics is not None:
+            diagnostics["vector"] = "unavailable"
+            diagnostics["why"] = str(ex)
+        return kw[:limit]
+    if diagnostics is not None:
+        diagnostics["vector"] = "ok"
     fused = rrf_fuse([r["qid"] for r in kw], [r["qid"] for r in vs])[:limit]
     by_qid = {r["qid"]: r for r in kw + vs}
     out = []
@@ -188,8 +210,10 @@ def rag_contexts(con, query: str, limit: int = 6, topic: str | None = None,
                  position: str | None = None, quality: str | None = None,
                  tags=None, a_max: int = 800) -> dict:
     """P3-③：RAG 管线结构化输出——直接可作为 LLM prompt 的 context 组装体。"""
-    rows = hybrid_search(con, query, limit, topic, qtype, difficulty, position, quality, tags)
-    return {"query": query, "contexts": [
+    diag: dict = {}
+    rows = hybrid_search(con, query, limit, topic, qtype, difficulty, position, quality, tags,
+                        diagnostics=diag)
+    return {"query": query, "diagnostics": diag, "contexts": [
         {"qid": r["qid"], "question": r["q_text"][:300], "answer": (r.get("a_text") or "")[:a_max],
          "source": r.get("source"), "topic": r["topic"], "qtype": r["qtype"],
          "difficulty": r.get("difficulty"), "tags": r.get("tags_json"),
@@ -221,6 +245,7 @@ def main(argv=None) -> int:
         con.close()
         print(json.dumps(out, ensure_ascii=False, indent=1))
         return 0
+    diag: dict = {}
     if args.mode == "kw":
         rows = keyword_search(con, query, args.limit, args.topic, args.qtype, **extra)
     elif args.mode == "vec":
@@ -228,15 +253,24 @@ def main(argv=None) -> int:
             print(json.dumps({"err": "vec_questions 不存在，先跑 python -m mianjing_kb.embed_questions"},
                              ensure_ascii=False))
             return 2
-        rows = vector_search(con, query, args.limit, args.topic, args.qtype, **extra)
+        try:
+            rows = vector_search(con, query, args.limit, args.topic, args.qtype, **extra)
+        except VectorUnavailable as ex:
+            con.close()
+            print(json.dumps({"err": str(ex), "hint": "用 --mode kw 或修复向量模型"},
+                             ensure_ascii=False))
+            return 2
     else:
-        rows = hybrid_search(con, query, args.limit, args.topic, args.qtype, **extra)
+        rows = hybrid_search(con, query, args.limit, args.topic, args.qtype,
+                             diagnostics=diag, **extra)
     con.close()
     for r in rows:
         r["q_text"] = r["q_text"][:80]
         r["a_text"] = (r.get("a_text") or "")[:200]
-    print(json.dumps({"query": query, "mode": args.mode, "hits": len(rows), "rows": rows},
-                     ensure_ascii=False, indent=1))
+    out = {"query": query, "mode": args.mode, "hits": len(rows), "rows": rows}
+    if args.mode == "hybrid":
+        out["diagnostics"] = diag
+    print(json.dumps(out, ensure_ascii=False, indent=1))
     return 0
 
 

@@ -94,6 +94,62 @@ def test_keyword_tags_are_and(mini_db):
     assert keyword_search(mini_db, "InnoDB", 10, tags=["B+树", "复制"]) == []
 
 
+def test_vector_old_schema_filter_oversamples(tmp_path, monkeypatch):
+    """旧向量表没有 metadata：topic 只能后过滤，必须过采样，不能只取 limit 条后过滤成 0。"""
+    sqlite_vec = pytest.importorskip("sqlite_vec")
+    from mianjing_kb import embed_questions as E
+
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.enable_load_extension(True)
+    sqlite_vec.load(con)
+    con.enable_load_extension(False)
+    con.executescript(
+        "CREATE TABLE questions(qid INTEGER PRIMARY KEY, doc_hash TEXT, q_text TEXT, a_text TEXT, "
+        "qtype TEXT, topic TEXT, difficulty INTEGER, tags_json TEXT, position TEXT, quality TEXT, "
+        "q_key TEXT);"
+        "CREATE TABLE documents(doc_hash TEXT PRIMARY KEY, file_name TEXT);"
+        "CREATE TABLE doc_contents(doc_id INTEGER PRIMARY KEY, md_rel TEXT, doc_hash TEXT, "
+        "mirror_hash TEXT, content TEXT);"
+        "CREATE TABLE question_tags(qid INTEGER, tag TEXT, tag_norm TEXT);"
+        f"CREATE VIRTUAL TABLE vec_questions USING vec0(embedding float[{E.DIM}]);")
+
+    def vec(first: float, second: float) -> list[float]:
+        vals = [0.0] * E.DIM
+        vals[0], vals[1] = first, second
+        return vals
+
+    for i in range(1, 21):
+        topic = "B" if i <= 10 else "A"
+        con.execute("INSERT INTO questions(qid, doc_hash, q_text, a_text, qtype, topic, difficulty, q_key) "
+                    "VALUES (?, 'h', ?, '', '八股', ?, 3, ?)", (i, f"题{i}", topic, f"h:{i}"))
+        near = 0.01 if topic == "B" else 0.5 + i / 1000
+        con.execute("INSERT INTO vec_questions(rowid, embedding) VALUES (?,?)",
+                    (i, sqlite_vec.serialize_float32(vec(1.0, near))))
+    con.commit()
+    monkeypatch.setattr(E, "embed_texts", lambda texts: [vec(1.0, 0.0) for _ in texts])
+    rows = S.vector_search(con, "任意", 5, topic="A")
+    assert len(rows) == 5
+    assert {r["topic"] for r in rows} == {"A"}
+    con.close()
+
+
+def test_hybrid_model_failure_degrades_to_kw(mini_db, monkeypatch):
+    """向量表在但模型不可用：hybrid 必须降级关键词，而不是整体失败。"""
+    from mianjing_kb import embed_questions as E
+
+    def boom(texts):
+        raise RuntimeError("model not ready")
+
+    monkeypatch.setattr(E, "embed_texts", boom)
+    diag = {}
+    # 伪造 vec_questions 存在；当前 mini_db 没有 vec 扩展，has_vec_table 只查 sqlite_master
+    mini_db.execute("CREATE TABLE vec_questions(x)")
+    hits = hybrid_search(mini_db, "主从复制", 5, diagnostics=diag)
+    assert len(hits) == 1 and hits[0]["qid"] == 2
+    assert diag["vector"] == "unavailable" and "model not ready" in diag["why"]
+
+
 def test_vector_filter_pushed_into_knn(tmp_path, monkeypatch):
     """T1 核心：B 类向量更近，topic=A 过滤必须在 KNN 内完成，否则后过滤会 0 条。"""
     sqlite_vec = pytest.importorskip("sqlite_vec")

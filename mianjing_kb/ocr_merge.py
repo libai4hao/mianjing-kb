@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -22,7 +23,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "mianjing_kb"))
-from mianjing_kb.kb import config  # noqa: E402
+from mianjing_kb.kb import config, paths  # noqa: E402
 
 BUILD = Path(config.BUILD_DIR)   # P1-3 修复（2026-11-17 审核）：路径统一走 config，KB_* 环境变量可覆盖
 OCR_TEXT = BUILD / "ocr_text"
@@ -37,11 +38,20 @@ def merge_set(report_path: Path) -> list[dict]:
         if r["state"] not in ("fail", "review"):
             continue
         rel = r["rel"].replace("\\", "/")
-        tp = OCR_TEXT / (rel + ".txt")
+        try:
+            tp = paths.safe_join(OCR_TEXT, rel + ".txt")
+        except paths.UnsafePath:
+            continue
         if tp.exists() and tp.stat().st_size > 0 and r.get("md"):
             out.append({"rel": rel, "md": r["md"], "ocr_txt": str(tp),
                         "reason": r.get("reason", "")})
     return out
+
+
+def backup_name(rel: str, old_bytes: bytes) -> str:
+    """rel + 原文内容双哈希，避免 a/b_c.md 与 a_b/c.md 扁平化后撞名。"""
+    return (hashlib.sha256(rel.replace("\\", "/").encode("utf-8")).hexdigest()[:16] + "-"
+            + hashlib.sha256(old_bytes).hexdigest()[:16] + ".md")
 
 
 def split_images(old_md: str) -> tuple[str, str]:
@@ -77,9 +87,14 @@ def main(argv=None) -> int:
                "new_chars": len(new_md), "imgs_kept": bool(img_sec)}
         if not args.dry_run:
             BACKUP.mkdir(parents=True, exist_ok=True)
-            bak = BACKUP / (j["rel"].replace("/", "_"))
+            old_bytes = old_md.read_bytes()
+            bak_name = backup_name(j["rel"], old_bytes)
+            bak = BACKUP / bak_name
             if not bak.exists():
                 shutil.copy2(old_md, bak)
+            if hashlib.sha256(bak.read_bytes()).hexdigest() != \
+                    hashlib.sha256(old_bytes).hexdigest():
+                raise RuntimeError(f"OCR 备份内容校验失败: {bak}")
             old_md.write_text(new_md, encoding="utf-8")
         results.append(rec)
     elapsed = time.perf_counter() - started

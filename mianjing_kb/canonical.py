@@ -404,6 +404,7 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
     replaced: list[str] = []
     added_variants: list[str] = []
     candidates: list[dict] = []
+    candidate_prior: dict[str, dict | None] = {}
     touched: set[str] = set()
 
     for q in load_questions(conn):
@@ -413,15 +414,29 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
         norm = q.get("q_norm") or ""
         best_cid, best_sim = _best_existing(norm, by_norm, gram_sets, index)
         if best_cid and best_sim < attach_jac and best_sim >= candidate_jac:
+            sim = round(best_sim, 4)
+            prior_row = conn.execute(
+                "SELECT canonical_id, similarity, status, created_at, updated_at "
+                "FROM merge_candidates WHERE q_key=?", (qkey,)).fetchone()
+            prior = None if not prior_row else {
+                "canonical_id": prior_row[0], "similarity": float(prior_row[1]),
+                "status": prior_row[2], "created_at": prior_row[3],
+                "updated_at": prior_row[4]}
             conn.execute(
                 "INSERT INTO merge_candidates(q_key,canonical_id,similarity,status,created_at,updated_at) "
                 "VALUES(?,?,?, 'pending', ?,?) ON CONFLICT(q_key) DO UPDATE SET "
                 "canonical_id=excluded.canonical_id, similarity=excluded.similarity, "
                 "updated_at=excluded.updated_at "
                 "WHERE merge_candidates.status='pending'",
-                (qkey, best_cid, round(best_sim, 4), now, now))
-            candidates.append({"q_key": qkey, "canonical_id": best_cid,
-                               "similarity": round(best_sim, 4)})
+                (qkey, best_cid, sim, now, now))
+            cur = conn.execute(
+                "SELECT canonical_id, similarity, status FROM merge_candidates WHERE q_key=?",
+                (qkey,)).fetchone()
+            # 已有人工状态（approved/rejected）时 INSERT 不会覆盖，本批不算拥有该候选。
+            if cur and cur[2] == "pending" and cur[0] == best_cid and abs(float(cur[1]) - sim) < 1e-9:
+                candidates.append({"q_key": qkey, "canonical_id": best_cid,
+                                   "similarity": sim})
+                candidate_prior[qkey] = prior
             continue
 
         if not best_cid or best_sim < attach_jac:
@@ -466,10 +481,11 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
     payload = {"tool": "canonical-incremental",
                "created_canonicals": created,
                "attached": attached, "replaced_variants": replaced,
-               "candidates": candidates, "added_variants": added_variants,
+               "candidates": candidates, "candidates_prior": candidate_prior,
+               "added_variants": added_variants,
                "touched_canonicals": sorted(touched)}
     if batch_id:
-        payload["manifest"] = str(manifests.create(batch_id, payload).get("batch_id"))
+        payload["manifest"] = str(manifests.prepare(batch_id, payload).get("batch_id"))
     return {"new_questions": len(added_variants) + len(candidates),
             "created_canonicals_count": len(created),
             "created_questions": len(seeded),
@@ -595,10 +611,14 @@ def _run(args) -> int:
     if args.incremental:
         started = time.perf_counter()
         batch_id = args.batch_id or datetime.now().strftime("inc-%Y%m%d-%H%M%S")
+        unfinished = manifests.reconcile(conn)
         out = attach_incremental(conn, args.attach_jac, args.candidate_jac,
                                  None if args.dry_run else batch_id)
         if not args.dry_run:
             conn.commit()
+            manifests.mark_committed(batch_id)
+        if unfinished:
+            out["unfinished_manifests_before"] = unfinished
         out["dry_run"] = bool(args.dry_run)
         out["elapsed_sec"] = round(time.perf_counter() - started, 1)
         print(json.dumps(out, ensure_ascii=False, indent=1))

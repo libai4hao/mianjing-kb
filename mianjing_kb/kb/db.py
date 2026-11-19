@@ -717,9 +717,14 @@ def backup_db(db_path: Path | str, backup_dir: Path | str | None = None,
         out = sqlite3.connect(str(dst))
         try:
             src.backup(out)
-            out.execute("PRAGMA quick_check")
+            qc = out.execute("PRAGMA quick_check").fetchone()
+            if not qc or str(qc[0]).lower() != "ok":
+                raise RuntimeError(f"备份完整性检查失败：{qc[0] if qc else 'no result'}")
         finally:
             out.close()
+    except Exception:
+        dst.unlink(missing_ok=True)   # 不留半成品备份，避免保留策略把坏备份当可用
+        raise
     finally:
         src.close()
     for old in sorted(bdir.glob(f"{src_path.stem}-*.db"))[:-keep] if keep > 0 else []:

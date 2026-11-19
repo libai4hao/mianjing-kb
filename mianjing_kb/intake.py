@@ -37,7 +37,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, events, hashing, status, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, events, hashing, paths, status, wlock  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 CHUNK_SIZE = 500          # 每 N 件提交一次：崩溃损失上限 + 写锁持有粒度
@@ -128,6 +128,14 @@ def iter_files(root: Path, all_exts: bool):
             p = Path(dirpath) / fn
             ext = p.suffix.lower()
             rel = rel_posix(p, base)
+            if p.is_symlink():
+                print(f"[warn] 跳过符号链接文件 {rel}（不登记语料根外内容）", file=sys.stderr)
+                continue
+            try:
+                paths.safe_join(root, rel)
+            except paths.UnsafePath as ex:
+                print(f"[warn] 跳过越界路径 {rel}: {ex}", file=sys.stderr)
+                continue
             if not all_exts and ext not in config.DOC_EXTS:
                 entries.append((quarantined, rel.casefold(), p, rel, ext, None, quarantined))
                 continue

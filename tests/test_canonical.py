@@ -244,6 +244,35 @@ def test_sticky_id_wins_over_new_representative(mini_db):
     assert aliases == {}
 
 
+def test_incremental_candidate_rollback_removes_batch_candidate(mini_db, capsys, tmp_path):
+    """候选属于本批产生的新状态；回滚必须删掉，不能留 pending 污染候选池。"""
+    from mianjing_kb import manifests
+    cn.main([])
+    capsys.readouterr()
+    qkey = "h9:candidate"
+    _add_source_and_question(mini_db, "h9", 1, "jvm内存模型", qkey)
+    assert cn.main(["--incremental", "--batch-id", "t-cand"]) == 0
+    capsys.readouterr()
+    mf = manifests.load("t-cand", tmp_path / "build")
+    assert mf and mf["status"] == "committed" and len(mf["candidates"]) == 1
+    assert mini_db.execute("SELECT status FROM merge_candidates WHERE q_key=?",
+                           (qkey,)).fetchone()[0] == "pending"
+
+    out = manifests.rollback(mini_db, "t-cand", apply=True, build_dir=tmp_path / "build")
+    assert out["removed_candidates"] == 1
+    assert mini_db.execute("SELECT COUNT(*) FROM merge_candidates WHERE q_key=?",
+                           (qkey,)).fetchone()[0] == 0
+
+
+def test_manifest_two_phase_prepare_then_commit(tmp_path):
+    from mianjing_kb import manifests
+    mf = manifests.prepare("t-phase", {"added_variants": []}, tmp_path / "build")
+    assert mf["status"] == "prepared"
+    assert manifests.load("t-phase", tmp_path / "build")["status"] == "prepared"
+    manifests.mark_committed("t-phase", tmp_path / "build")
+    assert manifests.load("t-phase", tmp_path / "build")["status"] == "committed"
+
+
 def test_incremental_candidate_keeps_approved_and_apply_consumes(mini_db, capsys, tmp_path):
     cn.main([])
     capsys.readouterr()

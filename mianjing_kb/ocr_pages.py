@@ -30,7 +30,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config  # noqa: E402
+from mianjing_kb.kb import config, paths  # noqa: E402
 
 PAGE_MARK = "\n\n===== page {n} =====\n\n"
 
@@ -131,6 +131,9 @@ class PaddleOCRJson:
             except json.JSONDecodeError:
                 continue
             if isinstance(payload, dict) and "code" in payload:
+                if str(payload.get("code")) != "100":
+                    raise RuntimeError(f"OCR 引擎返回失败码 {payload.get('code')}: "
+                                       f"{str(payload.get('data'))[:160]}")
                 texts, scores = [], []
                 _flatten_texts(payload.get("data"), texts)
                 _collect_scores(payload.get("data"), scores)
@@ -219,7 +222,7 @@ def ocr_pdf_pages(pdf_path: Path, pages: list[int], engine: PaddleOCRJson,
 
 def text_path_for(rel: str, out_root: Path) -> Path:
     """语料相对路径 → OCR 全文 txt 路径（build/ocr_text/<rel>.txt）。"""
-    return out_root / (rel.replace("\\", "/") + ".txt")
+    return paths.safe_join(out_root, rel.replace("\\", "/") + ".txt")
 
 
 def save_text(rel: str, pages: list[dict], out_root: Path) -> Path:
@@ -255,8 +258,13 @@ def run_batch(rels: list[str], out_root: Path, log_path: Path, dpi: int,
         # 块结束调的是"进入时那个对象"的 __exit__，重启出来的新进程会漏掉（2026-11-19 审核修复）
         engine = stack.enter_context(PaddleOCRJson())
         for rel in rels:
-            pdf = config.CORPUS_ROOT / rel
-            tp = text_path_for(rel, out_root)
+            try:
+                pdf = paths.safe_join(config.CORPUS_ROOT, rel, must_exist=True)
+                tp = text_path_for(rel, out_root)
+            except (paths.UnsafePath, OSError) as ex:
+                stats["fail"] += 1
+                _log(log_path, {"rel": rel, "ok": False, "reason": f"unsafe_path: {ex}"})
+                continue
             if tp.exists() and tp.stat().st_size > 0:
                 stats["resumed"] += 1
                 continue
@@ -337,7 +345,11 @@ def main(argv=None) -> int:
             total = 0
             missing = []
             for rel in rels:
-                pdf = config.CORPUS_ROOT / rel
+                try:
+                    pdf = paths.safe_join(config.CORPUS_ROOT, rel, must_exist=True)
+                except (paths.UnsafePath, OSError):
+                    missing.append(rel)
+                    continue
                 if not pdf.exists():
                     missing.append(rel)
                     continue

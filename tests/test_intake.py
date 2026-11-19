@@ -31,6 +31,19 @@ def rows(db_path: Path):
     return out
 
 
+def test_iter_files_skips_file_symlink(tmp_path, monkeypatch):
+    """文件级 symlink 不登记，避免 stat 跟随到语料根外。"""
+    root = tmp_path / "corpus"
+    (root / "02").mkdir(parents=True)
+    (root / "02" / "normal.md").write_text("正常", encoding="utf-8")
+    (root / "02" / "link.md").write_text("链接", encoding="utf-8")
+    real_is_symlink = Path.is_symlink
+    monkeypatch.setattr(Path, "is_symlink",
+                        lambda self: self.name == "link.md" or real_is_symlink(self))
+    files = list(intake.iter_files(root, all_exts=True))
+    assert [f[1] for f in files] == ["02/normal.md"]
+
+
 def test_read_error_returns_nonzero(corpus, tmp_path, monkeypatch, capsys):
     """单个文件读失败必须让 pipeline 看到非零，不能静默成功。"""
     db_path = tmp_path / "kb.sqlite"

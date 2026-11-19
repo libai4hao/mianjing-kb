@@ -88,6 +88,16 @@ def fake_world(tmp_path, monkeypatch):
     return tmp_path, pdf
 
 
+def test_batch_rejects_path_traversal(fake_world):
+    tmp_path, _pdf = fake_world
+    stats = op.run_batch(["../outside.pdf"], tmp_path / "ocr_text", tmp_path / "ocr.jsonl",
+                         dpi=72, show=0, every=1)
+    assert stats["ok"] == 0 and stats["fail"] == 1
+    rows = [json.loads(x) for x in (tmp_path / "ocr.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["ok"] is False and "unsafe_path" in rows[-1]["reason"]
+    assert not (tmp_path / "ocr_text" / "outside.pdf.txt").exists()
+
+
 def test_crashed_engine_restarts_and_both_processes_are_waited(fake_world):
     tmp_path, _pdf = fake_world
     stats = op.run_batch(["a.pdf"], tmp_path / "ocr_text", tmp_path / "ocr.jsonl",
