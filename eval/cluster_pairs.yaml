@@ -1,0 +1,393 @@
+# 题簇成对评测集（cluster pairs）
+#
+# 用途：给 report/canonical 使用的 SimHash + 2-gram Jaccard 聚类提供固定、可复跑的
+# Precision / Recall / F1 基线（mianjing_kb.eval_cluster）。
+#
+# 标注口径：
+#   same: true  = 两段文本问的是**同一个问题**（措辞/标点/语序不同也算同一题）
+#   same: false = 问的是**不同问题**（即使共享关键词、同属一个知识点）
+#   kind:
+#     normalize  = 只差空格/标点/大小写/题号前缀，规范化后应完全一致
+#     paraphrase = 真实改写（同义词、语序、口语化），是聚类召回的主要难点
+#     hard_neg   = 词面高度相近但问的是不同问题（误合并的主要风险）
+#     long_noise = 整段试卷/答案正文 vs 单题，用于检验长文本是否污染聚类
+#
+# review_state: draft —— 这批由代码作者按上述口径起草，**尚未逐条人工复核**。
+# 在 review_state 改成 reviewed 之前，指标只能当"趋势参考"，不得当作验收阈值。
+# 复核要求：每条至少确认 a/b 是否同题；有争议的条目直接删除，不要靠调阈值迁就。
+meta:
+  name: 题簇成对评测集
+  version: 1
+  created: 2026-11-19
+  review_state: draft
+  labeled_by: seed
+  target_pairs: 60
+
+pairs:
+  # ---------------- normalize：只差格式 ----------------
+  - id: N01
+    kind: normalize
+    same: true
+    a: 什么是 Spring Boot？
+    b: 什么是SpringBoot
+    why: 空格/大小写/问号差异，规范化后同文
+  - id: N02
+    kind: normalize
+    same: true
+    a: Spring Boot 有哪些优点？
+    b: SpringBoot 有哪些优点？
+    why: 大小写与空格
+  - id: N03
+    kind: normalize
+    same: true
+    a: 什么是 MyBatis？
+    b: 什么是 MyBatis?
+    why: 全角/半角问号
+  - id: N04
+    kind: normalize
+    same: true
+    a: 5、CHAR 和 VARCHAR 的区别？
+    b: CHAR 和 VARCHAR 的区别？
+    why: 题号前缀
+  - id: N05
+    kind: normalize
+    same: true
+    a: JVM 有哪些垃圾回收器？
+    b: 说一下 JVM 有哪些垃圾回收器？
+    why: 口语引导词
+  - id: N06
+    kind: normalize
+    same: true
+    a: 进程和线程的区别
+    b: 进程和线程的区别是什么？
+    why: 问句收尾差异
+  - id: N07
+    kind: normalize
+    same: true
+    a: 什么是 Redis？
+    b: 什么是Redis
+    why: 空格与问号
+  - id: N08
+    kind: normalize
+    same: true
+    a: Zookeeper 有几种部署模式？
+    b: Zookeeper 有哪几种部署模式？
+    why: 同义量词
+  - id: N09
+    kind: normalize
+    same: true
+    a: 如何实现 Spring Boot 的安全性？
+    b: 如何实现Spring Boot的安全性？
+    why: 空格
+  - id: N10
+    kind: normalize
+    same: true
+    a: 什么是 CSRF 攻击？
+    b: 什么是CSRF攻击
+    why: 空格/问号
+
+  # ---------------- paraphrase：真实改写 ----------------
+  - id: P01
+    kind: paraphrase
+    same: true
+    a: 什么是 AOP？
+    b: 说一下你对 AOP 的理解
+    why: 定义题的口语化改写
+  - id: P02
+    kind: paraphrase
+    same: true
+    a: JVM 有哪些垃圾回收器？
+    b: JVM 的垃圾回收器都有哪些，分别怎么用？
+    why: 同题扩展问法
+  - id: P03
+    kind: paraphrase
+    same: true
+    a: 进程和线程的区别
+    b: 进程与线程有什么不同？
+    why: 同义词替换
+  - id: P04
+    kind: paraphrase
+    same: true
+    a: Redis 的内存用完了会发生什么？
+    b: Redis 内存达到上限后是如何处理的？
+    why: 同义改写
+  - id: P05
+    kind: paraphrase
+    same: true
+    a: "#{} 和 ${} 的区别是什么？"
+    b: "MyBatis 里 #{} 与 ${} 有什么区别"
+    why: 补主语 + 同义
+  - id: P06
+    kind: paraphrase
+    same: true
+    a: 如何用 Spring Boot 实现全局异常处理？
+    b: Spring Boot 怎么做统一异常处理
+    why: 全局/统一同义
+  - id: P07
+    kind: paraphrase
+    same: true
+    a: 为什么说 MyBatis 是半自动 ORM？
+    b: MyBatis 为什么被称为半自动的 ORM 框架
+    why: 语序改写
+  - id: P08
+    kind: paraphrase
+    same: true
+    a: Netty 的高性能体现在哪些方面？
+    b: Netty 为什么性能这么高
+    why: 同题换问法
+  - id: P09
+    kind: paraphrase
+    same: true
+    a: 描述一下 JVM 加载 Class 文件的原理机制
+    b: JVM 的类加载机制是怎样的？
+    why: 术语展开
+  - id: P10
+    kind: paraphrase
+    same: true
+    a: HashMap 的扩容机制
+    b: HashMap 是怎么扩容的？
+    why: 语序改写
+  - id: P11
+    kind: paraphrase
+    same: true
+    a: ConcurrentHashMap 如何保证线程安全
+    b: ConcurrentHashMap 的线程安全是怎么实现的
+    why: 同题换问法
+  - id: P12
+    kind: paraphrase
+    same: true
+    a: MySQL 索引为什么用 B+ 树
+    b: 为什么 MySQL 选择 B+ 树作为索引结构
+    why: 语序改写
+  - id: P13
+    kind: paraphrase
+    same: true
+    a: 事务的 ACID 是什么
+    b: 数据库事务的四大特性是什么
+    why: 缩写展开
+  - id: P14
+    kind: paraphrase
+    same: true
+    a: TCP 三次握手的过程
+    b: 描述一下 TCP 建立连接的三次握手
+    why: 补动词
+  - id: P15
+    kind: paraphrase
+    same: true
+    a: HTTP 和 HTTPS 的区别
+    b: HTTPS 与 HTTP 有什么不同？
+    why: 同义改写
+  - id: P16
+    kind: paraphrase
+    same: true
+    a: 死锁产生的四个必要条件
+    b: 死锁需要满足哪些条件才会发生
+    why: 同题换问法
+  - id: P17
+    kind: paraphrase
+    same: true
+    a: 快速排序的时间复杂度
+    b: 快排的复杂度是多少？
+    why: 简称
+  - id: P18
+    kind: paraphrase
+    same: true
+    a: 如何设计一个高并发秒杀系统
+    b: 秒杀系统应该怎么设计
+    why: 同题换问法
+  - id: P19
+    kind: paraphrase
+    same: true
+    a: 为什么选择我们公司
+    b: 为什么想来我们这边
+    why: 口语化
+  - id: P20
+    kind: paraphrase
+    same: true
+    a: 项目里遇到的最大难点是什么
+    b: 你项目中遇到的最难的问题是什么
+    why: 同义
+
+  # ---------------- hard_neg：词面近、问题不同 ----------------
+  - id: H01
+    kind: hard_neg
+    same: false
+    a: HashMap 的扩容机制
+    b: HashMap 为什么线程不安全
+    why: 同一对象，不同问题
+  - id: H02
+    kind: hard_neg
+    same: false
+    a: ArrayList 和 LinkedList 的区别
+    b: ArrayList 的扩容机制
+    why: 同族容器，问题不同
+  - id: H03
+    kind: hard_neg
+    same: false
+    a: JVM 有哪些垃圾回收器
+    b: JVM 内存结构分为哪几块
+    why: 同属 JVM，主题不同
+  - id: H04
+    kind: hard_neg
+    same: false
+    a: 什么是 AOP
+    b: AOP 和 IOC 的区别
+    why: 共享 AOP，问法不同
+  - id: H05
+    kind: hard_neg
+    same: false
+    a: Spring Bean 的生命周期
+    b: Spring Bean 的作用域有哪些
+    why: 同对象，不同属性
+  - id: H06
+    kind: hard_neg
+    same: false
+    a: Spring Boot 自动配置原理
+    b: Spring Boot 如何修改默认端口
+    why: 同框架，原理 vs 操作
+  - id: H07
+    kind: hard_neg
+    same: false
+    a: MySQL 索引失效的场景
+    b: MySQL 如何优化慢查询
+    why: 索引相关，问题不同
+  - id: H08
+    kind: hard_neg
+    same: false
+    a: 事务隔离级别有哪些
+    b: 事务的 ACID 特性
+    why: 同主题，不同概念
+  - id: H09
+    kind: hard_neg
+    same: false
+    a: Redis 持久化方式
+    b: Redis 过期键删除策略
+    why: 同组件，不同机制
+  - id: H10
+    kind: hard_neg
+    same: false
+    a: 如何解决 Redis 缓存雪崩
+    b: 缓存穿透、击穿、雪崩的区别
+    why: 三者辨析 vs 单一方案
+  - id: H11
+    kind: hard_neg
+    same: false
+    a: TCP 和 UDP 的区别
+    b: TCP 如何保证可靠传输
+    why: 同协议族，问题不同
+  - id: H12
+    kind: hard_neg
+    same: false
+    a: TCP 三次握手
+    b: TCP 四次挥手
+    why: 高频混淆对
+  - id: H13
+    kind: hard_neg
+    same: false
+    a: 进程和线程的区别
+    b: 协程和线程的区别
+    why: 共享"线程的区别"框架
+  - id: H14
+    kind: hard_neg
+    same: false
+    a: 死锁产生的必要条件
+    b: 如何避免死锁
+    why: 成因 vs 处置
+  - id: H15
+    kind: hard_neg
+    same: false
+    a: 快速排序的原理
+    b: 归并排序的原理
+    why: 同句式，不同算法
+  - id: H16
+    kind: hard_neg
+    same: false
+    a: 时间复杂度 O(nlogn) 的排序算法有哪些
+    b: 快速排序的时间复杂度
+    why: 集合 vs 单算法
+  - id: H17
+    kind: hard_neg
+    same: false
+    a: 请先做一个简单的自我介绍
+    b: 介绍一个你最近做的项目
+    why: 面试开场两问
+  - id: H18
+    kind: hard_neg
+    same: false
+    a: 你最大的缺点是什么
+    b: 你遇到过最大的挫折是什么
+    why: 同句式，不同考察点
+  - id: H19
+    kind: hard_neg
+    same: false
+    a: 为什么离职
+    b: 为什么选择我们公司
+    why: 同"为什么"，对象不同
+  - id: H20
+    kind: hard_neg
+    same: false
+    a: 如何设计秒杀系统
+    b: 如何设计一个短链接系统
+    why: 同句式，不同系统
+  - id: H21
+    kind: hard_neg
+    same: false
+    a: 怎么查看当前进程
+    b: 怎么查看当前路径
+    why: 同模板 shell 题
+  - id: H22
+    kind: hard_neg
+    same: false
+    a: MySQL 的锁有哪些
+    b: MySQL 的行锁和表锁
+    why: 总览 vs 子集
+  - id: H23
+    kind: hard_neg
+    same: false
+    a: 什么是 CAP 理论
+    b: 什么是 BASE 理论
+    why: 分布式理论易混对
+  - id: H24
+    kind: hard_neg
+    same: false
+    a: JVM 调优的参数有哪些
+    b: JVM 调优的工具有哪些
+    why: 参数 vs 工具
+  - id: H25
+    kind: hard_neg
+    same: false
+    a: 接口和抽象类的区别
+    b: 抽象类和接口的使用场景
+    why: 区别 vs 选型
+  - id: H26
+    kind: hard_neg
+    same: false
+    a: Spring 事务的实现原理
+    b: Spring 事务失效的场景
+    why: 原理 vs 故障
+  - id: H27
+    kind: hard_neg
+    same: false
+    a: 堆和栈的区别
+    b: 堆溢出和栈溢出的区别
+    why: 同词不同层次
+  - id: H28
+    kind: hard_neg
+    same: false
+    a: 什么是线程池
+    b: 线程池的核心参数有哪些
+    why: 定义 vs 参数
+
+  # ---------------- long_noise：长文本不该并进单题 ----------------
+  - id: L01
+    kind: long_noise
+    same: false
+    a: Java 面试题汇总：1、什么是 JVM？2、Spring 是什么？3、Redis 是什么？
+    b: 什么是 JVM？
+    why: 整份试卷 vs 单题，合并即污染
+  - id: L02
+    kind: long_noise
+    same: false
+    a: 什么是 JVM 内存结构？JVM 内存分为堆、方法区、虚拟机栈、本地方法栈和程序计数器，其中堆又分新生代和老年代……
+    b: 什么是 JVM 内存结构？
+    why: 长答案正文不是一个独立题目单元，合并会把答案正文并进题簇
