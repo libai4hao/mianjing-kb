@@ -67,10 +67,45 @@ def test_witness_and_topic_vote(mini_db):
     assert rows[N_MYSQL]["witness"] == 3 and rows[N_MYSQL]["topic"] == "MySQL"
     assert rows[N_REDIS]["witness"] == 1 and rows[N_REDIS]["topic"] == "Redis"
     # variant 的 collection 归属与 canonical_id 级联
-    vid = cn.variant_id("h1", 1)
-    var = mini_db.execute("SELECT * FROM question_variants WHERE variant_id=?", (vid,)).fetchone()
+    var = mini_db.execute("SELECT * FROM question_variants "
+                          "WHERE doc_hash='h1' AND question_no='1'").fetchone()
+    assert var["variant_id"] == cn.variant_id(var["q_key"])
     assert var["collection"] == "c1"
     assert var["canonical_id"] == rows[N_JVM]["canonical_id"]
+
+
+def test_variant_id_stable_when_seq_shifts(mini_db):
+    """variant_id 只跟 q_key 走：文档前部增删题导致 seq 移位，变体身份不变。"""
+    cn.main([])
+    qkey = mini_db.execute(
+        "SELECT q_key FROM questions WHERE doc_hash='h1' AND seq=1").fetchone()[0]
+    before = mini_db.execute("SELECT variant_id FROM question_variants WHERE q_key=?",
+                             (qkey,)).fetchone()[0]
+    assert before == cn.variant_id(qkey)
+    mini_db.execute("UPDATE questions SET seq=2 WHERE doc_hash='h1' AND seq=1")
+    mini_db.commit()
+    cn.main([])
+    after = mini_db.execute("SELECT variant_id FROM question_variants WHERE q_key=?",
+                            (qkey,)).fetchone()[0]
+    assert after == before
+
+
+def test_prune_orphan_variants(mini_db, capsys):
+    """题被删掉后，其 q_key 的旧变体与 dependent 必须清理，不能留下脏见证。"""
+    cn.main([])
+    qkey = mini_db.execute(
+        "SELECT q_key FROM questions WHERE doc_hash='h5' AND seq=1").fetchone()[0]
+    assert mini_db.execute("SELECT COUNT(*) FROM question_variants WHERE q_key=?",
+                           (qkey,)).fetchone()[0] == 1
+    mini_db.execute("DELETE FROM questions WHERE doc_hash='h5' AND seq=1")
+    mini_db.commit()
+    capsys.readouterr()
+    assert cn.main(["--incremental", "--batch-id", "t-prune"]) == 0
+    capsys.readouterr()
+    assert mini_db.execute("SELECT COUNT(*) FROM question_variants WHERE q_key=?",
+                           (qkey,)).fetchone()[0] == 0
+    assert mini_db.execute("SELECT COUNT(*) FROM canonical_dependents WHERE q_key=?",
+                           (qkey,)).fetchone()[0] == 0
 
 
 def test_witness_uses_distinct_collection(mini_db):
@@ -245,12 +280,14 @@ def test_incremental_replaces_variant_when_qkey_changes(mini_db, capsys):
     mini_db.commit()
     assert cn.main(["--incremental", "--batch-id", "t-repl"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["replaced_variants_count"] == 1
-    assert out["replaced_variants"] == ["h1:newhash"]
-    assert mini_db.execute("SELECT q_key FROM question_variants WHERE variant_id=?",
-                           (cn.variant_id("h1", 1),)).fetchone()[0] == new_key
-    assert mini_db.execute("SELECT COUNT(*) FROM question_variants WHERE variant_id=?",
-                           (cn.variant_id("h1", 1),)).fetchone()[0] == 1
+    # q_key 变了就是新变体；旧 q_key 的 variant 在增量入口被清理，不再复用旧 variant_id
+    assert out["attached_count"] >= 1
+    assert mini_db.execute("SELECT COUNT(*) FROM question_variants WHERE q_key=?",
+                           (new_key,)).fetchone()[0] == 1
+    assert mini_db.execute("SELECT variant_id FROM question_variants WHERE q_key=?",
+                           (new_key,)).fetchone()[0] == cn.variant_id(new_key)
+    assert mini_db.execute("SELECT COUNT(*) FROM question_variants WHERE q_key=?",
+                           (old_key,)).fetchone()[0] == 0
     assert mini_db.execute("SELECT COUNT(*) FROM canonical_dependents WHERE q_key=?",
                            (old_key,)).fetchone()[0] == 0
     # 下一轮不应再重复处理

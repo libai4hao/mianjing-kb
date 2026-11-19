@@ -49,7 +49,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, hashing, textmetrics, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, hashing, textio, textmetrics, wlock  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
@@ -59,7 +59,7 @@ NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 # （三态报告 vs 四态台账），有意不合并数值。
 TH_BAD = 0.02     # 异常字符比上限（>= 判 fail）
 TH_CJK = config.GATE_CJK_MIN   # CJK 比例下限（< 判 review），与 config 单源
-TH_MIN = 100       # 最少可见字符数（< 判 fail）
+TH_MIN = config.TEXT_MIN_CHARS   # 最少可见字符数（< 判 fail），与 extract 单源
 SENTINEL_MISS_MAX = 0.50   # 哨兵 MISS 占比超过此值 → 直接失败，不打印“全绿”
 
 CAT_MAP = {"题库": "题库", "真题": "真题", "面经": "面经",
@@ -72,22 +72,12 @@ CODE_FENCE = re.compile(r"```.*?```", re.S)
 
 
 def read_text_info(path: Path) -> tuple[str, str]:
-    """读文本并返回 (正文, 实际编码)。
-
-    utf-8-sig 必须放最前：普通 utf-8 也能读带 BOM 的文件，但会把 U+FEFF 留在正文。
-    gb18030 作为第二候选；两者都失败才用 replace 兜底（不静默 ignore）。
-    """
-    raw = path.read_bytes()
-    for enc in ("utf-8-sig", "gb18030"):
-        try:
-            return raw.decode(enc), enc
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", errors="replace"), "utf-8-replace"
+    """兼容入口：统一委托 kb/textio（utf-8-sig → gb18030 → replace）。"""
+    return textio.read_text_info(path)
 
 
 def read_text(path: Path) -> str:
-    return read_text_info(path)[0]
+    return textio.read_text(path)
 
 
 def safe(s: str) -> str:

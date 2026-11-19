@@ -48,6 +48,7 @@ IGNORED_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".zip", ".rar"
                 ".xmind", ".xlsx", ".xls", ".mp4", ".mkv", ".exe"}   # P3-8：去掉重复的 .jpg
 
 # ---------- 门禁阈值（v2 §3.3 / R1 修正版）----------
+TEXT_MIN_CHARS = 100       # gate 与 extract 共用的最小可见字符数，避免 80/100 漂移
 GATE_CJK_MIN = 0.15        # CJK 字符占比下限
 GATE_GARBLED_MAX = 0.01    # 乱码字符占比上限
 GATE_VALID_MIN = 0.90      # 有效字符占比下限

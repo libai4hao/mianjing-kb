@@ -47,7 +47,7 @@ RDB 快照与 AOF 日志两种方式。
 
 2. Redis 为什么这么快？
 
-纯内存操作加 IO 多路复用。
+纯内存操作加 IO 多路复用，单线程模型避免了锁竞争，减少了上下文切换开销。
 """
 
 MD_B = """# 另一份资料
@@ -216,6 +216,103 @@ def test_incremental_skips_unchanged_and_picks_new(tmp_env, capsys):
     assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 4
 
 
+def test_exclusion_source_rel_suppresses_mapped_md(tmp_env, tmp_path, monkeypatch):
+    """源文件 rel 命中排除表就整篇不抽，即使 md 产物本身未被排除。"""
+    corpus, conn = tmp_env
+    _seed_doc(conn, corpus, "a.md", MD_A)
+    (config.QUESTION_MD_DIR / "a.md").write_text(MD_A, encoding="utf-8")
+    ex = tmp_path / "ex_src.json"
+    ex.write_text(json.dumps({"items": [{"rel": "a.md", "reason": "test"}]},
+                             ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(config, "EXCLUSIONS_FILE", ex)
+    pool, _m = extract.doc_pool(conn)
+    assert pool == []
+
+
+def test_non_ingested_md_mirror_does_not_reenter_pool(tmp_env):
+    """隔离/废弃源留下的 md 产物不能被当成孤儿重新进池。"""
+    corpus, conn = tmp_env
+    h, _p = _seed_doc(conn, corpus, "q.md", MD_A)
+    conn.execute("UPDATE source_documents SET status='quarantined' WHERE doc_hash=?", (h,))
+    conn.commit()
+    (config.QUESTION_MD_DIR / "q.md").write_text(MD_A, encoding="utf-8")
+    pool, _m = extract.doc_pool(conn)
+    assert pool == []
+
+
+def test_limit_skips_purge(tmp_env, capsys):
+    """--limit 是抽样试跑，不能把未处理文档的题当成孤儿清掉。"""
+    corpus, conn = tmp_env
+    _seed_doc(conn, corpus, "a.md", MD_A)
+    _seed_doc(conn, corpus, "b.md", MD_B)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    capsys.readouterr()
+    conn.execute(
+        "INSERT INTO questions (doc_hash, seq, q_text, a_text, span_start, span_end, "
+        "q_norm, q_norm_hash, simhash, extracted_at) VALUES (?, 1, 'x', '', 0, 1, 'x', 'x', 0, 'now')",
+        ("deadbeefdeadbeef",))
+    conn.commit()
+    assert extract.main(["--db", str(config.DB_PATH), "--limit", "1"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["purge_skipped"] == "limit" and out["purged_orphan_docs"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash='deadbeefdeadbeef'"
+                        ).fetchone()[0] == 1
+
+
+def test_many_read_errors_skip_purge(tmp_env, capsys):
+    """报错文档超过 5% 阈值时也不能清理，避免把未处理部分误判为孤儿。"""
+    corpus, conn = tmp_env
+    _seed_doc(conn, corpus, "a.md", MD_A)
+    _seed_doc(conn, corpus, "b.md", MD_B)
+    for i in range(2):
+        bad = corpus / f"bad{i}.md"
+        bad.mkdir()
+        h = f"bad{i:08d}"
+        conn.execute(
+            "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+            "dir_path, status, batch_id, first_seen_at, last_seen_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (h, h, bad.name, ".md", 1, str(bad), "", "classified", "t", "now", "now"))
+    conn.commit()
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["errors"] == 2 and out["purge_skipped"] == "errors"
+    assert out["purged_orphan_docs"] == 0
+
+
+def test_empty_result_preserves_old_questions(tmp_env, capsys):
+    """已有题的文档本次 0 题：默认保留旧题并告警，显式 --allow-empty-overwrite 才清空。"""
+    corpus, conn = tmp_env
+    h, p = _seed_doc(conn, corpus, "a.md", MD_A)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    capsys.readouterr()
+    p.write_text("太短", encoding="utf-8")
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["empty_preserved"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash=?", (h,)).fetchone()[0] == 2
+    assert extract.main(["--db", str(config.DB_PATH), "--allow-empty-overwrite"]) == 0
+    capsys.readouterr()
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash=?", (h,)).fetchone()[0] == 0
+
+
+def test_stats_does_not_create_missing_db(tmp_env, tmp_path):
+    """--stats 路径写错必须报错，不能悄悄建一个空库。"""
+    with pytest.raises(FileNotFoundError):
+        extract.main(["--stats", "--db", str(tmp_path / "不存在" / "kb.sqlite")])
+    assert not (tmp_path / "不存在" / "kb.sqlite").exists()
+
+
+def test_plan_does_not_write_identity_report(tmp_env, capsys):
+    """--plan 是只读模式：不落 md_identity_report.json。"""
+    corpus, conn = tmp_env
+    _seed_doc(conn, corpus, "a.md", MD_A)
+    assert extract.main(["--plan", "--db", str(config.DB_PATH)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["report"] is None
+    assert not (config.BUILD_DIR / "md_identity_report.json").exists()
+
+
 def test_full_run_keeps_processed_docs(tmp_env, capsys):
     """processed 不能把文档踢出题池：全量重跑仍要覆盖，且不 purge 已处理的题。"""
     corpus, conn = tmp_env
@@ -226,4 +323,35 @@ def test_full_run_keeps_processed_docs(tmp_env, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["docs"] == 1 and out["purged_orphan_docs"] == 0
     assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 2
+
+
+def test_text_of_gb18030_and_bom(tmp_env):
+    """GB18030 md 不能解成 U+FFFD；UTF-8 BOM 不能留在首行。"""
+    corpus, _conn = tmp_env
+    gb = corpus / "gb.md"
+    gb.write_bytes(("# 题\n\n" + "1. 什么是缓存穿透？\n\n" + "大量不存在的键查询打到数据库。" * 8)
+                   .encode("gb18030"))
+    text = extract.text_of(gb)
+    assert text and "\ufffd" not in text and "缓存穿透" in text
+    bom = corpus / "bom.md"
+    bom.write_text("\ufeff# 题\n\n" + "1. 什么是索引？\n\n" + "B+ 树按页组织数据。" * 10,
+                   encoding="utf-8")
+    text = extract.text_of(bom)
+    assert text and not text.startswith("\ufeff") and "索引" in text
+
+
+def test_text_of_nfkc(tmp_env):
+    """康熙部首/全角字符先 NFKC 再入库，避免检索与去重被异体字打断。"""
+    corpus, _conn = tmp_env
+    p = corpus / "nfkc.md"
+    p.write_text("1. ⼤⼚的缓存怎么设计？\n\n" + "分片、副本与热点隔离。" * 12, encoding="utf-8")
+    text = extract.text_of(p)
+    assert text and "⼤" not in text and "大厂" in text
+
+
+def test_heading_strip_keeps_blank_line_and_code_fence():
+    text = "para\n\n# Title\n\n```\n# 代码注释\nprint(1)\n```\n"
+    out = extract._strip_heading_markers(text)
+    assert out.startswith("para\n\nTitle\n\n")
+    assert "# 代码注释" in out
 

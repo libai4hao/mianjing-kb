@@ -8,6 +8,18 @@
 
 ## 2026-11-19
 
+- **extract 数据安全修复**：`purge_orphans` 仅基于完整题池键集合；`--limit`/增量/报错超阈值
+  时跳过清理；每篇文档用 `SAVEPOINT extract_one` 独立提交，单篇失败不再中断整批；空结果且
+  已有旧题时默认保留并记 `empty_preserved`，新增 `--allow-empty-overwrite`。
+  `doc_pool` 的源 rel 改由 `source_documents.dir_path + file_name` 生成，排除规则同时校验
+  源 rel 与 md rel；非内容池源留下的 md 孤儿不再重新进池。文本读取统一走 `kb/textio.py`
+  （`utf-8-sig → gb18030 → utf-8 replace`）并做 NFKC；标题剥离逐行处理并跳过代码围栏。
+  `MIN_CHARS` 与 `gate.TH_MIN` 统一为 `config.TEXT_MIN_CHARS=100`；`--stats` 只读且
+  `freq_top10` 显式排序；`--plan/--dry-run` 不再写 `md_identity_report.json`。
+- **canonical variant_id 改稳定键**：`variant_id = sha256("variant:" + q_key)[:16]`，seq 移位
+  不再改变变体身份；新增 `normalize_variant_ids` / `prune_orphan_variants`，增量 attach 与
+  `--apply-candidates` 先清理历史 `(doc_hash, seq)` ID 与 q_key 已消失的变体；孤儿 md 的
+  `doc_meta` 统一归到 `md-orphan`，避免按 doc_hash 虚高见证数。
 - **T30 门禁结论前置到抽题**：`gate --audit` 把三态报告映射为 `gate_results` 四态
   （`pass/low_cjk/garbled/non_content`）并同步 `source_documents.gate_result`；`extract` 在
   `doc_pool` 后按 `doc_hash` 过滤，只抽 `pass`，`skipped_gate` 按四态计数，新增

@@ -57,9 +57,62 @@ ATTACH_JAC = 0.7        # 权威口径：与全量 --jac 默认一致
 CANDIDATE_JAC = 0.65    # 只登记人工复核，不自动挂靠
 
 
-def variant_id(doc_hash: str, seq: int) -> str:
-    """变体主键：sha256(doc_hash:seq)[:16]——extract 重跑 qid 会漂移，(doc_hash, seq) 才稳定。"""
-    return hashlib.sha256(f"{doc_hash}:{seq}".encode("utf-8")).hexdigest()[:16]
+def variant_id(q_key: str) -> str:
+    """变体主键：sha256("variant:" + q_key)[:16]。
+
+    q_key=(doc_hash,q_norm_hash) 才是跨重切稳定的身份；seq 只是 chunker 输出序号，
+    文档前部增删一题会让后面所有 seq 移位，不能做主键。
+    """
+    return hashlib.sha256(f"variant:{q_key}".encode("utf-8")).hexdigest()[:16]
+
+
+def normalize_variant_ids(conn) -> int:
+    """把历史 (doc_hash,seq) 公式的 variant_id 改成 q_key 公式。"""
+    rows = conn.execute(
+        "SELECT variant_id, canonical_id, q_key FROM question_variants "
+        "WHERE COALESCE(q_key,'')<>''").fetchall()
+    changed = 0
+    for r in rows:
+        old, cid, qkey = r["variant_id"], r["canonical_id"], r["q_key"]
+        new = variant_id(qkey)
+        if old == new:
+            continue
+        hit = conn.execute("SELECT canonical_id, q_key FROM question_variants "
+                           "WHERE variant_id=?", (new,)).fetchone()
+        if hit:
+            # 新 ID 已被同一 q_key 的正常行占用：删除旧别名，避免主键冲突。
+            conn.execute("DELETE FROM question_variants WHERE variant_id=?", (old,))
+            if (hit["canonical_id"], hit["q_key"]) != (cid, qkey):
+                conn.execute("DELETE FROM canonical_dependents WHERE canonical_id=? AND q_key=?",
+                             (cid, qkey))
+        else:
+            conn.execute("UPDATE question_variants SET variant_id=? WHERE variant_id=?",
+                         (new, old))
+        changed += 1
+    return changed
+
+
+def prune_orphan_variants(conn) -> int:
+    """删除 q_key 已不在 questions 表的 variant，并清掉其 dependent/witness。"""
+    rows = conn.execute(
+        "SELECT variant_id, canonical_id, q_key FROM question_variants "
+        "WHERE COALESCE(q_key,'')='' OR q_key NOT IN (SELECT q_key FROM questions)").fetchall()
+    touched = set()
+    for r in rows:
+        conn.execute("DELETE FROM question_variants WHERE variant_id=?", (r["variant_id"],))
+        if r["q_key"]:
+            conn.execute("DELETE FROM canonical_dependents WHERE canonical_id=? AND q_key=?",
+                         (r["canonical_id"], r["q_key"]))
+        touched.add(r["canonical_id"])
+    for cid in touched:
+        has = conn.execute("SELECT 1 FROM question_variants WHERE canonical_id=? LIMIT 1",
+                           (cid,)).fetchone()
+        if has:
+            _recompute_witness(conn, cid)
+        else:
+            conn.execute("DELETE FROM canonical_dependents WHERE canonical_id=?", (cid,))
+            conn.execute("DELETE FROM canonical_questions WHERE canonical_id=?", (cid,))
+    return len(rows)
 
 
 def _topic(value: str | None) -> str:
@@ -78,9 +131,18 @@ def collection_key(value: str | None, doc_hash: str) -> str:
 
 
 def doc_meta(conn) -> dict[str, tuple[str, str]]:
-    """{doc_hash: (topic, collection)}——variant 的 collection/topic 归属，先归一化再入内存。"""
-    return {r["doc_hash"]: (_topic(r["topic"]), _collection(r["collection"]))
+    """{doc_hash: (topic, collection)}——variant 的 collection/topic 归属，先归一化再入内存。
+
+    没有 source_documents 行的孤儿 md 统一记成一个 `md-orphan` collection：
+    否则每篇孤儿都会回退成自己的 doc:<hash>，把同一道题的见证数虚高。
+    """
+    meta = {r["doc_hash"]: (_topic(r["topic"]), _collection(r["collection"]))
             for r in conn.execute("SELECT doc_hash, topic, collection FROM source_documents")}
+    for r in conn.execute(
+            "SELECT DISTINCT q.doc_hash FROM questions q "
+            "LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash WHERE sd.doc_hash IS NULL"):
+        meta[r["doc_hash"]] = ("", "md-orphan")
+    return meta
 
 
 def _qkey(q: dict) -> str:
@@ -146,7 +208,7 @@ def build_rows(qs: list[dict], clusters: list[dict],
                        created_at.get(cid, now), now))
         for i in c["members"]:
             q = qs[i]
-            rows_v.append((variant_id(q["doc_hash"], q["seq"]), cid, q["doc_hash"],
+            rows_v.append((variant_id(_qkey(q)), cid, q["doc_hash"],
                            str(q["seq"]), (q.get("a_text") or "")[:2000],
                            _collection(meta.get(q["doc_hash"], ("", ""))[1]), now,
                            _qkey(q)))
@@ -284,7 +346,7 @@ def _write_variant(conn, q: dict, cid: str, qkey: str, now: str,
 
     返回 (status, old_canonical_id)。status = new / replaced / same。
     """
-    vid = variant_id(q["doc_hash"], q["seq"])
+    vid = variant_id(qkey)
     row = conn.execute(
         "SELECT canonical_id, q_key FROM question_variants WHERE variant_id=?", (vid,)).fetchone()
     collection = _collection(meta.get(q["doc_hash"], ("", ""))[1])
@@ -297,8 +359,8 @@ def _write_variant(conn, q: dict, cid: str, qkey: str, now: str,
              collection, now, qkey))
         return "new", None
     old_cid, old_qkey = row["canonical_id"], row["q_key"] or ""
-    if old_qkey and old_qkey != qkey:
-        # 同 (doc_hash,seq) 的题干变了：旧 dependent 必须先撤，否则见证数会双算。
+    if old_qkey and (old_qkey != qkey or old_cid != cid):
+        # q_key 变了或变体改挂别的簇：旧 dependent 必须先撤，否则见证数会双算。
         conn.execute("DELETE FROM canonical_dependents WHERE canonical_id=? AND q_key=?",
                      (old_cid, old_qkey))
     if old_cid != cid or old_qkey != qkey:
@@ -322,10 +384,12 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
     - Jaccard ≥ attach_jac → 吸到最相似 canonical；
     - candidate_jac ≤ sim < attach_jac → merge_candidates(status=pending)，不落 variant；
     - 其余 → 新 canonical + variant；
-    - variant_id 冲突（extract 重跑 q_key 变化）显式替换，不静默丢弃；
+    - 新 q_key 正常新建变体；旧 q_key 的变体由入口清理，不再按 (doc_hash,seq) 复用 ID；
     - 只重算 touched canonical 的 witness/topic。
     """
     now = datetime.now().strftime(NOW_FMT)
+    normalize_variant_ids(conn)
+    prune_orphan_variants(conn)
     attached_keys = {r[0] for r in conn.execute(
         "SELECT q_key FROM question_variants WHERE COALESCE(q_key,'')!=''")}
     reps = [(r[0], r[1]) for r in conn.execute(
@@ -436,6 +500,8 @@ def apply_candidates(conn, meta: dict[str, tuple[str, str]] | None = None) -> di
     这是 0.65–0.7（原 0.85–0.92）候选区间的审核出口；没有它，merge_candidates 只会膨胀。
     """
     now = datetime.now().strftime(NOW_FMT)
+    normalize_variant_ids(conn)
+    prune_orphan_variants(conn)
     meta = meta or doc_meta(conn)
     by_key = {_qkey(q): q for q in load_questions(conn)}
     rows = conn.execute(

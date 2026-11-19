@@ -6,7 +6,7 @@
 映射由 `kb/mdmap.py` 统一裁决（hash8 精确 > 唯一 stem > 歧义裁决 > 孤儿），
 报告落 `build/md_identity_report.json`。不再把"源文件 + md 镜像"同时收进题池。
 
-- md/txt 直接读文件；pdf/docx/doc 走 question_freq.extract；<80 字符的空文档记 0 题
+- md/txt 直接读文件；pdf/docx/doc 走 question_freq.extract；<config.TEXT_MIN_CHARS 字符的空文档记 0 题
 - 每题算 q_norm / q_norm_hash / simhash，落 meta/schema/004_questions.sql 的 questions 表
 - 频次口径：精确同文直接可用视图 question_freq（见证数 = distinct collection，014 迁移）；
   近重复簇留给 P1-4 report（simhash）
@@ -28,29 +28,55 @@ import json
 import re
 import sys
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, mdmap, products, status, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, mdmap, products, status, textio, wlock  # noqa: E402
 from mianjing_kb.question_freq import close_word, extract, normalize, simhash  # noqa: E402
 from mianjing_kb.chunker import chunk_v2  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
-MIN_CHARS = 80
+MIN_CHARS = config.TEXT_MIN_CHARS
 MIN_NORM = 6
 
 
-def text_of(path: Path) -> str:
-    """md/txt 读文件，其余走 question_freq.extract；<80 字符视为无文本。"""
+def _strip_heading_markers(text: str) -> str:
+    """只剥行首标题标记，保留块分隔空行和代码围栏内的 #。"""
+    out, in_fence = [], False
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if not in_fence:
+            line = re.sub(r"^[ \t]{0,3}#{1,6}[ \t]+", "", line)
+        out.append(line)
+    return "".join(out)
+
+
+def text_of(path: Path) -> str | None:
+    """md/txt 读文件，其余走 question_freq.extract。
+
+    返回 None 表示读取/解析失败；返回 "" 表示成功读到但不足 MIN_CHARS（或空文档）。
+    """
     if path.suffix.lower() in (".md", ".txt"):
-        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = textio.read_text(path)
+        except OSError:
+            return None
     else:
-        text = extract(path)
+        try:
+            text = extract(path)
+        except Exception:  # noqa: BLE001 —— 解析失败由调用方记 error，不冒充空文档
+            return None
+    text = unicodedata.normalize("NFKC", text or "")
     if len(text.strip()) < MIN_CHARS:
         return ""
-    return re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", text)
+    return _strip_heading_markers(text)
 
 
 def _excluded_rels() -> tuple[set[str], set[str]]:
@@ -63,21 +89,56 @@ def _excluded_rels() -> tuple[set[str], set[str]]:
     return src, mds
 
 
+def _source_rels(conn) -> dict[str, tuple[str, str, str, str]]:
+    """doc_hash → (源相对路径, status, 文件名 stem, doc_hash 前 8 位)。
+
+    优先用 DB 的 dir_path/file_name，不靠 relative_to 路径运算（Windows 盘符不一致会退化）。
+    """
+    out = {}
+    for r in conn.execute("SELECT doc_hash, dir_path, file_name, src_path, status "
+                          "FROM source_documents"):
+        dir_path = (r["dir_path"] or "").replace("\\", "/").strip("/")
+        name = r["file_name"] or Path(r["src_path"]).name
+        rel = f"{dir_path}/{name}" if dir_path else name
+        out[r["doc_hash"]] = (rel, r["status"], Path(name).stem.lower(), r["doc_hash"][:8])
+    return out
+
+
+def _orphan_owned_by_retired_source(rel: str, source_rels: dict) -> bool:
+    """孤儿 md 若其实是某条非内容池源的产物，跳过——否则隔离/废弃件会以 md-mirror 复活。"""
+    stem = Path(rel).stem
+    hit = mdmap.HASH_SUFFIX.search(stem)
+    base = mdmap.base_stem(stem).lower()
+    for _src_rel, st, fn_stem, prefix in source_rels.values():
+        if st in status.INGESTED:
+            continue
+        if hit and hit.group(1) == prefix:
+            return True
+        if base == mdmap.base_stem(fn_stem).lower():
+            return True
+    return False
+
+
 def doc_pool(conn) -> tuple[list[tuple[str, Path]], "mdmap.Mapping"]:
     """(doc_hash, path) 题池 —— **一文档一身份**。
 
     1. 有 md 产物：用 md 正文，身份 = 源 doc_hash（P0-1 单身份）；
     2. 无产物：抽源文件，身份 = 源 doc_hash；
     3. 孤儿 md（找不到源）：保留 `md-mirror:` 身份单独成池。
-    exclusions.json 命中的件不进题池（P2-⑤：保留检索、不抽题）；产物被排除时整篇不抽，
-    不再回退到源文件（否则排除形同虚设）。
+    exclusions.json 同时校验源 rel 与 md rel；产物命中时整篇不抽，不回退源文件。
     """
     ex_src, ex_md = _excluded_rels()
+    source_rels = _source_rels(conn)
+    ing = set(status.INGESTED)
     mapping = mdmap.build(conn, Path(config.QUESTION_MD_DIR))
     pool: dict[str, Path] = {}
 
-    for doc_hash, (rel, p) in mapping.by_doc.items():
-        if rel in ex_md:
+    for doc_hash, (md_rel, p) in mapping.by_doc.items():
+        src = source_rels.get(doc_hash)
+        # mdmap.build 已按 INGESTED 过滤；这里再兜一层，隔离/废弃/驳回件绝不进池
+        if not src or src[1] not in ing:
+            continue
+        if src[0] in ex_src or md_rel in ex_md:
             continue
         pool[doc_hash] = p
 
@@ -89,10 +150,7 @@ def doc_pool(conn) -> tuple[list[tuple[str, Path]], "mdmap.Mapping"]:
         p = Path(r["src_path"])
         if not p.exists():
             continue
-        try:
-            rel = p.relative_to(config.CORPUS_ROOT).as_posix()
-        except ValueError:
-            rel = p.name
+        rel = source_rels.get(doc_hash, ("", ""))[0]
         if rel in ex_src:
             continue
         pool[doc_hash] = p
@@ -100,8 +158,11 @@ def doc_pool(conn) -> tuple[list[tuple[str, Path]], "mdmap.Mapping"]:
     for mh, (rel, p) in mapping.orphans.items():
         if rel in ex_md:
             continue
+        if _orphan_owned_by_retired_source(rel, source_rels):
+            continue
         pool.setdefault(mh, p)
-    return sorted(pool.items()), mapping
+    # 按产物路径排序，--limit 试跑可复现（不按 doc_hash 随机切）
+    return sorted(pool.items(), key=lambda kv: str(kv[1])), mapping
 
 
 def write_identity_report(mapping) -> Path:
@@ -152,15 +213,7 @@ def _signed64(v: int) -> int:
     return v - (1 << 64) if v >= (1 << 63) else v
 
 
-def extract_doc(doc_hash: str, path: Path) -> list[dict]:
-    """单文档 → questions 行列表（不落库）。
-
-    T29：q_key=(doc_hash,q_norm_hash) 是跨库稳定键；同一文档内同题重复（chunker
-    重复产出）先按"答案最长"保留一条，保证 q_key 唯一。
-    """
-    text = text_of(path)
-    if not text:
-        return []
+def _rows_from_text(doc_hash: str, text: str) -> list[dict]:
     rows = []
     v2 = chunk_v2(text)
     for it in v2["items"]:
@@ -190,6 +243,27 @@ def extract_doc(doc_hash: str, path: Path) -> list[dict]:
         if old is None or len(r["a_text"]) > len(old["a_text"]):
             keep[r["q_key"]] = r
     return sorted(keep.values(), key=lambda r: r["seq"])
+
+
+def extract_doc_status(doc_hash: str, path: Path) -> tuple[list[dict], str]:
+    """返回 (rows, status)。status = ok / empty / no_questions / read_error。"""
+    text = text_of(path)
+    if text is None:
+        return [], "read_error"
+    if not text:
+        return [], "empty"
+    rows = _rows_from_text(doc_hash, text)
+    return rows, "ok" if rows else "no_questions"
+
+
+def extract_doc(doc_hash: str, path: Path) -> list[dict]:
+    """单文档 → questions 行列表（不落库）。
+
+    T29：q_key=(doc_hash,q_norm_hash) 是跨库稳定键；同一文档内同题重复（chunker
+    重复产出）先按"答案最长"保留一条，保证 q_key 唯一。
+    """
+    rows, _status = extract_doc_status(doc_hash, path)
+    return rows
 
 
 def store(conn, doc_hash: str, rows: list[dict]) -> int:
@@ -248,7 +322,7 @@ def _filter_by_gate(pool, statuses, require_gate: bool):
 
 
 def _run(args) -> int:
-    conn = db.connect(args.db, create=not (args.dry_run or args.plan))
+    conn = db.connect(args.db, create=not (args.dry_run or args.plan or args.stats))
     if args.stats:
         n = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
         out = {"questions": n,
@@ -256,7 +330,8 @@ def _run(args) -> int:
                "qtype": dict(conn.execute("SELECT qtype, COUNT(*) FROM questions GROUP BY 1 ORDER BY 2 DESC").fetchall()),
                "conf": dict(conn.execute("SELECT conf, COUNT(*) FROM questions GROUP BY 1 ORDER BY 2 DESC").fetchall()),
                "freq_top10": [dict(r) for r in conn.execute(
-                   "SELECT sample_q, n_distinct_docs FROM question_freq LIMIT 10").fetchall()]}
+                   "SELECT sample_q, n_distinct_docs, n_distinct_collections FROM question_freq "
+                   "ORDER BY n_distinct_collections DESC LIMIT 10").fetchall()]}
         print(json.dumps(out, ensure_ascii=False, indent=1))
         conn.close()
         return 0
@@ -264,7 +339,7 @@ def _run(args) -> int:
     pool, mapping = doc_pool(conn)
     pool_all = pool
     pool, gate_skipped = _filter_by_gate(pool, _gate_statuses(conn), args.require_gate)
-    report_path = write_identity_report(mapping)
+    report_path = None if (args.plan or args.dry_run) else write_identity_report(mapping)
     if args.plan:
         print(json.dumps({
             "pool_docs": len(pool_all),
@@ -275,7 +350,7 @@ def _run(args) -> int:
             "orphan_md": len(mapping.orphans),
             "mapping": {k: v for k, v in mapping.report.items()
                         if k not in ("mapping", "conflicts", "duplicates", "orphans_list")},
-            "report": str(report_path),
+            "report": None,
         }, ensure_ascii=False, indent=1))
         conn.close()
         return 0
@@ -295,15 +370,20 @@ def _run(args) -> int:
         mark_status(conn, [h for h, _p in pool], status.PROCESSING)
         conn.commit()
     n_docs = n_q = n_empty = n_err = n_reattached = 0
+    n_empty_preserved = 0
     qtype: dict[str, int] = {}
     conf: dict[str, int] = {}
     for i, (doc_hash, p) in enumerate(pool):
         try:
-            rows = extract_doc(doc_hash, p)
+            rows, read_state = extract_doc_status(doc_hash, p)
         except Exception as ex:  # noqa: BLE001
             n_err += 1
             # 失败留 processing：状态本身就是"下次从这续跑"的标记
             print(f"[warn] {p.name}: {type(ex).__name__}: {ex}", file=sys.stderr)
+            continue
+        if read_state == "read_error":
+            n_err += 1
+            print(f"[warn] {p.name}: 读取/解析失败，保留原记录", file=sys.stderr)
             continue
         n_docs += 1
         if not rows:
@@ -313,20 +393,44 @@ def _run(args) -> int:
             qtype[r["qtype"]] = qtype.get(r["qtype"], 0) + 1
             conf[r["conf"]] = conf.get(r["conf"], 0) + 1
         if not args.dry_run:
-            n_reattached += store(conn, doc_hash, rows)
-            md_rel, md_hash, text_source = _product_loc(conn, doc_hash, mapping)
-            products.upsert(conn, doc_hash, md_rel=md_rel, md_hash=md_hash,
-                            text_source=text_source, input_path=p, questions_n=len(rows),
-                            extracted_at=datetime.now().strftime(NOW_FMT))
-            mark_status(conn, [doc_hash], status.PROCESSED)
+            old_n = conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash=?",
+                                 (doc_hash,)).fetchone()[0]
+            if not rows and old_n and not args.allow_empty_overwrite:
+                n_empty_preserved += 1
+                print(f"[warn] {p.name}: 本次 0 题但已有 {old_n} 条旧题，保留旧题不删除"
+                      f"（确认清空请加 --allow-empty-overwrite）", file=sys.stderr)
+                continue
+            conn.execute("SAVEPOINT extract_one")
+            try:
+                n_reattached += store(conn, doc_hash, rows)
+                md_rel, md_hash, text_source = _product_loc(conn, doc_hash, mapping)
+                products.upsert(conn, doc_hash, md_rel=md_rel, md_hash=md_hash,
+                                text_source=text_source, input_path=p, questions_n=len(rows),
+                                extracted_at=datetime.now().strftime(NOW_FMT))
+                mark_status(conn, [doc_hash], status.PROCESSED)
+            except Exception as ex:  # noqa: BLE001
+                conn.execute("ROLLBACK TO extract_one")
+                conn.execute("RELEASE extract_one")
+                n_err += 1
+                print(f"[warn] {p.name}: 落库失败 {type(ex).__name__}: {ex}", file=sys.stderr)
+                continue
+            else:
+                conn.execute("RELEASE extract_one")
             if (i + 1) % 50 == 0:            # 增量/长批次的分块提交（崩溃只回退当前块）
                 conn.commit()
         if (i + 1) % 200 == 0:
             print(f"[prog] {i + 1}/{len(pool)} docs, {n_q} questions", file=sys.stderr)
     close_word()        # Word COM 只在抽取阶段用；批次结束立刻释放，不带着宿主进程进落库/统计
     if not args.dry_run:
-        # 全量才清孤儿；增量只处理子集，purge 会把未在本次池里的题行误删
-        n_purged = 0 if args.incremental else purge_orphans(conn, {k for k, _ in pool_all})
+        # 全量才清孤儿；--limit/大量报错时禁用清理，避免把未处理部分误判为孤儿
+        purge_skipped = None
+        if args.incremental:
+            purge_skipped = "incremental"
+        elif args.limit:
+            purge_skipped = "limit"
+        elif n_err > max(1, int(len(pool_all) * 0.05)):
+            purge_skipped = "errors"
+        n_purged = 0 if purge_skipped else purge_orphans(conn, {k for k, _ in pool_all})
         n_lost = conn.execute("SELECT COUNT(*) FROM label_facts WHERE q_norm_hash NOT IN "
                               "(SELECT q_norm_hash FROM questions)").fetchone()[0]
         if n_lost:
@@ -334,13 +438,15 @@ def _run(args) -> int:
                   f"详见 docs/项目审核报告/修复方案-2026-11-19.md F1", file=sys.stderr)
         conn.commit()
     else:
-        n_lost = 0
+        purge_skipped, n_lost = None, 0
     elapsed = time.perf_counter() - started
     print(json.dumps({
-        "docs": n_docs, "questions": n_q, "empty_docs": n_empty, "errors": n_err,
+        "docs": n_docs, "questions": n_q, "empty_docs": n_empty,
+        "empty_preserved": n_empty_preserved, "errors": n_err,
         "incremental": args.incremental, "skipped_unchanged": skipped_unchanged,
         "skipped_gate": gate_skipped,
         "purged_orphan_docs": n_purged if not args.dry_run else 0,
+        "purge_skipped": purge_skipped,
         "label_reattached": n_reattached if not args.dry_run else 0,
         "label_facts_lost": n_lost,
         "dry_run": args.dry_run, "elapsed_sec": round(elapsed, 1),
@@ -368,6 +474,8 @@ def main(argv=None) -> int:
                     help="只处理新增/变更文档（按 document_products 的 size/mtime 判定）")
     ap.add_argument("--require-gate", action="store_true",
                     help="T30：无 gate 结论的文档也跳过（默认只跳过已知 review/fail）")
+    ap.add_argument("--allow-empty-overwrite", action="store_true",
+                    help="允许 0 题结果覆盖已有旧题（默认保留旧题并告警）")
     args = ap.parse_args(argv)
     if args.dry_run or args.plan or args.stats:      # 只读，不进写锁
         return _run(args)
