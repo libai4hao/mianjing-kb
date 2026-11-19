@@ -8,6 +8,11 @@
 
 ## 2026-11-19
 
+- **chunker v2 召回修复**：`extract.text_of` 保留 `## 2.`/`问题N`/`一、` 等结构性标题、只对非题目型
+  PDF 断句标题去 `#`；`_match_question` 先剥整行粗体；推广过滤改成强特征直剔/弱词仅在不像题目时剔；
+  水印候选排除 `答案：/优点：` 等冒号标签；页码/OCR 分页标记不消费 prev_blank，标题/文档头视为块边界；
+  答案内冒号小节与不足 6 个归一化字符的碎片不另起题；`chunk_v2` 用 `split_long=False` 保持
+  完整块与 a_segs，长答案 span 不再错位；`_HAN` 扩到 1–99，`问题二十一` 不再得 qid=0。
 - **extract 数据安全修复**：`purge_orphans` 仅基于完整题池键集合；`--limit`/增量/报错超阈值
   时跳过清理；每篇文档用 `SAVEPOINT extract_one` 独立提交，单篇失败不再中断整批；空结果且
   已有旧题时默认保留并记 `empty_preserved`，新增 `--allow-empty-overwrite`。

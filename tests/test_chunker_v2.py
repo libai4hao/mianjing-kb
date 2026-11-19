@@ -11,6 +11,8 @@
 ⑦ 致谢/招聘广告短行 → leftovers(致谢/广告)，不产题
 ⑧ span 不越界不重叠，q 必须能在原文 span 首段回指
 """
+from pathlib import Path
+
 from mianjing_kb import chunker
 
 DOC = """# 面试题整理
@@ -71,6 +73,94 @@ def test_v2_signals_and_schema():
         assert it["q"][:6].lstrip("# ") in doc[s:s + 200]
 
 
+def test_v2_heading_and_promo_question_kept():
+    """`## 2.` 保持标题边界；含「广告/招聘」的真题目不被当推广行删掉。"""
+    md = """1. 什么是TCP？
+
+TCP 是面向连接的协议。
+
+## 2. 什么是UDP？
+
+UDP 无连接。
+
+如何设计广告投放系统？
+
+用广告位和竞价。
+
+招聘系统怎么设计？
+
+用职位库。
+"""
+    v2 = chunker.chunk_v2(md)
+    assert [it["q"] for it in v2["items"]] == [
+        "什么是TCP？", "什么是UDP？", "如何设计广告投放系统？", "招聘系统怎么设计？"]
+    assert "广告位" in v2["items"][2]["a"]
+    assert v2["coverage"] >= 0.95
+
+
+def test_v2_noise_does_not_break_blank_boundary():
+    """页码/OCR 分页标记不消费块级空行，紧跟的编号题仍能新开。"""
+    for noise in ("12", "===== page 2 ====="):
+        md = f"1. q1\n\n答案一\n\n{noise}\n2. q2\n\n答案二\n"
+        v2 = chunker.chunk_v2(md)
+        assert [it["q"] for it in v2["items"]] == ["q1", "q2"], noise
+        assert v2["coverage"] >= 0.95
+
+
+def test_v2_bold_number_and_label_lines_kept():
+    """整行粗体题号能识别；重复的「答案：/优点：」标签不能被当水印删掉。"""
+    md = """**1. 什么是X**
+
+答案：
+
+优点：快
+
+缺点：慢
+
+2. 什么是Y？
+
+答案：
+
+优点：稳
+"""
+    v2 = chunker.chunk_v2(md)
+    assert [it["q"] for it in v2["items"]][:2] == ["什么是X", "什么是Y？"]
+    assert "优点：快" in v2["items"][0]["a"]
+    assert "优点：稳" in v2["items"][1]["a"]
+
+
+def test_v2_answer_subheadings_do_not_split():
+    """答案内「区别：/如何实现：」小节不另起题，避免碎片被 extract 丢掉。"""
+    md = """1. 什么是A？
+
+答案：
+
+区别：
+
+如何实现：
+
+这些仍是答案正文。
+
+2. q2
+
+答。
+"""
+    v2 = chunker.chunk_v2(md)
+    assert [it["q"] for it in v2["items"]] == ["什么是A？", "q2"]
+    assert "区别：" in v2["items"][0]["a"]
+
+
+def test_v2_han_qid_21_and_long_span():
+    """问题二十一不再算出 qid=0；长答案 v2 保持整块 span，不做会错位的续并。"""
+    v2 = chunker.chunk_v2("问题二十一：什么是X？\n\n答。\n")
+    assert v2["items"][0]["q"] == "什么是X？"
+    long_md = (Path(__file__).parent / "fixtures" / "chunk_longsplit.txt").read_text(encoding="utf-8")
+    long_v2 = chunker.chunk_v2(long_md)
+    assert len(long_v2["items"]) == 1
+    assert long_v2["items"][0]["span"] == [0, len(long_md)]
+    assert "甲" in long_v2["items"][0]["a"]
+
+
 def test_v2_qtype():
     q = lambda t: chunker.classify_qtype(t)
     assert q("请做一下自我介绍？") == "HR"
@@ -78,6 +168,16 @@ def test_v2_qtype():
     assert q("说说你项目里遇到的难点？") == "项目"
     assert q("如何设计一个秒杀系统？") == "场景"
     assert q("什么是Java反射？") == "八股"
+
+
+def test_v2_span_invariants():
+    """R6 不变量：item span 在文本边界内、按序且互不重叠，coverage 不超过 1。"""
+    v2 = chunker.chunk_v2(DOC)
+    spans = [it["span"] for it in v2["items"]]
+    assert spans == sorted(spans)
+    assert all(0 <= s < e <= len(DOC) for s, e in spans)
+    assert all(spans[i][1] <= spans[i + 1][0] for i in range(len(spans) - 1))
+    assert 0 <= v2["coverage"] <= 1
 
 
 def test_v2_probe_when_no_items():

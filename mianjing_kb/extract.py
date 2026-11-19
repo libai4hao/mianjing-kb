@@ -43,17 +43,31 @@ MIN_CHARS = config.TEXT_MIN_CHARS
 MIN_NORM = 6
 
 
-def _strip_heading_markers(text: str) -> str:
-    """只剥行首标题标记，保留块分隔空行和代码围栏内的 #。"""
+_HEAD_LINE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+(.+?)(\r?\n)?$")
+_STRUCT_HEAD = re.compile(
+    r"^(?:\d{1,3}[.、)]|问题[一二三四五六七八九十0-9]+|第[一二三四五六七八九十0-9]+题|"
+    r"[一二三四五六七八九十]+、)")
+
+
+def _strip_nonstructural_headings(text: str) -> str:
+    """只把"非题目型" markdown 标题去掉 `#`，保留编号题标题。
+
+    chunker 能处理 `## 2. 什么是 UDP`，但整本 PDF 转出的 `# 供服务自动注册…` 这类
+    断句标题如果全保留，会被当成标题题，反而把上下文切碎。编号/问题N/一、 这类
+    结构性标题原样保留，其余标题只去掉标记、保留正文与空行。
+    """
     out, in_fence = [], False
     for line in text.splitlines(keepends=True):
         stripped = line.lstrip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
+        if stripped.startswith(("```", "~~~")):
             in_fence = not in_fence
             out.append(line)
             continue
         if not in_fence:
-            line = re.sub(r"^[ \t]{0,3}#{1,6}[ \t]+", "", line)
+            m = _HEAD_LINE.match(line)
+            if m and not _STRUCT_HEAD.match(m.group(1).strip()):
+                out.append(m.group(1) + (m.group(2) or ""))
+                continue
         out.append(line)
     return "".join(out)
 
@@ -62,6 +76,8 @@ def text_of(path: Path) -> str | None:
     """md/txt 读文件，其余走 question_freq.extract。
 
     返回 None 表示读取/解析失败；返回 "" 表示成功读到但不足 MIN_CHARS（或空文档）。
+    结构性标题（`## 2.`、`问题N`、`一、`）原样保留给 chunker；非题目型的 PDF 断句标题只去
+    `#` 标记、保留正文与空行，避免整本 PDF 的章节标题被当成标题题把上下文切碎。
     """
     if path.suffix.lower() in (".md", ".txt"):
         try:
@@ -76,7 +92,7 @@ def text_of(path: Path) -> str | None:
     text = unicodedata.normalize("NFKC", text or "")
     if len(text.strip()) < MIN_CHARS:
         return ""
-    return _strip_heading_markers(text)
+    return _strip_nonstructural_headings(text)
 
 
 def _excluded_rels() -> tuple[set[str], set[str]]:

@@ -23,7 +23,8 @@ R4  目录行（点线+行尾页码）→ leftovers(why=目录行)，不产出�
 R5  页眉页脚（第N页 / - N -）、文档头（# 一级标题）、来源引用块（> 开头）→ leftovers。
 R6  每块 source_span 可回溯源文；blocks 与 leftovers 区间合并覆盖全文。
 R7  块区间内的图片引用计入该块 icons（占位图天然归属前一个题块）。
-R8  单题 > 1200 token 时按空行段落续切：续块 style 加 "/续"、qid 同原题、q_text=""。
+R8  单题 > 1200 token 时按空行段落续切：续块 style 加 "/续"、qid 同原题、q_text=""
+    （`chunk(split_long=False)` 可关闭；chunk_v2 用关闭模式，避免续并后 a_text/a_segs 错位）。
 R9  标题粘连（"## 1. A…2. B"）：行内出现 n==qid+1 的编号时原地拆成两题。
 R10 首题之前、无法归类的编号内容 → leftovers（绝不并入上一题）。
 
@@ -33,7 +34,8 @@ chunk_v2(md_text) —— 切题器 v2 规范（2026-11-17 拍板，放宽判题�
   1) 明确题号（v1 已有）；2) 问句：独立行以？结尾或含 什么是/如何/为什么/区别/谈谈/介绍/说说/有没有；
   3) 标题+讲解（v1 标题块）；4) 考点+答案："知识点：/考点：" 行。
 什么不算：目录/代码块/表格/页眉页脚/水印/致谢·招聘广告（promo 行→leftovers why=致谢/广告）。
-R2' 答案内部的列举编号与句中问词不判新题：只切"空行前置的独立问句行"。
+R2' 答案内部的列举编号与句中问词不判新题：只切"空行前置的独立问句行"；
+     `区别：/如何实现：` 等冒号小节与归一化后不足 6 字的碎片留在父答案，不另起题。
 输出：{"items":[{"seq","q","a","span","qtype","conf"}], "probe":[{"span","why"}],
        "coverage":float, "note":"扣除明细"}
   - qtype ∈ 八股|算法|项目|场景|HR（关键词启发式）
@@ -54,6 +56,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 CJK = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf]')
@@ -66,7 +69,7 @@ RE_HAN = re.compile(r'^\s*(?:#{1,6}\s+)?([一二三四五六七八九十]{1,3})\
 RE_HEADING = re.compile(r'^\s*(#{1,6})\s+(.+?)\s*$')
 RE_DECIMAL = re.compile(r'^\s*(?:#\s*)?\d{1,3}\s*[.、．]\d')                             # 1.5 小数排除
 RE_TOC = re.compile(r'[.．·•…]{3,}\s*\d{1,4}\s*$')
-RE_PAGE = re.compile(r'^\s*(?:第\s*\d{1,4}\s*页(?:\s*[/共]\s*\d{1,4}\s*页)?|[-—–]\s*\d{1,4}\s*[-—–]?|\d{1,4})\s*$')
+RE_PAGE = re.compile(r'^\s*(?:第\s*\d{1,4}\s*页(?:\s*[/共]\s*\d{1,4}\s*页)?|[-—–]\s*\d{1,4}\s*[-—–]?|\d{1,4}|=+\s*page\s*\d{1,4}\s*=+)\s*$', re.I)
 RE_IMG = re.compile(r'!\[[^\]]*\]\([^)]+\)')
 RE_GLUED = re.compile(r'(?:^|[\u4e00-\u9fff。？?!，,、；;：:\s])(\d{1,3})\s*[.、．]\s*(?=[^\d\s])')
 
@@ -74,7 +77,10 @@ RE_GLUED = re.compile(r'(?:^|[\u4e00-\u9fff。？?!，,、；;：:\s])(\d{1,3})\
 RE_INTERROGATIVE = re.compile(r'什么是|如何|为什么|区别|谈谈|介绍|说说|有没有|怎么办|怎么实现')
 RE_QEND = re.compile(r'[?？]\s*$')
 RE_KPOINT = re.compile(r'^\s*(?:#{1,6}\s*)?(?:知识点|考点|面试点)[:：]\s*(.+?)\s*$')
-RE_PROMO = re.compile(r'(公众号|扫码|二维码|简历投递|招聘|内推|关注我|感谢阅读|欢迎关注|联系方式|免费领取|资料领取|付费|星球|广告|推广|更多资源)')
+# 推广行：强特征（链接/二维码/领取方式）直接剔除；弱词（招聘/广告/公众号…）只在不
+# 像题目时才剔除，避免把「如何设计广告投放系统」「招聘系统怎么设计？」当广告。
+RE_PROMO_STRONG = re.compile(r'https?://|www\.|二维码|加微信|扫码(?:关注|领取|进群|加)|免费领取|资料领取')
+RE_PROMO_WEAK = re.compile(r'公众号|关注我|感谢阅读|欢迎关注|加微信|联系方式|内推|简历投递|付费|星球|更多资源|招聘信息|招聘岗位|广告合作|推广合作')
 # v2 增强（2026-11-17，解锁 432 件讲解型 md）：整行粗体剥壳 + 问题N 题号形态
 RE_BOLD_LINE = re.compile(r'^\*\*(.+?)\*\*\s*:?\s*$')
 RE_PROBLEM_N = re.compile(r'^\s*(?:#{1,6}\s+)?问题\s*([一二三四五六七八九十]{1,3}|\d{1,3})\s*[：:．.]?\s*(.*)$')
@@ -96,9 +102,37 @@ def _is_qline(s: str) -> bool:
         return True
     return RE_INTERROGATIVE.search(s[:8]) is not None
 
+
+def _looks_questionish(s: str) -> bool:
+    """推广过滤用：像题目/问句的行不按广告剔除（不要求空行等块级条件）。"""
+    s = strip_bold(s.strip())
+    return bool(RE_QEND.search(s) or RE_INTERROGATIVE.search(s[:8]) or RE_KPOINT.match(s))
+
+
+_QNORM_CLEAN = re.compile(r"[^\u4e00-\u9fa5a-z0-9]+")
+
+
+def _qnorm_len(s: str) -> int:
+    """与 question_freq.normalize 同口径的可见文本长度，用于挡住会被 extract 丢弃的碎片。"""
+    return len(_QNORM_CLEAN.sub("", s.lower()))
+
+
+def _is_promo(s: str) -> bool:
+    """致谢/招聘/推广短行判定：强特征直接命中；弱词只在不像题目时命中。"""
+    if len(s) > 40:
+        return False
+    if RE_PROMO_STRONG.search(s):
+        return True
+    return bool(RE_PROMO_WEAK.search(s)) and not _looks_questionish(s)
+
 _HAN = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8,
         "九": 9, "十": 10, "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15,
         "十六": 16, "十七": 17, "十八": 18, "十九": 19, "二十": 20}
+for _t in "二三四五六七八九":
+    _HAN[f"{_t}十"] = int("一二三四五六七八九".index(_t) + 2) * 10
+    for _u in "一二三四五六七八九":
+        _HAN[f"{_t}十{_u}"] = int("一二三四五六七八九".index(_t) + 2) * 10 + \
+            int("一二三四五六七八九".index(_u) + 1)
 
 MAX_TOKENS = 1200
 
@@ -110,6 +144,7 @@ def _tokens(text: str) -> int:
 
 def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
     """返回 (qid|None, q_text, style)；style ∈ {题号, 标题}。"""
+    line = strip_bold(line)          # 整行粗体题号（**1. 什么是 X**）先剥壳再匹配
     if RE_DECIMAL.match(line):
         return None
     for pat in (RE_NUM_DOT, RE_NUM_PAREN, RE_NUM_TAIL):
@@ -135,7 +170,7 @@ def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
     return None
 
 
-def chunk(md_text: str) -> Dict:
+def chunk(md_text: str, *, split_long: bool = True) -> Dict:
     lines = md_text.splitlines(keepends=True)
     n = len(lines)
     starts = [0]
@@ -162,13 +197,13 @@ def chunk(md_text: str) -> Dict:
         if s.startswith(">"):
             kinds[i] = "quote"
             continue
-        if len(s) <= 40 and RE_PROMO.search(s):   # v2: 致谢/招聘广告短行
+        if _is_promo(s):   # v2: 致谢/招聘广告短行；像题目的「广告系统设计」不剔
             kinds[i] = "ack"
             continue
         if RE_TOC.search(s):
             kinds[i] = "toc"
             continue
-        if RE_PAGE.match(s) and len(s) <= 14:
+        if RE_PAGE.match(s) and len(s) <= 30:
             kinds[i] = "page"
             continue
         if re.match(r'^#\s+\S', ln):
@@ -177,9 +212,14 @@ def chunk(md_text: str) -> Dict:
         if re.match(r'^#{1,6}\s+配图', ln):
             kinds[i] = "doc_header"
 
-    # 水印：≥3 次重复出现的短正文行
+    # 水印：≥3 次重复出现的短正文行；排除 `答案：/优点：` 这类结构化标签和像题目的行
+    def _watermark_candidate(t: str) -> bool:
+        t = t.strip()
+        return (0 < len(t) <= 12 and not t.endswith(("：", ":"))
+                and not RE_LIST_ITEM.match(t) and not _looks_questionish(t))
+
     cnt = Counter(ln.strip() for i, ln in enumerate(lines)
-                  if kinds[i] == "text" and 0 < len(ln.strip()) <= 12)
+                  if kinds[i] == "text" and _watermark_candidate(ln.strip()))
     watermark = {t for t, c in cnt.items() if c >= 3}
 
     # ---- 第二遍：题块起点 ----
@@ -189,9 +229,12 @@ def chunk(md_text: str) -> Dict:
     last_problem_mark = False   # v2 增强：问题N 纯标记行武装紧随的独立问句行
     for i, ln in enumerate(lines):
         if kinds[i] != "text" or ln.strip() in watermark:
-            prev_blank = ln.strip() == ""
+            # 页码/目录/页眉/水印只是"扣除区"，不能消费块级空行；否则 `12\n3. 下一题`
+            # 会把空行前置条件清掉，导致下一题被并进上一题。
             if not ln.strip():
                 prev_blank = True
+            elif kinds[i] == "doc_header":
+                prev_blank = True     # 标题/文档头也是块边界，下一行可新开题
             last_problem_mark = False
             continue
         s = ln.strip()
@@ -213,6 +256,7 @@ def chunk(md_text: str) -> Dict:
             inner = strip_bold(s)
             if ((prev_blank or last_problem_mark) and 0 < len(inner) <= 160
                     and not RE_LIST_ITEM.match(inner) and not RE_DECIMAL.match(inner)
+                    and not inner.rstrip().endswith(("：", ":"))
                     and _is_qline(inner)):
                 bounds.append({"line": i, "parts": [(None, inner)], "style": "问句"})
             last_problem_mark = False
@@ -221,7 +265,8 @@ def chunk(md_text: str) -> Dict:
         qid, qtext, style = q
         if style == "标题":
             bounds.append({"line": i, "parts": [(None, qtext)], "style": "标题"})
-            prev_blank = False
+            # 标题是块边界：下一行编号即使紧贴标题也应能新开题，不能被当成续行。
+            prev_blank = True
             last_problem_mark = False
             continue
         new_q = False
@@ -325,6 +370,11 @@ def chunk(md_text: str) -> Dict:
     if cur_line < n:
         emit_gap(cur_line, n)
 
+    if not split_long:
+        # v2 用完整块：R8 续块一旦在 v2 合并回去，a_text 与 a_segs 行映射会错位；
+        # 长答案按原块落一条题，span 仍精确覆盖原文。
+        return {"blocks": blocks, "leftovers": leftovers}
+
     # ---- R8 超长块续切 ----
     out: List[dict] = []
     for b in blocks:
@@ -395,9 +445,7 @@ def classify_qtype(q_text: str) -> str:
 def _conf_of(style: str, q_text: str) -> str:
     if style in ("题号", "问句"):
         return "high"
-    if RE_QEND.search(q_text) or RE_INTERROGATIVE.search(q_text):
-        return "high"
-    return "low"
+    return "high" if _is_qline(q_text) else "low"
 
 
 def _split_answers(a_text: str, a_base: int, a_segs: list | None = None):
@@ -430,6 +478,8 @@ def _split_answers(a_text: str, a_base: int, a_segs: list | None = None):
         inner = strip_bold(s)      # v2 增强：粗体问句行与普通问句行同口径判定
         if (prev_blank and 0 < len(inner) <= 120 and not RE_LIST_ITEM.match(inner)
                 and not RE_DECIMAL.match(inner)
+                and not inner.rstrip().endswith(("：", ":"))
+                and _qnorm_len(inner) >= 6
                 and (RE_KPOINT.match(inner) or _is_qline(inner))):
             flush(starts[i])
             cur = [i]
@@ -488,7 +538,7 @@ def _overlap_len(a: List[Sequence[int]], b: List[Sequence[int]]) -> int:
 
 def chunk_v2(md_text: str) -> Dict:
     """切题器 v2：items/probe/coverage/note（判据见模块 docstring）。"""
-    res = chunk(md_text)
+    res = chunk(md_text, split_long=False)
     items: List[dict] = []
     seq = [0]
 
@@ -583,7 +633,18 @@ def main(argv=None) -> int:
     ap.add_argument("--v1", action="store_true", help="输出 v1 blocks/leftovers schema")
     args = ap.parse_args(argv)
     import sys as _sys
-    text = open(args.file, encoding="utf-8").read() if args.file else _sys.stdin.read()
+    if args.file:
+        raw = Path(args.file).read_bytes()
+        for enc in ("utf-8-sig", "gb18030"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            text = raw.decode("utf-8", errors="replace")
+    else:
+        text = _sys.stdin.read()
     if args.v1:
         res_v1 = chunk(text)
         for b in res_v1["blocks"]:

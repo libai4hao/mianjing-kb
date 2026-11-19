@@ -313,6 +313,17 @@ def test_plan_does_not_write_identity_report(tmp_env, capsys):
     assert not (config.BUILD_DIR / "md_identity_report.json").exists()
 
 
+def test_extract_heading_numbered_questions(tmp_env):
+    """保留 `## 2.` 后，chunker 能把标题题与上一题分开（不再当列表项）。"""
+    corpus, conn = tmp_env
+    h, p = _seed_doc(conn, corpus, "head.md",
+                     "1. 什么是TCP？\n\nTCP 是面向连接的协议。\n\n"
+                     "## 2. 什么是UDP？\n\nUDP 无连接，开销小，适合实时传输。\n" + "补充说明。" * 20)
+    rows = extract.extract_doc(h, p)
+    assert [r["seq"] for r in rows] == [1, 2]
+    assert "UDP" in rows[1]["q_text"]
+
+
 def test_full_run_keeps_processed_docs(tmp_env, capsys):
     """processed 不能把文档踢出题池：全量重跑仍要覆盖，且不 purge 已处理的题。"""
     corpus, conn = tmp_env
@@ -349,9 +360,15 @@ def test_text_of_nfkc(tmp_env):
     assert text and "⼤" not in text and "大厂" in text
 
 
-def test_heading_strip_keeps_blank_line_and_code_fence():
-    text = "para\n\n# Title\n\n```\n# 代码注释\nprint(1)\n```\n"
-    out = extract._strip_heading_markers(text)
-    assert out.startswith("para\n\nTitle\n\n")
-    assert "# 代码注释" in out
+def test_text_of_preserves_heading_markers(tmp_env):
+    """text_of 不再剥 #：chunker 要靠标题块/R9/块间空行识别题目。"""
+    corpus, _conn = tmp_env
+    p = corpus / "head.md"
+    text = ("para\n\n## 2. 什么是UDP\n\nUDP 无连接，开销小。" * 8
+            + "\n\n# 供服务自动注册、自动发现等高效服务治理方案\n\n正文")
+    p.write_text(text, encoding="utf-8")
+    out = extract.text_of(p)
+    assert out and "## 2." in out
+    assert "para\n\n## 2." in out.replace("\r\n", "\n")
+    assert "# 供服务" not in out and "供服务自动注册" in out
 
