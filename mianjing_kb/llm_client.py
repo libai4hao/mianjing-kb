@@ -35,6 +35,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -186,6 +187,43 @@ _RE_BANK_ACCOUNT = re.compile(
 REDACT_MARK = "[联系方式]"
 PERSON_MARK = "[个人信息]"
 KEY_MARK = "[LLM_KEY]"
+# 技术文档 URL 是题干上下文，保留 host/path；只清洗 userinfo 和敏感 query。
+_RE_URL = re.compile(r"https?://[^\s，。；）)】]+")
+_RE_SENSITIVE_QUERY = re.compile(
+    r"(?i)^(?:access[_-]?token|token|api[_-]?key|apikey|key|secret|sign|signature|"
+    r"auth|authorization|password|passwd|pwd|session|sessionid|sig|x-amz-signature)$"
+)
+_URL_SECRET_MARK = "REDACTED"
+
+
+def _sanitize_url(raw: str) -> tuple[str, bool]:
+    """保留技术 URL，但去掉 user:pass@ 与 token/signature 等敏感 query。"""
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return raw, False
+    changed = False
+    netloc = parts.netloc
+    if "@" in netloc:
+        netloc = netloc.rsplit("@", 1)[1]       # 去掉 userinfo，保留 host:port
+        changed = True
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    query = parts.query
+    if pairs:
+        kept = []
+        for k, v in pairs:
+            if _RE_SENSITIVE_QUERY.match(k):
+                kept.append((k, _URL_SECRET_MARK))
+                changed = True
+            else:
+                kept.append((k, v))
+        if changed:
+            query = urlencode(kept, doseq=True)
+    if not changed:
+        return raw, False
+    clean = urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+    return clean, True
+
 
 def scrub_secret(text: str, cfg: dict | None = None) -> str:
     """异常/日志出口统一清洗密钥：配置里的原值、`sk-...`、Bearer 头都不留。
@@ -229,8 +267,17 @@ def redact(text: str) -> tuple[str, bool]:
             text = new_text
     for rx in (_RE_IDCARD, _RE_PHONE, _RE_EMAIL, _RE_WECHAT):
         _sub(rx)
-    # 2026-11-20：URL 不再遮罩——技术题常带文档/仓库链接，删掉会丢关键上下文；
-    # 只遮个人身份信息（姓名/电话/邮箱/证件/地址）。
+
+    def _url_sub(m: re.Match) -> str:
+        nonlocal hit
+        clean, changed = _sanitize_url(m.group(0))
+        if changed:
+            hit = True
+        return clean
+
+    # 2026-11-20：URL 不再整体遮罩——技术题常带文档/仓库链接，整段删掉会丢上下文；
+    # 只清洗 userinfo 与 token/signature 等敏感 query，host/path 保留。
+    text = _RE_URL.sub(_url_sub, text)
     return text, hit
 
 

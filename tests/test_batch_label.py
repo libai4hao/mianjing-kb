@@ -560,6 +560,19 @@ def test_merge_holds_disagree_rows(mini_db, monkeypatch, tmp_path):
     assert left == 1  # 分歧行保留在 staging
 
 
+def test_run_batch_records_skipped_code_qids(mini_db, monkeypatch, tmp_path):
+    """跳过碎片不能静默：skipped_code_qids 落 sidecar 供人工确认误杀。"""
+    _add_question(mini_db, 5, "#include <stdio.h>")
+    mini_db.commit()
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    out = bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    assert out["skipped_code"] == 1
+    lines = (tmp_path / "label_skipped_code.jsonl").read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(x) for x in lines if x.strip()]
+    assert [r["qid"] for r in rows] == [5]
+    assert rows[0]["reason"] == "code_fragment"
+
+
 def test_merge_blocks_pending_rows(mini_db, monkeypatch, tmp_path):
     """pending 必须人工终审，不得被 merge 静默放行。"""
     monkeypatch.setattr(bl, "label_one", _fake_label())

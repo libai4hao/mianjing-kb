@@ -113,9 +113,13 @@ def pick_targets(conn, limit: int = 0, qids: list[int] | None = None,
                 "OR sd.topic='未分类') DESC, q.qid")
     rows = [dict(r) for r in conn.execute(sql).fetchall()]
     if skip_code:
-        kept = [r for r in rows if not is_code_fragment(r.get("q_text") or "")]
+        skipped, kept = [], []
+        for r in rows:
+            (skipped if is_code_fragment(r.get("q_text") or "") else kept).append(r)
         if stats is not None:
-            stats["skipped_code"] = len(rows) - len(kept)
+            stats["skipped_code"] = len(skipped)
+            stats["skipped_code_rows"] = [
+                {"qid": r["qid"], "q_text": r.get("q_text") or ""} for r in skipped]
         rows = kept
     if limit:
         rows = rows[:int(limit)]
@@ -321,11 +325,22 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
     stats: dict = {}
     targets = pick_targets(conn, limit, qids=qids, skip_code=skip_code, stats=stats)
     skipped_code = stats.get("skipped_code", 0)
+    skipped_rows = stats.get("skipped_code_rows") or []
     staged = {r[0] for r in conn.execute("SELECT qid FROM labels_staging").fetchall()}
     todo = [q for q in targets if q["qid"] not in staged]
     failed_path = failed_path or (Path(config.BUILD_DIR) / "label_failed.jsonl")
     failed_path.parent.mkdir(parents=True, exist_ok=True)
     trace_path = failed_path.parent / "label_trace.jsonl"
+    skipped_path = failed_path.parent / "label_skipped_code.jsonl"
+    if skipped_rows:
+        with skipped_path.open("w", encoding="utf-8") as fh:
+            for r in skipped_rows:
+                preview, _ = redact((r["q_text"] or "")[:300])
+                fh.write(json.dumps({
+                    "qid": r["qid"], "q_text": preview,
+                    "reason": "code_fragment",
+                    "at": datetime.now().strftime(NOW_FMT),
+                }, ensure_ascii=False) + "\n")
     tax = taxonomy.load(conn)
     fn = label_fn or label_one
     try:
@@ -381,6 +396,7 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
                     continue
                 issues = row.pop("_issues", []) or []
                 raw = row.pop("_raw_response", "") or ""
+                raw, _ = redact(raw)
                 for iss in issues:
                     issue_counts[iss] = issue_counts.get(iss, 0) + 1
                 with trace_path.open("a", encoding="utf-8") as fh:
@@ -915,6 +931,7 @@ def merge(conn, drop_orphans: bool = False) -> dict:
                 "fails": quality["fails"],
                 "note": "批次质量门禁未过：碎片/待复核/其他主题超限，staging 保留未 merge——"
                         "先清理碎片、--review-resolve 处理 pending，或修词表后重跑"}
+    quality_warn = quality["detail"].get("warns") if quality["state"] == "WARN" else []
     orphans = conn.execute(
         "SELECT COUNT(*) FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
         "WHERE (q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash)) "
@@ -980,6 +997,8 @@ def merge(conn, drop_orphans: bool = False) -> dict:
         out["dropped_orphans"] = orphans
     if g6b.get("state") == "WARN":
         out["g6b_warn"] = g6b["detail"].get("note", "金标样本不足，未判")
+    if quality_warn:
+        out["quality_warn"] = quality_warn
     if g6["state"] == "WARN":
         out["note"] = "topic 漂移 WARN（软门禁不阻断）——建议 --sample 50 人工抽查确认"
     return out

@@ -156,6 +156,16 @@ def test_redact_clean_text_noop():
     assert not hit and "HashMap" in t
 
 
+def test_redact_url_keeps_path_but_strips_credentials_and_token():
+    """URL 不整段删；但 user:pass@ 和 token/signature query 不能发给模型。"""
+    t, hit = redact("参考 https://user:pass@host/docs/a?token=abc&x=1 与 "
+                    "https://blog.example.com/post?x=a%2Fb")
+    assert hit
+    assert "user:pass@" not in t and "token=abc" not in t
+    assert "https://host/docs/a?token=REDACTED&x=1" in t
+    assert "https://blog.example.com/post?x=a%2Fb" in t
+
+
 # ---------------- chat：重试退避 / 4xx 快速失败 ----------------
 def _fake_post_factory(script):
     """script = [(status, resp), ...]，耗尽后抛 AssertionError。"""

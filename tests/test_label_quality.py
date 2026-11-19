@@ -52,6 +52,15 @@ def test_quality_blocks_pending():
     assert any("pending_review" in f for f in q["fails"])
 
 
+def test_quality_ignores_disagree_rows():
+    """disagree 行已单独 hold，不应因它自己的碎片/主题问题阻断其余行 merge。"""
+    rows = [(1, "#include <stdio.h>", "C++", "disagree"),
+            (2, "什么是虚函数?", "C++", "agree")]
+    q = label_quality.assess(_conn(rows))
+    assert q["state"] == "PASS" and q["ok"] is True
+    assert q["detail"]["staged"] == 1
+
+
 def test_quality_other_topic_hard_and_warn():
     hard = [(i, f"什么是第{i}个知识点?", "其他" if i <= 6 else "后端", "agree")
             for i in range(1, 21)]
@@ -71,5 +80,6 @@ def test_pick_targets_skips_code_fragments():
     got = [r["qid"] for r in batch_label.pick_targets(conn, skip_code=True, stats=stats)]
     assert got == [2]
     assert stats["skipped_code"] == 2
+    assert [r["qid"] for r in stats["skipped_code_rows"]] == [1, 3]
     got2 = [r["qid"] for r in batch_label.pick_targets(conn, skip_code=False)]
     assert got2 == [1, 2, 3]
