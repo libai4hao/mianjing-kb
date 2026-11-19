@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""refresh：检索库影子重建 + G1-G5 门禁 + 原子切换（docs/15 §2.1 / K1，2026-11-17 落地）。
+"""refresh：检索库影子重建 + G1-G5/G8 门禁 + 原子切换（docs/15 §2.1 / K1，2026-11-17 落地）。
 
 流程：
   1. 运行锁：build/refresh.lock（O_CREAT|O_EXCL 写 PID）；启动清理发现残留文件即中止
   2. 影子重建：build_db.build(out_db=BUILD/面经库_shadow.db)
-  3. 向量：默认从现行库按 rowid 拷（先做 q_norm_hash 对齐 + 孤儿向量 + 两侧空哈希校验）；
-     --reembed 时不拷，直接重嵌入，并要求向量数 == 题目数
-  4. 门禁：G1-G5 全部实跑；硬门只认 PASS，未知状态直接判失败
+  3. 向量：默认 auto——先校验 vec0 结构、题目/元数据对齐、孤儿向量与
+     `vec_meta.question_set_hash`；匹配才 copy_vec，`vec_schema_old / vec_meta_missing /
+     vec_set_mismatch` 自动 reembed；`--copy-vec` 显式拷贝失败即中止。
+     `--reembed` 强制重嵌入，并要求向量数 == 题目数
+  4. 门禁：G1-G5 + G8 全部实跑；硬门只认 PASS，未知状态直接判失败
   5. 完整性：切换前 quick_check 影子；切换后再 quick_check + 行数比对，不一致自动从快照回滚
   6. 快照：SQLite backup API（ro 连接），能拿到 WAL 里已提交未 checkpoint 的数据；
      copy2 只拷主文件，会做出一份过时备份
@@ -14,8 +16,9 @@
   8. 收尾：只有切换成功才清理旧快照（按文件名时间戳排序，不用 mtime）
 
 用法：
-    python -m mianjing_kb.refresh               # 影子重建 → 向量拷贝 → G1-G5 → 通过才切换
-    python -m mianjing_kb.refresh --reembed     # 影子重建后重跑向量化（新题入库后必用）
+    python -m mianjing_kb.refresh               # 影子重建 → 自动 copy/reembed → G1-G5+G8 → 通过才切换
+    python -m mianjing_kb.refresh --reembed     # 影子重建后强制重跑向量化（题集结构变更后）
+    python -m mianjing_kb.refresh --copy-vec    # 强制拷向量；结构/指纹不匹配则中止
     python -m mianjing_kb.refresh --swap-only   # 只重试切换（os.replace 被占用失败后用）
 """
 from __future__ import annotations
@@ -388,7 +391,7 @@ def _log(build_dir: Path, summary: dict) -> None:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="检索库影子重建 + G1-G5 门禁 + 原子切换")
+    ap = argparse.ArgumentParser(description="检索库影子重建 + G1-G5/G8 门禁 + 原子切换")
     ap.add_argument("--reembed", action="store_true",
                     help="强制重跑向量化（题集结构变更后使用）")
     ap.add_argument("--copy-vec", action="store_true",

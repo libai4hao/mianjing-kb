@@ -14,6 +14,10 @@
   stdout/stderr 重配为 UTF-8，修复重定向输出时中文 JSON 触发 `UnicodeEncodeError`；
   `demo` 子进程仅设 `PYTHONIOENCODING`，不再开启 UTF-8 mode。`eval_cluster` 在未配置
   `BUILD_DIR` 且未传 `--out-md` 时明确 exit 2，不再对占位路径 `mkdir` 抛 WinError。
+- **代码地图与流程回写**：新增 `docs/33-代码地图与维护索引-2026-11-19.md`（分层 / 36 个 CLI 命令 /
+  模块职责 / 数据表 / 测试地图 / 改动决策表）；`docs/19` 同步到 T29/T31/T22 代码现状（题行 20,010、
+  检索库 17:55、G1–G8、`refresh` 题集指纹、`vec_meta`/`question_tags`、`kb status`/`manifest`），
+  T22 明确为“代码已下沉、生产未打标”，不再写成未实现。
 - **T31 `kb status`**（`fde9542`）：只读汇总源状态、产物/待抽题、题与标签覆盖、检索库向量/标签行、
   门禁报告指纹是否过期、99 区结果、写锁与最近批次；`kb status --json` 可脚本消费。门禁报告
   与当前 kb/面经库大小+mtime 不一致时标 `STALE`，不重跑门禁。
