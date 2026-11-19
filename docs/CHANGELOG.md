@@ -8,6 +8,13 @@
 
 ## 2026-11-19
 
+- **阶段 A 生产安全落地**：新增 `kb preflight` 只读基线核对（`schema_version`/迁移/完整性/关键计数）；
+  `intake` 的 `hash_collision` 改为整批 `failed` 并落 `hash_collisions-<batch>.json`（双路径/双 SHA256）；
+  `reconvert` 与 `purge_origin` 实际写盘接入 `kb.lock`。修复 `privacy_scan` 命中的文档绝对路径。
+- **阶段 B 异常恢复与运维**：`batch_label` 只读分支改用 `mode=ro` 且不持写锁，工作文件原子写；
+  `embed_questions` staging 改 run_id 标记，启动清理历史残留，活任务/清理失败一律中止；
+  `refresh` 每次构建写 `build/manifests/refresh/<build_id>.json`，发布后当前授权标记 consumed，
+  `--swap-only` 只认 pending 当前清单。
 - **5,000 题预生产方案 + 标签数据结构复核**：新增 `docs/35`（切片/配置/执行/校验，明确只能影子跑）
   与 `docs/36`（12 个一级领域、稳定 code、7 题型、3 难度 band、quality_state/flags 拆分、
   增量迁移 018 与双写方案）。结论是标签 v2 落库前不跑 5,000 全量打标。

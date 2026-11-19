@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import inspect
+import io
 import json
 import os
 import random
@@ -41,6 +42,18 @@ from mianjing_kb.llm_client import ConfigError, chat, chat_json, redact, resolve
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 QTYPES = labelspec.qtypes()          # T21：单一来源（meta/label_schema.yaml）
+
+
+def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """D-28：只读分支的工作文件也原子落盘，避免半截 CSV/JSON 被人工误用。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(text, encoding=encoding)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def build_system_prompt(vocab: tuple[str, ...] = (), tax: dict | None = None) -> str:
@@ -383,17 +396,17 @@ def manual_template(conn, n: int, path: Path, seed: int = 42) -> dict:
     k = min(n, len(rows))
     picked = random.Random(seed).sample(rows, k)
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8-sig", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=MANUAL_COLUMNS)
-        w.writeheader()
-        for r in picked:
-            w.writerow({"qid": r["qid"], "doc_hash": r["doc_hash"] or "",
-                        "q_text": (r["q_text"] or "")[:300],
-                        "a_text": (r["a_text"] or "")[:300],
-                        "topic": r["topic"] or "", "qtype": r["qtype"] or "",
-                        "difficulty": r["difficulty"] if r["difficulty"] is not None else "",
-                        "position": "", "quality": "", "canonical_q": "", "tags": "", "note": ""})
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=MANUAL_COLUMNS)
+    w.writeheader()
+    for r in picked:
+        w.writerow({"qid": r["qid"], "doc_hash": r["doc_hash"] or "",
+                    "q_text": (r["q_text"] or "")[:300],
+                    "a_text": (r["a_text"] or "")[:300],
+                    "topic": r["topic"] or "", "qtype": r["qtype"] or "",
+                    "difficulty": r["difficulty"] if r["difficulty"] is not None else "",
+                    "position": "", "quality": "", "canonical_q": "", "tags": "", "note": ""})
+    _atomic_write_text(path, buf.getvalue(), encoding="utf-8-sig")
     return {"path": str(path), "rows": k, "columns": MANUAL_COLUMNS}
 
 
@@ -510,8 +523,8 @@ def golden_sample(conn, n: int) -> dict:
         except Exception:  # noqa: BLE001 —— 损坏文件不挡重抽
             pass
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"sampled": len(items), "items": items},
-                               ensure_ascii=False, indent=1), encoding="utf-8")
+    _atomic_write_text(path, json.dumps({"sampled": len(items), "items": items},
+                                        ensure_ascii=False, indent=1))
     return {"sampled": len(items), "strata": len(strata), "path": str(path), "items": items}
 
 
@@ -577,7 +590,7 @@ def eval_golden(conn) -> dict:
     g = g6b_golden(conn)
     path = Path(config.BUILD_DIR) / "label_eval.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(g, ensure_ascii=False, indent=1), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(g, ensure_ascii=False, indent=1))
     print(json.dumps({"state": g["state"], "detail": g["detail"], "report": str(path)},
                      ensure_ascii=False, indent=1))
     return g
@@ -915,20 +928,38 @@ def main(argv=None) -> int:
     if args.concurrency:
         os.environ["LLM_CONCURRENCY"] = str(args.concurrency)
 
-    # 所有分支共用同一把 kb 写锁，并且在 db.connect 之前取得：connect 可能执行
-    # schema migration；在线 LLM 打标、review、merge 都会写 staging/事实表，不能
-    # 与 extract/intake 并行。只读命令多等一会儿也比"迁移与写入交错"安全。
-    lock = wlock.write_lock("kb", tool="batch_label", build_dir=Path(args.db).parent,
-                            target=args.db)
-    try:
-        lock.__enter__()
-    except wlock.LockHeld as ex:
-        print(json.dumps({"ok": False, "err": str(ex)}, ensure_ascii=False, indent=1))
-        return 2
+    # D-28：先把“只读分支”和“写库分支”分开。只读分支用 mode=ro 打开，
+    # 不持 kb 写锁；需要写库/写 staging 的分支才在 db.connect 之前拿写锁。
+    write_action = bool(
+        (args.manual_import and not args.manual_dry_run)
+        or args.offline or args.golden_load or args.review
+        or args.review_resolve or args.merge
+    )
+    read_action = bool(
+        args.check or args.sample or args.eval or args.review_list
+        or args.golden_sample or args.manual_template
+        or (args.manual_import and args.manual_dry_run) or args.dry_run
+    )
+    needs_write = write_action or not read_action
+
+    lock = None
+    if needs_write:
+        lock = wlock.write_lock("kb", tool="batch_label", build_dir=Path(args.db).parent,
+                                target=args.db)
+        try:
+            lock.__enter__()
+        except wlock.LockHeld as ex:
+            print(json.dumps({"ok": False, "err": str(ex)}, ensure_ascii=False, indent=1))
+            return 2
 
     conn = None
     try:
-        conn = db.connect(args.db)  # create=True：幂等跑 005 staging / 006 题级 topic 迁移
+        # 只读分支绝不 create=True：避免 --check/--sample 顺手建库或跑迁移。
+        try:
+            conn = db.connect(args.db, readonly=not needs_write)
+        except FileNotFoundError as ex:
+            print(json.dumps({"ok": False, "err": str(ex)}, ensure_ascii=False, indent=1))
+            return 2
         if args.manual_template:
             out_path = Path(args.manual_out) if args.manual_out else (
                 Path(args.db).parent / "manual_label_template.csv")
@@ -1007,7 +1038,8 @@ def main(argv=None) -> int:
     finally:
         if conn is not None:
             conn.close()
-        lock.__exit__(None, None, None)
+        if lock is not None:
+            lock.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

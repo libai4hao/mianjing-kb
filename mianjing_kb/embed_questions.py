@@ -15,6 +15,8 @@ import json
 import os
 import sys
 import time
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -32,6 +34,150 @@ VEC_META_COLUMNS = ("topic", "qtype", "difficulty", "q_key")
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")  # fastembed 走国内镜像
 
 _MODEL = None
+
+STAGING_STATES = ("READY", "CLEANUP", "ENCODING", "VERIFY", "COMMIT", "DONE")
+
+
+def _staging_marker(staging: Path) -> Path:
+    """旁路库的同名运行标记：.<db>.vec-staging-<run_id>.run.json。"""
+    return staging.with_name(staging.name[:-3] + ".run.json")
+
+
+def _process_start(pid: int) -> float | None:
+    """进程创建时间；没有 psutil 时返回 None（调用方按保守策略处理）。"""
+    try:
+        import psutil
+        return float(psutil.Process(pid).create_time())
+    except Exception:  # noqa: BLE001 —— psutil 缺失/进程已退出
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    """只探测进程是否存在；Windows 下绝不能用 os.kill(pid, 0)（会 TerminateProcess）。"""
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+        return bool(psutil.pid_exists(pid))
+    except Exception:  # noqa: BLE001 —— psutil 不可用时走平台探测
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+            if not handle:
+                return False
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _marker_is_live(data: dict) -> bool:
+    """标记对应的进程是否仍可能是同一任务。
+
+    PID 会被重用：只要拿不到创建时间，就保守认为“可能仍活着”，宁可中止也不删。
+    """
+    try:
+        pid = int(data.get("pid"))
+    except (TypeError, ValueError):
+        return False
+    if not _pid_alive(pid):
+        return False
+    marker_start = data.get("process_start")
+    current_start = _process_start(pid)
+    if marker_start is None or current_start is None:
+        return True
+    try:
+        return abs(float(marker_start) - current_start) < 1.0
+    except (TypeError, ValueError):
+        return True
+
+
+def _write_staging_marker(staging: Path, run_id: str, state: str) -> None:
+    if state not in STAGING_STATES:
+        raise ValueError(f"未知 staging 状态：{state}")
+    data = {
+        "run_id": run_id,
+        "pid": os.getpid(),
+        "process_start": _process_start(os.getpid()),
+        "db": str(staging),
+        "state": state,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    marker = _staging_marker(staging)
+    tmp = marker.with_name(f".{marker.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, marker)
+
+
+def _mark_staging(staging: Path, state: str) -> None:
+    marker = _staging_marker(staging)
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data["state"] = state
+    data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    tmp = marker.with_name(f".{marker.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, marker)
+
+
+def _cleanup_stale_staging(out_db: Path) -> None:
+    """D-30：清掉历史崩溃残留；发现仍活着的任务就中止新任务，不能误删。
+
+    标准入口持有 online 写锁，所以正常不会出现第二个活任务；这里再按运行标记
+    校验 PID + 进程创建时间，防止 PID 重用或绕过标准入口。
+    """
+    parent = Path(out_db).parent
+    prefix = f".{Path(out_db).name}.vec-staging-"
+    for st in sorted(parent.glob(prefix + "*.db")):
+        marker = _staging_marker(st)
+        if marker.exists():
+            try:
+                data = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as ex:
+                raise RuntimeError(f"staging 标记不可读，拒绝猜删：{marker}") from ex
+            if _marker_is_live(data):
+                raise RuntimeError(
+                    f"发现仍在运行的 embed staging 任务（pid={data.get('pid')}）：{st}")
+        for p in (st, Path(str(st) + "-wal"), Path(str(st) + "-shm"), marker):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError as ex:
+                raise RuntimeError(f"历史 staging 清理失败：{p}（{ex}）") from ex
+    # 只有标记、没有主库的残留也清掉；活标记同样中止。
+    for marker in sorted(parent.glob(prefix + "*.run.json")):
+        st = marker.with_name(marker.name[:-len(".run.json")] + ".db")
+        if st.exists():
+            continue
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if _marker_is_live(data):
+            raise RuntimeError(
+                f"发现仍在运行的 embed 任务标记（pid={data.get('pid')}）：{marker}")
+        try:
+            marker.unlink(missing_ok=True)
+        except OSError as ex:
+            raise RuntimeError(f"历史 staging 标记清理失败：{marker}（{ex}）") from ex
+
+
+def _discard_staging(staging: Path) -> None:
+    """本次任务结束后的自清理；失败只告警，不掩盖主流程结果。"""
+    for p in (staging, Path(str(staging) + "-wal"), Path(str(staging) + "-shm"),
+              _staging_marker(staging)):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError as ex:
+            print(f"[warn] staging 清理失败：{p}（{ex}）", file=sys.stderr, flush=True)
 
 
 def vec_schema() -> str:
@@ -103,13 +249,17 @@ def run(out_db: Path = OUT_DB, batch: int = BATCH) -> dict:
 
     顺序很关键：模型加载 → 旁路编码 → 数量/题集指纹校验 → 事务切换 → 写 vec_meta。
     任何编码/模型失败都发生在替换之前，线上旧向量表保持可用。
+
+    D-30：只保留本次 run_id 的 staging；启动时先清历史残留，清理失败直接中止。
     """
     import sqlite3
     import sqlite_vec
     out_db = Path(out_db)
-    staging = out_db.with_name(f".{out_db.name}.vec-staging-{os.getpid()}.db")
-    if staging.exists():
-        staging.unlink()
+    _cleanup_stale_staging(out_db)
+    run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    staging = out_db.with_name(f".{out_db.name}.vec-staging-{run_id}.db")
+    _write_staging_marker(staging, run_id, "READY")
+    _mark_staging(staging, "CLEANUP")
     con = sqlite3.connect(str(out_db))
     con.enable_load_extension(True)
     sqlite_vec.load(con)
@@ -123,12 +273,19 @@ def run(out_db: Path = OUT_DB, batch: int = BATCH) -> dict:
         model = get_model()
     except Exception:
         con.close()
+        _discard_staging(staging)
         raise
 
-    st = sqlite3.connect(str(staging))
-    st.enable_load_extension(True)
-    sqlite_vec.load(st)
-    st.enable_load_extension(False)
+    try:
+        st = sqlite3.connect(str(staging))
+        st.enable_load_extension(True)
+        sqlite_vec.load(st)
+        st.enable_load_extension(False)
+    except Exception:
+        con.close()
+        _discard_staging(staging)
+        raise
+    _mark_staging(staging, "ENCODING")
     try:
         st.execute(f"CREATE VIRTUAL TABLE vec_questions USING vec0({vec_schema()})")
         done = 0
@@ -149,6 +306,7 @@ def run(out_db: Path = OUT_DB, batch: int = BATCH) -> dict:
             done += len(rows)
             print(f"[embed] {done}/{total}", file=sys.stderr, flush=True)
         st.commit()
+        _mark_staging(staging, "VERIFY")
         built = st.execute("SELECT COUNT(*) FROM vec_questions").fetchone()[0]
         if built != total:
             raise RuntimeError(f"旁路向量数不一致：{built} != {total}")
@@ -156,6 +314,7 @@ def run(out_db: Path = OUT_DB, batch: int = BATCH) -> dict:
             raise RuntimeError("编码期间 questions 题集发生变化，拒绝切换向量表")
 
         con.execute("ATTACH DATABASE ? AS staging", (str(staging),))
+        _mark_staging(staging, "COMMIT")
         try:
             con.execute("BEGIN IMMEDIATE")
             con.execute("DROP TABLE IF EXISTS main.vec_questions")
@@ -170,19 +329,14 @@ def run(out_db: Path = OUT_DB, batch: int = BATCH) -> dict:
             raise
         finally:
             con.execute("DETACH DATABASE staging")
+        _mark_staging(staging, "DONE")
     except Exception:
         # 模型/编码/切换任何一步失败都关闭主连接；旧 vec_questions 未被 DROP。
         con.close()
         raise
     finally:
         st.close()
-        for suffix in ("", "-wal", "-shm"):
-            p = Path(str(staging) + suffix)
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+        _discard_staging(staging)
 
     n = con.execute("SELECT COUNT(*) FROM vec_questions").fetchone()[0]
     elapsed = round(time.perf_counter() - started, 1)

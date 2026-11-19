@@ -28,8 +28,11 @@ def test_cli_flags_provider_concurrency_resume(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(os, "environ", dict(os.environ))   # 隔离实现写入的环境变量
     monkeypatch.setattr(bl, "resolve_config", fake_resolve_config)
     monkeypatch.setattr(bl, "health", lambda cfg, conn: {"ok": True})
+    from mianjing_kb.kb import db as kbdb
+    db_path = tmp_path / "kb.sqlite"
+    kbdb.connect(db_path).close()          # D-28：--check 只读，必须预先有库
     rc = bl.main(["--provider", "local", "--concurrency", "2", "--resume",
-                  "--check", "--db", str(tmp_path / "kb.sqlite")])
+                  "--check", "--db", str(db_path)])
     assert rc == 0
     assert seen == {"provider": "local", "concurrency": "2"}
 
@@ -681,3 +684,23 @@ def test_golden_load_rejects_missing_or_malformed_file(mini_db, tmp_path):
     lst.write_text("[1,2]", encoding="utf-8")
     out3 = bl.golden_load(mini_db, lst)
     assert not out3["ok"] and out3["errors"]
+
+
+def test_read_only_branch_ignores_kb_write_lock(mini_db, monkeypatch, capsys):
+    """D-28：--check 只读不应被 intake 的写锁挡住，也不应触发迁移。"""
+    from mianjing_kb.kb import wlock
+    monkeypatch.setattr(bl, "resolve_config", lambda: CFG)
+    monkeypatch.setattr(bl, "health", lambda cfg, conn: {"ok": True})
+    with wlock.write_lock("kb", tool="intake", build_dir=config.BUILD_DIR,
+                          target=str(config.DB_PATH)):
+        rc = bl.main(["--check", "--db", str(config.DB_PATH)])
+    assert rc == 0
+    assert "ok" in capsys.readouterr().out
+
+
+def test_read_only_branch_never_creates_missing_db(tmp_path, monkeypatch):
+    """D-28：只读分支遇到缺失库必须报错返回 2，不能 sqlite3 静默建空库。"""
+    missing = tmp_path / "missing.sqlite"
+    rc = bl.main(["--manual-template", "1", "--db", str(missing)])
+    assert rc == 2
+    assert not missing.exists()

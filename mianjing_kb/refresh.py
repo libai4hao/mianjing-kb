@@ -48,6 +48,21 @@ LOG_NAME = "refresh_log.jsonl"
 REQUIRED_GATES = ("G1", "G2", "G3", "G4", "G5", "G8")
 KNOWN_STATES = ("PASS", "WARN", "FAIL", "SKIP")
 PUBLISH_MANIFEST = "shadow_publish.json"
+PUBLISH_HISTORY_DIR = Path("manifests") / "refresh"
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _publish_history_path(build_dir: Path, build_id: str) -> Path:
+    return Path(build_dir) / PUBLISH_HISTORY_DIR / f"{build_id}.json"
 
 
 def _sidecars(p: Path) -> tuple[Path, Path]:
@@ -240,6 +255,25 @@ def _vec_state(p: Path) -> tuple[int, str | None]:
         con.close()
 
 
+def _vec_meta(p: Path) -> dict[str, str]:
+    """读 vec_meta（模型/维度等）；表不存在或扩展不可用时返回空。"""
+    con = sqlite3.connect(_ro_uri(p), uri=True)
+    try:
+        try:
+            import sqlite_vec
+            con.enable_load_extension(True)
+            sqlite_vec.load(con)
+            con.enable_load_extension(False)
+        except Exception:
+            return {}
+        try:
+            return {str(r[0]): str(r[1]) for r in con.execute("SELECT key,value FROM vec_meta")}
+        except sqlite3.OperationalError:
+            return {}
+    finally:
+        con.close()
+
+
 def _write_publish_manifest(build_dir: Path, shadow: Path, gates: list[dict]) -> Path:
     """门禁通过后写发布清单；--swap-only 只认这份清单，不认"文件存在"。"""
     _checkpoint_shadow(shadow)
@@ -249,26 +283,60 @@ def _write_publish_manifest(build_dir: Path, shadow: Path, gates: list[dict]) ->
     if not set(REQUIRED_GATES).issubset(gate_ids):
         raise RuntimeError(f"门禁缺项，不能写发布清单：{sorted(set(REQUIRED_GATES) - set(gate_ids))}")
     sha = _db_sha256(shadow)
+    vmeta = _vec_meta(shadow)
     manifest = {
-        "build_id": f"refresh-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{sha[:12]}",
+        "build_id": f"refresh-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-{sha[:12]}",
         "schema_version": _schema_version(shadow),
         "question_set_hash": qhash,
         "vector_count": vec_count,
+        "vec_model": vmeta.get("model"),
+        "vec_dim": vmeta.get("dim"),
         "question_count": counts.get("questions"),
         "doc_content_count": counts.get("doc_contents"),
         "gate_verdict": "PASS",
         "gate_ids": gate_ids,
         "validated_at": datetime.now().isoformat(timespec="seconds"),
+        "publish_status": "pending",
         "publishable": True,
         "db_sha256": sha,
         "db_size": shadow.stat().st_size,
         "shadow_name": shadow.name,
     }
     path = build_dir / PUBLISH_MANIFEST
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    _atomic_write_json(path, manifest)
+    # D-31 第二层：每次构建生成唯一历史文件，不覆盖；历史文件不参与 --swap-only 授权。
+    _atomic_write_json(_publish_history_path(build_dir, manifest["build_id"]), manifest)
     return path
+
+
+def _mark_publish_status(build_dir: Path, manifest_path: Path, status: str,
+                         **extra) -> Path | None:
+    """把当前授权与历史凭证一起改成终态；返回历史文件路径。
+
+    published 同时把当前清单标成不可再次授权，防止旧影子库靠 --swap-only 重放。
+    """
+    try:
+        m = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    m.update(extra)
+    m["publish_status"] = status
+    if status == "published":
+        m["publishable"] = False
+        m["published_at"] = datetime.now().isoformat(timespec="seconds")
+        m["consumed_at"] = m["published_at"]
+    elif status == "rolled_back":
+        m["publishable"] = False
+        m["rolled_back_at"] = datetime.now().isoformat(timespec="seconds")
+    _atomic_write_json(Path(manifest_path), m)
+    build_id = str(m.get("build_id") or Path(manifest_path).stem)
+    hist = _publish_history_path(build_dir, build_id)
+    try:
+        _atomic_write_json(hist, m)
+    except OSError as ex:
+        print(f"[warn] 发布历史 manifest 写入失败：{hist}（{ex}）", file=sys.stderr)
+        return None
+    return hist
 
 
 def _verify_publish_manifest(build_dir: Path, shadow: Path) -> tuple[bool, str]:
@@ -282,6 +350,8 @@ def _verify_publish_manifest(build_dir: Path, shadow: Path) -> tuple[bool, str]:
         return False, f"发布清单不可读：{type(ex).__name__}: {ex}"
     if m.get("publishable") is not True or m.get("gate_verdict") != "PASS":
         return False, "发布清单未标记 PASS/publishable"
+    if m.get("publish_status") != "pending" or m.get("consumed_at"):
+        return False, "发布清单已被消费/非 pending，不能再授权 --swap-only"
     gate_ids = set(m.get("gate_ids") or [])
     missing = set(REQUIRED_GATES) - gate_ids
     if missing:
@@ -572,6 +642,7 @@ def main(argv=None) -> int:
     swapped = False
     summary: dict = {}
     vec: dict | str = "skip"
+    manifest: Path | None = None
     try:
         if args.swap_only:
             if not shadow.exists():
@@ -584,6 +655,7 @@ def main(argv=None) -> int:
                                   "note": "拒绝切换未经门禁/被替换的影子库"},
                                  ensure_ascii=False, indent=1))
                 return 2
+            manifest = build_dir / PUBLISH_MANIFEST
             stale = _remove_shadow_sidecars(shadow)
             if stale:
                 print(json.dumps({"verdict": "ABORT",
@@ -703,13 +775,24 @@ def main(argv=None) -> int:
             "warnings": warns,
             "snapshot": snapshot.name if snapshot else None,
         })
+        history = None
         if bad:
             rollback = _restore(snapshot, online) if snapshot else "无快照可回滚"
+            if manifest:
+                _mark_publish_status(build_dir, manifest, "rolled_back",
+                                     rollback=rollback, why=bad)
             summary.update({"verdict": "ROLLED_BACK", "why": bad, "rollback": rollback})
             summary["elapsed_sec"] = round(time.perf_counter() - started, 1)
             _log(build_dir, summary)
             print(json.dumps(summary, ensure_ascii=False, indent=1, default=str))
             return 1
+        if manifest:
+            history = _mark_publish_status(
+                build_dir, manifest, "published",
+                snapshot=snapshot.name if snapshot else None)
+        summary["publish_status"] = "published"
+        summary["publish_history"] = (str(history.relative_to(build_dir))
+                                      if history else None)
 
         mark_warn = _mark_indexed(Path(config.DB_PATH))
         if mark_warn:

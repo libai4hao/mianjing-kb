@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """refresh 测试：全链路 PASS→原子切换 / 门禁 FAIL→影子删除线上不动 / 向量回填失败→中止。"""
 import hashlib
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -289,6 +290,44 @@ def test_swap_only_reuses_shadow(mini_env, monkeypatch):
     rf._write_publish_manifest(mini_env["build"], shadow, _all_pass(None))
     assert rf.main(["--swap-only"]) == 0
     assert not shadow.exists()
+
+
+def test_publish_history_and_consumed_manifest(mini_env):
+    """D-31：成功发布后当前授权被消费，历史清单独立保留且可追溯。"""
+    assert rf.main([]) == 0
+    build = mini_env["build"]
+    hist = list((build / rf.PUBLISH_HISTORY_DIR).glob("*.json"))
+    assert len(hist) == 1
+    m = json.loads(hist[0].read_text(encoding="utf-8"))
+    assert m["publish_status"] == "published" and m["publishable"] is False
+    assert m["snapshot"] and m["gate_verdict"] == "PASS"
+
+    cur = json.loads((build / rf.PUBLISH_MANIFEST).read_text(encoding="utf-8"))
+    assert cur["publish_status"] == "published"
+    assert cur["consumed_at"] == cur["published_at"]
+    assert cur["publishable"] is False
+
+
+def test_swap_only_rejects_consumed_manifest(mini_env):
+    """D-31：已发布过的当前清单不能再授权另一份影子库。"""
+    import shutil
+    assert rf.main([]) == 0
+    shadow = mini_env["build"] / rf.SHADOW_NAME
+    shutil.copy2(mini_env["online"], shadow)
+    assert rf.main(["--swap-only"]) == 2
+    assert shadow.exists()
+
+
+def test_publish_history_does_not_authorize_old_shadow(mini_env):
+    """D-31：历史文件只做追溯，--swap-only 只认当前清单。"""
+    import shutil
+    shadow = mini_env["build"] / rf.SHADOW_NAME
+    shutil.copy2(mini_env["online"], shadow)
+    rf._write_publish_manifest(mini_env["build"], shadow, _all_pass(None))
+    shadow.write_bytes(shadow.read_bytes() + b"\x00")
+    # 历史目录里有本次 build 的凭证，但影子已被篡改；授权校验仍必须失败。
+    ok, why = rf._verify_publish_manifest(mini_env["build"], shadow)
+    assert not ok and "sha256" in why
 
 
 def test_sidecar_cleanup_failure_is_warning_not_abort(mini_env, monkeypatch, capsys):
