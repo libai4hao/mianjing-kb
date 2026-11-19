@@ -20,6 +20,10 @@ P0-2 修复（2026-11-17 审核）：本脚本原为四态（pass/garbled/low_cj
 为什么必须 NFKC：PDF 提取常把汉字映射进 Kangxi 部首区（U+2F00），"大厂" 会变成 "⼤厂"。
 内容可读，但检索、去重、聚合全部失效。归一后健康件异常率 4% 降到 0.2%。
 
+判定语义边界：`pass` 只表示“没有可识别的非中文垃圾字符 + CJK/长度达标”，
+**不等于文本可读或语义正确**。ToUnicode 映射错误把乱码映射成正常汉字时，字符白名单
+识别不出来；需要人工抽检、字符二元组可信度或重复字符占比等额外手段。
+
 gate_results 台账（--md-dir / --audit 模式，--no-db 跳过）仍用 schema 001 的四态词表
 （pass|low_cjk|garbled|non_content）。三态报告的 review 映射 low_cjk，fail 按原因
 映射 garbled（乱码）或 non_content（过短/缺产物）。--audit 同时把同一结论回写到
