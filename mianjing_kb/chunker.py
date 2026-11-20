@@ -443,13 +443,22 @@ def _is_stem_continuation(prev_q: str, line: str) -> bool:
     s = strip_bold((line or "").strip())
     if not s or len(s) > 60 or not prev_q:
         return False
-    if not RE_STEM_DANGLING.search(prev_q.rstrip()):
-        return False
     if (RE_LIST_ITEM.match(s) or RE_DECIMAL.match(s) or RE_ANSWER_LEAD.match(s)
             or _match_question(line) is not None
             or _is_codeish(s) or _is_promo(s) or _looks_section_line(s)):
         return False
-    return _is_qline(s) or _is_question_heading(s)
+    if _is_qline(s) or _is_question_heading(s):
+        # 原判据：prev 以连接词/介词悬空结尾。
+        if RE_STEM_DANGLING.search(prev_q.rstrip()):
+            return True
+        # P1-1 兜底：prev 以实词（动词等）结尾时，紧随的极短问句行仍是题干续行
+        # （S0129 "…最后结束" + "的线程?"）。用 ≤15 字 + 问号收尾双条件收窄，
+        # 避免把答案里的短问句误并回题干。
+        if (len(s) <= 15 and re.search(r'[?？]\s*$', s)
+                and not RE_QUESTION_INTENT.match(s)):
+            return True
+        return False
+    return False
 
 
 def _join_stem(a: str, b: str) -> str:
@@ -1091,6 +1100,13 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         if i > cur_line:
             emit_gap(cur_line, i)
         end_line = bounds[bi + 1]["line"] if bi + 1 < len(bounds) else n
+        # P0-2a：一级章节标题（# 新章节）是文档分节硬边界，其后的正文不属于
+        # 上一题答案（S0060 串节）。把 end_line 收紧到该行；标题行与后续正文
+        # 由下一轮 emit_gap 收进 leftovers（文档头），不进入本题 a_text。
+        for k in range(i + 1, end_line):
+            if kinds[k] == "doc_header":
+                end_line = k
+                break
         b_start, b_end = starts[i], starts[end_line] if end_line < n else total
         # 答案区：剔除页码/目录行/水印（→ leftovers，span 保留在块区间内）
         inc, exc_runs, inc_idx = [], [], []
@@ -1316,6 +1332,29 @@ def _overlap_len(a: List[Sequence[int]], b: List[Sequence[int]]) -> int:
     return total
 
 
+_RE_FENCE_SPLIT = re.compile(r'(```.*?```|~~~.*?~~~)', re.S)
+_RE_SEPARATOR_LINE = re.compile(r'^[ \t]*(?:-{5,}|\*{3,}|_{3,})[ \t]*$', re.M)
+_RE_BLANK_RUN = re.compile(r'\n[ \t]*\n(?:[ \t]*\n)+')
+
+
+def _clean_answer_text(a: str) -> str:
+    """输出展示层清洗（docs/40 §8.5）：删整行分割线、折叠 3+ 连续换行为单个空行。
+
+    围栏代码块（``` / ~~~）内部原样保留，不删分割线、不折叠空行（§8.6 代码
+    保留原行）。只改 item['a'] 展示文本；source_span 与原文不丢字（判据⑥）
+    保持不动，不影响回溯与覆盖统计。
+    """
+    if not a:
+        return a
+    parts = _RE_FENCE_SPLIT.split(a)
+    for i in range(0, len(parts), 2):     # 奇数下标是完整围栏段，跳过
+        seg = parts[i]
+        seg = _RE_SEPARATOR_LINE.sub('', seg)
+        seg = _RE_BLANK_RUN.sub('\n\n', seg)
+        parts[i] = seg
+    return ''.join(parts)
+
+
 def chunk_v2(md_text: str) -> Dict:
     """切题器 v2：items/probe/coverage/note（判据见模块 docstring）。"""
     res = chunk(md_text, split_long=False)
@@ -1324,7 +1363,7 @@ def chunk_v2(md_text: str) -> Dict:
 
     def add(q, a, span, style):
         seq[0] += 1
-        items.append({"seq": seq[0], "q": q, "a": a, "span": list(span),
+        items.append({"seq": seq[0], "q": q, "a": _clean_answer_text(a), "span": list(span),
                       "qtype": classify_qtype(q), "conf": _conf_of(style, q)})
 
     for b in res["blocks"]:
@@ -1443,6 +1482,8 @@ def chunk_v2(md_text: str) -> Dict:
     coverage = round(min(1.0, max(0.0, net / denom)), 4) if total else 1.0
     note = "扣除:" + (", ".join(f"{k} {v}" for k, v in sorted(deduct_detail.items())) or "无") \
            + f"; 总长 {total}, 覆盖 {covered}(其中噪声 {noise_in_items}), 净覆盖 {net}, 扣除 {deduct}"
+    for it in items:                       # 兜底：续块/碎片合并与去重也可能拼回噪声
+        it["a"] = _clean_answer_text(it["a"])
     return {"items": items, "probe": probe, "coverage": coverage, "note": note}
 
 
