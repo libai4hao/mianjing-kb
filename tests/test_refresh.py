@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import sqlite3
+import time as _time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -421,3 +423,30 @@ def test_refuses_when_kb_lock_held_by_other_writer(mini_env, monkeypatch, capsys
     assert "ABORT" in out and "intake" in out
     assert not (mini_env["build"] / rf.LOCK_NAME).exists()   # 自己的锁也要放掉
     assert not (mini_env["build"] / rf.SHADOW_NAME).exists()  # 没动影子库
+
+
+def test_log_traceback_writes_dated_file_and_prunes_old(tmp_path):
+    """T4：完整栈落按日期日志，30 天前旧日志被清，控制台摘要不含栈。"""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    stale = logs / "errors-2020-01-01.log"
+    stale.write_text("old", encoding="utf-8")
+    old_ts = _time.time() - 31 * 86400
+    import os as _os
+    _os.utime(stale, (old_ts, old_ts))          # 真把 mtime 调旧，才能测到清理
+    try:
+        raise ValueError("boom-context-marker")
+    except ValueError as ex:
+        rf.log_traceback(tmp_path, ex, "refresh主流程")
+    today = datetime.now().strftime("%Y-%m-%d")
+    cur = logs / f"errors-{today}.log"
+    assert cur.exists()
+    body = cur.read_text(encoding="utf-8")
+    assert "ValueError: boom-context-marker" in body
+    assert "refresh主流程" in body
+    assert "Traceback (most recent call last)" in body
+    assert not stale.exists()                   # 30 天前旧日志被清
+    cap = logs / "errors-2030-01-01.log"        # 未来文件不动
+    cap.write_text("x", encoding="utf-8")
+    rf.log_traceback(tmp_path, ValueError("x"), "ctx")
+    assert cap.exists()

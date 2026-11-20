@@ -31,6 +31,7 @@ import shutil
 import sqlite3
 import sys
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +46,8 @@ ROLLBACK_KEEP = 3              # 只留最近 3 份，避免把盘塞满
 LOCK_NAME = "refresh.lock"
 KB_LOCK_WAIT_SEC = 10          # 等别的写库工具让路的上限；超时就放弃，不硬抢
 LOG_NAME = "refresh_log.jsonl"
+ERROR_LOG_DIR = "logs"         # T4：完整 traceback 落 build/logs/errors-YYYY-MM-DD.log
+ERROR_LOG_KEEP_DAYS = 30       # 只留 30 天
 REQUIRED_GATES = ("G1", "G2", "G3", "G4", "G5", "G8")
 KNOWN_STATES = ("PASS", "WARN", "FAIL", "SKIP")
 PUBLISH_MANIFEST = "shadow_publish.json"
@@ -638,6 +641,30 @@ def _log(build_dir: Path, summary: dict) -> None:
         pass
 
 
+def log_traceback(build_dir: Path, exc: BaseException, context: str) -> None:
+    """关键失败：完整栈落 build/logs/errors-YYYY-MM-DD.log，清理 30 天前旧日志。
+
+    日志写入失败绝不能反过来中断刷新主流程（此处吞 OSError）。
+    """
+    try:
+        logs = Path(build_dir) / ERROR_LOG_DIR
+        logs.mkdir(parents=True, exist_ok=True)
+        cutoff = datetime.now().timestamp() - ERROR_LOG_KEEP_DAYS * 86400
+        for old in logs.glob("errors-*.log"):
+            try:
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
+            except OSError:
+                pass
+        today = datetime.now().strftime("%Y-%m-%d")
+        with (logs / f"errors-{today}.log").open("a", encoding="utf-8") as fh:
+            fh.write(f"=== {datetime.now().isoformat(timespec='seconds')} {context} ===\n")
+            fh.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            fh.write("\n")
+    except OSError:
+        pass
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="检索库影子重建 + G1-G5/G8 门禁 + 原子切换")
     ap.add_argument("--reembed", action="store_true",
@@ -901,11 +928,13 @@ def main(argv=None) -> int:
             }
             summary.update(result)
             _log(build_dir, summary)
+            log_traceback(build_dir, ex, "refresh主流程（切换后异常/回滚）")
             print(json.dumps(result, ensure_ascii=False, indent=1, default=str))
             return 1
 
         leftover = _cleanup(shadow) if not swapped else []
         keep = shadow.exists() and not swapped
+        log_traceback(build_dir, ex, "refresh收尾")
         print(json.dumps({"verdict": "ABORT" if not swapped else "ERROR_AFTER_PUBLISH",
                           "why": f"{type(ex).__name__}: {str(ex)[:200]}",
                           "leftover_locked": leftover,
