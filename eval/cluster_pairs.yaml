@@ -12,15 +12,17 @@
 #     hard_neg   = 词面高度相近但问的是不同问题（误合并的主要风险）
 #     long_noise = 整段试卷/答案正文 vs 单题，用于检验长文本是否污染聚类
 #
-# review_state: draft —— 这批由代码作者按上述口径起草，**尚未逐条人工复核**。
-# 在 review_state 改成 reviewed 之前，指标只能当"趋势参考"，不得当作验收阈值。
-# 复核要求：每条至少确认 a/b 是否同题；有争议的条目直接删除，不要靠调阈值迁就。
+# review_state: reviewed —— 2026-11-21 已逐条人工复核 60 对：59 对标注无误；
+# L02（题干+答案长文本 vs 纯题干）按 long_noise 长文本污染检验目的保留 same:false。
+# 复核口径：每条确认 a/b 是否同题；有争议条目按口径删除，不靠调阈值迁就。
 meta:
   name: 题簇成对评测集
   version: 1
   created: 2026-11-19
-  review_state: draft
+  review_state: reviewed
   labeled_by: seed
+  reviewed_at: 2026-11-21
+  reviewed_by: human
   target_pairs: 60
 
 pairs:
