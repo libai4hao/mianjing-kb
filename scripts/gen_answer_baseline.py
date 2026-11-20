@@ -25,8 +25,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from mianjing_kb import chunker  # noqa: E402
 
-CORPUS = Path(os.environ.get("KB_CORPUS_ROOT", r"D:\my-resource\面经整理ing")) / "20-题库MD"
-XLSX = Path(r"C:\Users\li\Downloads\annotation_master_100_v5.xlsx")
+CORPUS = Path(os.environ.get("KB_CORPUS_ROOT", r"<CORPUS_ROOT>")) / "20-题库MD"
+XLSX = Path(os.environ.get("KB_ANNOTATION_XLSX", r"<ANNOTATION_XLSX>"))
 BASELINE = REPO / "eval" / "answer_baseline_v1.jsonl"
 
 HEADERS = [
@@ -106,8 +106,6 @@ def generate() -> None:
         "_type": "meta",
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "chunker_sha256_16": code_sha(),
-        "xlsx": str(XLSX),
-        "corpus": str(CORPUS),
         "n_samples": len(recs),
     }
     BASELINE.parent.mkdir(parents=True, exist_ok=True)
