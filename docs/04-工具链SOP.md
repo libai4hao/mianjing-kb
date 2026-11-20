@@ -21,6 +21,24 @@ Set-Location -LiteralPath $repo
 
 ---
 
+## 0.1 哪些命令会动盘/动库（先看清再跑）
+
+口径（T5，2026-11-21 定）：**破坏性写默认显式**——要么加 `--apply`，要么去掉 `--dry-run`；只读命令不在此列。默认值以代码 argparse 为准，新增写盘/写库命令须同步登记本表。
+
+| 命令 | 默认行为 | 预览/确认开关 | 备注 |
+|---|---|---|---|
+| `intake` | 写库（登记台账） | `--dry-run` 只看统计 | `pipeline.py` 调用的是默认写库语义 |
+| `ocr_merge` | 写盘/写库 | `--dry-run` | — |
+| `lazy_images` | 写盘 | `--dry-run` | — |
+| `canonical` | 写库 | `--dry-run` | 另有 `--apply-candidates` 才改合并候选 |
+| `extract` | 写库 | `--dry-run` | — |
+| `doc_convert` | 预览（不写） | `--apply` 才转 | 一个文件一个子进程 |
+| `purge_origin` | 预览（不删） | `--apply --yes` 才真删，`--rmdirs` 删空目录 | 高危物理删除，缺 `--yes` 只打印计划 |
+| `build_db` | 禁止直跑 | `--direct` 才允许 | 会 DROP `vec_questions` 重写线上库，正常走 `refresh` |
+| `refresh` | 影子重建后原子切换线上库 | — | 写前留 `rollback/` 快照 |
+
+---
+
 ## 0.5 首次写库前：迁移预演（必做）
 
 产库 `kb.sqlite` 落后于代码（001–015 未落）时，第一个写库工具会一次性补跑全部迁移。**先预演，再动产库**：
