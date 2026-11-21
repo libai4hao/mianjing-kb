@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   linux-deps:
     # 只验证依赖可解析 + 包可导入：证明 pywin32 的平台标记没把 Linux 安装拖死。
