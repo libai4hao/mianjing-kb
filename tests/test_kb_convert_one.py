@@ -195,6 +195,21 @@ def test_question_freq_docx_member_is_size_limited(tmp_path):
         text_of_docx(p)
 
 
+def test_normalize_ascii_dot_space_merges_identifier_fragments():
+    """PDF 提取把英文标识符 `X.y` 拆成 `X. y`，应归并回 `X.y`。"""
+    src = ("可以使用 Collections. unmodifiableCollection 创建只读集合，"
+           "修改会抛 Java. lang. UnsupportedOperationException")
+    want = ("可以使用 Collections.unmodifiableCollection 创建只读集合，"
+            "修改会抛 Java.lang.UnsupportedOperationException")
+    assert cv.normalize_ascii_dot_space(src) == want
+
+
+def test_normalize_ascii_dot_space_preserves_numbering_and_chinese():
+    """中文句号、数字列表、小数、无空格句点都不应被误并。"""
+    src = "第 1. 点。第二 2. 项：版本 1.5，比例 0.6。System.out 已是完整标识符。"
+    assert cv.normalize_ascii_dot_space(src) == src
+
+
 def test_convert_one_sanitizes_topic_to_single_directory(tmp_path):
     corpus = tmp_path / "corpus"
     src_dir = corpus / "src"

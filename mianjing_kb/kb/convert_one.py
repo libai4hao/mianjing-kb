@@ -8,6 +8,9 @@
 行为约定：函数签名与输出内容与语料侧原版保持一致（md 字节一致才有"哈希可回归"），
 只做不改变输出的清理：删掉一段空转的 root.iter()、文件句柄用 with、CLI 的语料根改为
 显式 `--corpus-root` / `KB_CORPUS_ROOT`（原版按 `__file__` 反推，挪进仓库后必然算错）。
+唯一的有意输出偏差（2026-11-22 P2-3）：`pdf_to_md` 输出前做 `normalize_ascii_dot_space`
+归并 PDF 文本层的英文标识符句点空格碎片（`Collections. unmodifiable` → `Collections.unmodifiable`），
+会对转换产物做一版修复；语料侧原版无此步。
 
 提取器链：pymupdf4llm（结构化）→ pypdf（纯文本）；质量门禁：CJK 比例。
 用法（CLI，一般由 convert.py 批量调用）：
@@ -34,6 +37,19 @@ def cjk_ratio(t: str) -> float:
     if not t:
         return 0.0
     return sum(1 for c in t if "\u4e00" <= c <= "\u9fff") / len(t)
+
+
+_ASCII_DOT_SPACE = re.compile(r"([A-Za-z])\.\s+([A-Za-z])")
+
+
+def normalize_ascii_dot_space(text: str) -> str:
+    """把 PDF 提取时英文标识符 `X.y`（如 `Collections.unmodifiable`）被拆成
+    `X. y` 的碎片归并回 `X.y`。只命中「ASCII 字母 + `.` + 空白 + ASCII 字母」，
+    中文句号、数字列表、小数、无空格的完整标识符都不受影响。
+    已知取舍：英文句号场景（如 `good. Next` 这类中英混排英文句）会被并入；
+    中文技术文档里 `.` 几乎只出现在代码标识符/URL/版本号，误伤概率极低。
+    """
+    return _ASCII_DOT_SPACE.sub(r"\1.\2", text)
 
 
 ILLEGAL = r'[\\/:*?"<>|\r\n\t]'
@@ -198,6 +214,7 @@ def pdf_to_md(path: str | Path, img_dir: str, doc_stem: str,
         import logging
         logging.getLogger("pypdf").setLevel(logging.CRITICAL)
         md = "\n\n".join((p.extract_text() or "") for p in PdfReader(str(path)).pages)
+    md = normalize_ascii_dot_space(md)
     pages = len(doc)
     doc.close()
     if refs:
