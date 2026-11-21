@@ -200,3 +200,107 @@ def test_interviewer_glued_question_recovered():
     vm = [it for it in items if "虚拟内存" in it["q"]]
     assert vm, "上一题应保留"
     assert "分⻚" not in vm[0]["a"], "粘连行不应被吸入上一题答案"
+
+
+# ---------------------------------------------------------------- T5 / F5
+# 075 S0517/S0533：无问句语义的 Markdown 编号标题（学习建议列表项、
+# Demo 节头+说明句）被当题；047 S0340：“准备步骤：”引导的编号列表项
+# 被当题；028 S0348：叙述行“1、上来照例还是问了问项目：”被当题。
+
+DOC_HEADING_SKILL_ITEM = """# JavaGuide
+
+## 1. Java 语⾔有哪些特点?
+
+Java 语⾔的特点有封装、继承、多态。
+
+## 5. 熟悉如何优化 Java 代码、有写出质量更⾼的代码的意识;
+
+写代码时要注意可读性和可维护性。
+"""
+
+DOC_HEADING_DEMO_SECTION = """# JavaGuide
+
+## 5. ⼀个简单的线程池Demo: Runnable + ThreadPoolExecutor为了让⼤家更清楚上⾯的⾯试题中的⼀些概念，我写了⼀个简单的线程池 Demo。
+
+```java
+public class MyRunnable implements Runnable {
+    public void run() { }
+}
+```
+
+## 6. 线程池原理分析
+
+线程池通过 corePoolSize 等参数控制线程数量。
+"""
+
+DOC_HEADING_SHORT_NOUN = """# ⾯试题
+
+## 11. Oracle JDK 和 OpenJDK 的对⽐
+
+OpenJDK 是开源参考实现，Oracle JDK 提供商业⽀持。
+"""
+
+DOC_LIST_LEAD_STEPS = """# ⾯经
+
+?我跟大家介绍一下一般面试前的准备步骤：
+
+1、了解公司（公司历史、产品、⽂化）；
+
+2、了解职位（⼯作职责、⼯作范畴、⼯作关系）。
+
+3、你为什么想加⼊我们公司？
+
+因为我认同贵公司的产品。
+"""
+
+DOC_NARRATIVE_LEAD = """# ⾯经
+
+1、上来照例还是问了问项目：
+
+答：介绍了⼀下项⽬的架构。
+
+4、字符集和编码的区别？
+
+答：字符集是⼀套符号的集合，编码是符号到字节的映射。
+"""
+
+
+def test_skill_item_heading_not_question():
+    items = chunker.chunk_v2(DOC_HEADING_SKILL_ITEM)["items"]
+    assert not any("熟悉如何优化" in it["q"] for it in items), \
+        "学习建议列表项（技能罗列，无问句语义）不应成题（金标 S0517）"
+    body = [it for it in items if "Java 语⾔有哪些特点" in it["q"]]
+    assert body, "正文真题应保留"
+
+
+def test_demo_section_heading_not_question():
+    items = chunker.chunk_v2(DOC_HEADING_DEMO_SECTION)["items"]
+    assert not any("线程池Demo" in it["q"] for it in items), \
+        "节头+说明句的编号标题不应成题（金标 S0533）"
+    assert not any("MyRunnable" in it["a"] for it in items), \
+        "节内代码应归 leftovers，不挂在任何题的答案上"
+
+
+def test_short_noun_heading_still_question():
+    items = chunker.chunk_v2(DOC_HEADING_SHORT_NOUN)["items"]
+    jdk = [it for it in items if "OpenJDK 的对⽐" in it["q"]]
+    assert jdk, "短名词短语编号标题（030 型）仍应成题"
+    assert "开源" in jdk[0]["a"]
+
+
+def test_steps_list_lead_arms_list():
+    items = chunker.chunk_v2(DOC_LIST_LEAD_STEPS)["items"]
+    assert not any("了解公司" in it["q"] for it in items), \
+        "“准备步骤：”引导的列表项不应成题（金标 S0340）"
+    assert not any("了解职位" in it["q"] for it in items)
+    why = [it for it in items if "为什么想加⼊" in it["q"]]
+    assert why, "引导列表后的真问句应成题"
+
+
+def test_narrative_lead_not_question():
+    items = chunker.chunk_v2(DOC_NARRATIVE_LEAD)["items"]
+    assert not any("问了问项目" in it["q"] for it in items), \
+        "叙述行（问了问项目：）不应成题（金标 S0348）"
+    enc = [it for it in items if "字符集和编码" in it["q"]]
+    assert enc, "后面的真问句应成题"
+    assert "符号的集合" in enc[0]["a"]

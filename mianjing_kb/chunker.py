@@ -120,7 +120,10 @@ RE_TOC_HEADER = re.compile(r'^\s*(?:目\s*录|contents|table\s+of\s+contents)\s*
 RE_MD_NUM_HEADING = re.compile(r'^\s*#{1,6}\s+\d{1,3}(?:\s*[.、．]|\s*[)）])')
 RE_MD_H12 = re.compile(r'^\s*#{1,2}\s+\S')
 RE_LIST_LEAD = re.compile(
-    r'(?:如下|以下|下列|包括|包含|分为|分成|分别是|基本要素|几个方面|哪几种|哪些|几种|四种|三种)')
+    r'(?:如下|以下|下列|包括|包含|分为|分成|分别是|基本要素|几个方面|哪几种|哪些|几种|四种|三种|步骤|建议|要点)')
+# F5c：面经叙述行（“1、上来照例还是问了问项目：”）有题号但整行是
+# 叙事，不是题；成题会偷走后面的叙述内容。
+RE_NARRATIVE_LEAD = re.compile(r"(?:问了问|聊了聊|问了下|然后他就说|他就说|又问了|接着问)")
 RE_NESTED_NUM = re.compile(
     r'^\s*(?:#{1,6}\s+)?((?:\d{1,3}\s*[.、．]\s*){2,})([^\d].+)$')
 RE_HIER_NUM = re.compile(
@@ -137,7 +140,7 @@ RE_STRONG_QSTART = re.compile(
 # ---- review2 移植（2026-11-20）：问句语义/章节/答案小节词汇 ----
 # 提问动词只在行首生效，避免答案句中的问词把列表项误判成题。
 RE_QUESTION_INTENT = re.compile(
-    r'^(?:什么是|什么叫|如何|为什么|为何|谈谈|介绍|说说|有没有|怎么办|怎么样|怎样|怎么|'
+    r'^(?:什么是|什么叫|如何|为什么|为何|谈谈|介绍|说说|说一下|有没有|怎么办|怎么样|怎样|怎么|'
     r'简述|解释|说明|描述|列举|列出|有哪些|哪一种|哪一个|哪些|是否|能否|请|给定|假设|已知|'
     r'实现一个|设计一个|设计|计算|求出|写一个|写出|手写|阐述|证明)')
 # 弱问词需后接对象才是题：裸"区别/分析/判断"是答案小节标题，不误判为新题。
@@ -633,6 +636,30 @@ def _is_question_heading(s: str) -> bool:
         r'机制|优缺点|优点|缺点|使用场景|实现方式)', s))
 
 
+def _heading_questionish(qtext: str) -> bool:
+    """F5（金标 S0517/S0533）：Markdown 编号标题成题的最低语义门槛。
+
+    编号标题（`## N. xxx`）没有统一问句形态：真题干可能是问句、任务句
+    或短名词短语（030 型 `## 11. Oracle JDK 和 OpenJDK 的对⽐`）；但
+    “熟悉/了解/掌握”开头的技能罗列、“…为了让⼤家更清楚…”这类节头+
+    说明句也是编号标题，被当题会带来答案 bleed。成题至少要有：问句/
+    任务语义，或不含句读的短名词短语。
+    """
+    s = unicodedata.normalize("NFKC", qtext or "").strip()
+    if not s:
+        return False
+    # 技能罗列列表项（“熟悉如何优化 Java 代码…”）是简历/学习建议，不是题。
+    if re.match(r"^(?:熟悉|了解|掌握|精通|具备)", s) and not s.rstrip().endswith(("?", "？")):
+        return False
+    if (RE_QEND.search(s) or _has_question_intent(s)
+            or RE_QUESTION_SUFFIX.search(s) or _is_question_heading(s)):
+        return True
+    # 短名词短语标题（“Oracle JDK 和 OpenJDK 的对⽐”）按题处理；过短的
+    # （“队列”，qnorm<3）是答案小节，带句读/说明句形态的（“招聘⼈数 ：秋招
+    # 多于春招 ；”）不是题。
+    return _qnorm_len(s) >= 3 and len(s) <= 40 and not re.search(r"[，,；;。.！!]", s)
+
+
 _QNORM_CLEAN = re.compile(r"[^\u4e00-\u9fa5a-z0-9]+")
 
 
@@ -1078,6 +1105,18 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         qid, qtext, style = q
         qtext = re.sub(r'^\d{1,3}\s*[，,]\s*', '', qtext)
         qtext = qtext.replace("**", "").strip().lstrip("、，,。；;：:")
+        # F5c（金标 028 S0348）：叙述行“1、上来照例还是问了问项目：”
+        # 有题号但整行是面经叙事，不是题；成题会偷走后面的叙述内容。
+        if (style == "题号" and RE_NARRATIVE_LEAD.search(qtext)
+                and qtext.rstrip().endswith(("：", ":"))
+                and not re.search(r"[?？]", qtext)):
+            kinds[i] = "section"
+            last_qid = None
+            list_active = False
+            list_pending = False
+            prev_blank = True
+            last_problem_mark = False
+            continue
         if style == "标题":
             # 章节标题（“MyBatis 面试题”“Java 并发编程（一）”）不是题；只有带
             # 提问语义的标题（“什么是 JVM？”）才作为标题题块。
@@ -1118,7 +1157,6 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         # Markdown 编号标题/加粗小标题如果是“知识点汇总/本地方法栈”这类答案小节，
         # 不是新题。显式编号且题号连续时仍按题处理（030 这类整篇 ## N、题）；
         # 非连续编号只有带提问语义才作为题边界（073 的 q11/q12）。
-        sequential_heading = (qid == 1 if last_qid is None else qid == last_qid + 1)
         answer_label = bool(re.match(
             r'^(?:知识点|总结|汇总|详解|概述|简介|本地方法栈|程序计数器|方法区|虚拟机栈|堆|栈)$',
             qtext.strip()))
@@ -1143,20 +1181,65 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         answer_subpoint_restart = (
             last_qid is not None and qid is not None
             and qid <= last_qid and not explicit_question)
-        explicit_question_heading = (
-            md_num_heading and len(qtext.strip()) >= 6
-            and not answer_label
-            and not RE_SECTION_TITLE.match(qtext.strip())
-            and not RE_LIST_INTRO.search(qtext.strip())
-            and not answer_subpoint_restart)
-        if (md_num_heading and not _is_question_heading(qtext)
-                and not explicit_question_heading
-                and not (sequential_heading and not answer_label)):
-            list_active = False
-            list_pending = False
-            prev_blank = False
-            last_problem_mark = False
-            continue
+        # F5（金标 S0517/S0533）：Markdown 编号标题成题需要最低问句/标题
+        # 语义（_heading_questionish）。强语义（问号/问词/标题型问句）直接
+        # 成题（旧行为）；短名词短语只在非答案小节语境成题；无语义的短行
+        # 留父题答案（旧行为）；节头+说明句（“## 6. ⼀个简单的线程池Demo…
+        # 为了让⼤家更清楚…”）是章节硬边界，行归 leftovers，防答案 bleed。
+        if md_num_heading:
+            # 编号标题行无论去向（成题/吸收进父题答案/章节硬边界）都单调推进
+            # last_qid：下游 answer_subpoint_restart 与 F3b 顺延守卫都依赖它，
+            # 不推进会让后续层级行/编号行逃逸成题（T5 实测）。粘连整行
+            # （“## 1. 编程式…2. 声明式…”）推进到行内最大题号——HEAD 中
+            # 这些 part 是独立题、会把 last_qid 推到最大值，吸收后须等价。
+            adv = qid
+            for m in RE_GLUED.finditer(qtext):
+                if int(m.group(1)) > adv:
+                    adv = int(m.group(1))
+            if adv is not None and (last_qid is None or adv > last_qid):
+                last_qid = adv
+            heading_q = _heading_questionish(qtext)
+            strong_q = bool(heading_q and (
+                    RE_QEND.search(qtext) or _has_question_intent(qtext)
+                    or RE_QUESTION_SUFFIX.search(qtext)
+                    or _is_question_heading(qtext)))
+            if not heading_q:
+                # R9 粘连整行（“junit 用法…2. 分布式锁”）要到 new_q 才拆分；
+                # 拆分后任一部分有语义，整行仍按题走。
+                parts, cur_qid, seg_start = [], qid, 0
+                for m in RE_GLUED.finditer(qtext):
+                    num = int(m.group(1))
+                    if num == cur_qid + 1:
+                        parts.append(qtext[seg_start:m.start(1)].rstrip())
+                        cur_qid, seg_start = num, m.start(1)
+                parts.append(qtext[seg_start:].rstrip())
+                # R9 尾部 part 保留题号前缀（“2. 分布式锁”），判定前剥掉。
+                heading_q = any(_heading_questionish(
+                    re.sub(r'^\d{1,3}\s*[.、．]\s*', '', p)) for p in parts)
+            if heading_q and (strong_q
+                    or (not answer_subpoint_restart and not answer_label
+                        and not RE_SECTION_TITLE.match(qtext.strip())
+                        and not RE_LIST_INTRO.search(qtext.strip()))):
+                pass  # 落 new_q（旧行为）
+            elif (answer_subpoint_restart or answer_label
+                    or RE_SECTION_TITLE.match(qtext.strip())
+                    or RE_LIST_INTRO.search(qtext.strip())
+                    or len(qtext.strip()) <= 40):
+                list_active = False
+                list_pending = False
+                prev_blank = False
+                last_problem_mark = False
+                continue
+            else:
+                # 章节硬边界；不动 last_qid/prev_blank——T5 实测重置会绕过
+                # F3b 的 last_qid 守卫，让后续层级行级联成题。
+                kinds[i] = "hier_section"
+                hier_section_lines.add(i)
+                list_active = False
+                list_pending = False
+                prev_blank = False
+                last_problem_mark = False
+                continue
         if bold_only_heading and not md_num_heading and not _is_question_heading(qtext):
             list_active = False
             list_pending = False
@@ -1181,6 +1264,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             last_problem_mark = False
             continue
         if (not md_num_heading and (list_active or list_pending or implicit_list)
+                and not explicit_question
                 and not _is_list_item_question(qtext)):
             list_active = True
             list_pending = False
