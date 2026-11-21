@@ -298,10 +298,8 @@ mongod 是处理 MongoDB 系统的主要进程。
 """
     v2 = chunker.chunk_v2(md)
     qs = [it["q"] for it in v2["items"]]
-    assert "什么是“mongod”？" in qs
-    assert "如何查看使用 MongoDB 的连接？" in qs
-    assert not any("docs.mongodb.com" in q for q in qs)
-    assert not any("11.1.7" in q for q in qs)
+    # 精确题干集合：既确认两条题都在，也确认 URL 与层级编号没有泄漏进题干
+    assert set(qs) == {"什么是“mongod”？", "如何查看使用 MongoDB 的连接？"}
 
 
 def test_toc_header_without_entries_does_not_mask_body():
