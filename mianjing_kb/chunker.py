@@ -209,6 +209,27 @@ def _is_codeish(text: str) -> bool:
     return bool(re.search(r'(?:;|\+\+|--|->|==|!=|<=|>=|\+=|-=)', s)) and not _looks_questionish(s)
 
 
+def _toc_density(lines: List[str], j: int, window: int = 12) -> float:
+    """j 之后 12 个非空行中“大纲形态”行的占比（F1 目录前瞻）。
+
+    大纲形态 = 点线/页码，或短行（≤60）且不以句末标点（。！）收尾。
+    问号结尾算大纲：目录条目本来就是问句（“Java 语⾔有哪些特点?”）。
+    正文答案段落多带句号，密度会掉下来，以此区分目录条目与正文标题。
+    """
+    seen = got = 0
+    for k in range(j + 1, min(len(lines), j + 400)):
+        x = lines[k].strip()
+        if not x:
+            continue
+        seen += 1
+        if (RE_TOC.search(x) or RE_PAGE.match(x)
+                or (len(x) <= 60 and not re.search(r"[。！]$", x))):
+            got += 1
+        if seen >= window:
+            break
+    return (got / seen) if seen else 0.0
+
+
 def _toc_mask(lines: List[str]) -> set[int]:
     """识别文首目录区，返回需要标为 toc 的行号集合。
 
@@ -245,7 +266,14 @@ def _toc_mask(lines: List[str]) -> set[int]:
         # 目录条目多为 #### / 缩进 / 带页码；H1-H2 且不带点线，视为正文开始。
         # 无点线/页码的目录（兼容字符 ⽬录）靠短大纲条目累积证据，
         # 但必须真的遇到正文 Markdown 标题才截断，避免把全文当目录。
+        # F1（金标 S0496）：目录自带 "## N." 条目时，首个 H12 可能仍是目录行
+        # （075 目录 ~900 行，旧逻辑在第一条 "## 1." 就截断，其余条目裸奔成题）。
+        # 前瞻 12 个非空行：多数仍是大纲形态则视为目录延续，否则才是正文标题。
         if RE_MD_H12.match(s) and not RE_TOC.search(s) and (leaders >= 2 or outline >= 3):
+            if _toc_density(lines, j) >= 0.6:
+                outline += 1
+                saw_entry = True
+                continue
             end = j
             ended_at_heading = True
             break

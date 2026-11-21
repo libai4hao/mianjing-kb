@@ -68,3 +68,51 @@ def test_hier_question_still_binds():
     hier_q = [it for it in items if "HashMap" in it["q"]]
     assert hier_q, "层级号开头的标题语义题不应被吞进上一题答案"
     assert "红黑树" in hier_q[0]["a"]
+
+
+# ---------------------------------------------------------------- T2 / F1
+# 075 S0496：目录自带 "## N." 条目，_toc_mask 在首个 H12 处截断，
+# 其余 ~900 行目录裸奔，条目成题（"7. 线程池原理分析" a 空）。
+
+DOC_TOC_H12_ENTRIES = """# JavaGuide
+
+⽬录
+
+⼀ ⾯向对象和⾯向过程的区别
+
+1.1 什么是⾯向对象
+
+1.2 封装继承多态
+
+## 1. ⾯向对象和⾯向过程的区别
+
+## 2. Java 语⾔有哪些特点?
+
+## 7. 线程池原理分析
+
+2.4 JVM
+
+2.4.1 介绍下 Java 内存区域(运⾏时数据区)程序计数器
+
+## 1. ⾯向对象和⾯向过程的区别
+
+⾯向对象是把数据和对数据的操作封装在⼀起，⽐⾯向过程更易维护、易复⽤。
+
+## 2. Java 语⾔有哪些特点?
+
+Java 语⾔的特点有封装、继承、多态。
+"""
+
+
+def test_toc_h12_entries_masked():
+    items = chunker.chunk_v2(DOC_TOC_H12_ENTRIES)["items"]
+    qs = [it["q"].strip() for it in items]
+    assert not any("线程池原理分析" in q for q in qs), \
+        "目录条目不应成题（金标 S0496）"
+    assert not any("介绍下 Java 内存区域" in q for q in qs), \
+        "目录层级条目不应成题"
+    assert not any("程序计数器" in it["a"] for it in items), \
+        "目录条目不应串入任何答案"
+    body_q = [it for it in items if "Java 语⾔有哪些特点" in it["q"]]
+    assert body_q, "正文题应保留"
+    assert "封装" in body_q[0]["a"], "正文题答案应完整"
