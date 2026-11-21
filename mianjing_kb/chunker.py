@@ -712,7 +712,8 @@ def _split_inline_hierarchical_lines(md_text: str) -> Tuple[List[str], List[int]
                 prefix = plain[:m.start()].strip()
                 if (prefix and len(suffix) >= 4 and not _is_codeish(suffix)
                         and not suffix.startswith(("的", "了", "是", "在", "和", "与"))
-                        and (_is_question_heading(suffix)
+                        and (prefix[-1] in "）)】」』。！？!?；;：:"
+                             or _is_question_heading(suffix)
                              or re.match(r'^(?:什么|如何|怎么|为什么|为何|哪些|哪几|请|简述|说说|介绍|解释|描述|实现|编写|设计|给定|求)', suffix))):
                     split_at = raw.find(plain) + m.start()
                     break
@@ -874,11 +875,13 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
 
     # ---- 第二遍：题块起点 ----
     bounds: List[dict] = []
+    hier_section_lines: set = set()   # F3b：层级节标题硬边界行（组装时收紧 end_line）
     last_qid: Optional[int] = None
     prev_blank = True
     last_problem_mark = False   # v2 增强：问题N 纯标记行武装紧随的独立问句行
     list_active = False         # 普通编号列表：1. 原子性 / 4. 持久性 不是题
     list_pending = False        # 上一行是“如下/以下/四个要素”等列表引导
+    last_hier_was_section = False   # F3：上一个层级行是否被判为章节（章节运行上下文）
     for i, ln in enumerate(lines):
         if kinds[i] != "text" or ln.strip() in watermark:
             # 页码/目录/页眉/水印只是"扣除区"，不能消费块级空行；否则 `12\n3. 下一题`
@@ -887,6 +890,10 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                 prev_blank = True
             elif kinds[i] in ("doc_header", "section"):
                 prev_blank = True     # 标题/文档头/章节也是块边界，下一行可新开题
+            elif kinds[i] == "hier_section":
+                # F3b 层级节标题：不武装 prev_blank——紧随的顺延题号行
+                # （“1.1.6 如果需要笔试…”）不是新题，避免备战面试散行成题。
+                pass
             elif kinds[i] == "code":
                 # 代码区不重置题号：同一节里“函数代码 + 下一题”仍应连续可识别。
                 pass
@@ -919,6 +926,51 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             prev_blank = True
             last_problem_mark = False
             continue
+        # F3（金标 S0537/S0549 E_ANSWER_BLEED）：PDF 行粘连的层级节标题
+        # （“2.4.2 说⼀下Java对象的创建过程下图便是…”）。层级号 ≥2 段不会出现在
+        # 答案内部列举（答案用 1. 2. / ①②③），因此按边界处理：有问句语义 → 成题；
+        # 否则章节硬边界（内容归 leftovers）。若不拦截，_match_nested_number 会给出
+        # (末段号, 题文, 题号)，prev_blank=False 时整节内容被吸入上一题答案。
+        # 顺延例外：题区里的顺延层级行（“2.2.4 HashMap 和 HashSet区别…”）沿用旧
+        # 路径成题；但若上一个层级行已被判为章节（备战面试建议块 1.1.5→1.1.9），
+        # 章节运行中的顺延兄弟行同样按章节处理，避免建议散行成题。
+        hm = RE_HIER_NUM.match(s)
+        hier_tail = int(hm.group(1).split(".")[-1]) if hm else None
+        sequential_hier = (prev_blank and hier_tail is not None
+                           and last_qid is not None and hier_tail == last_qid + 1)
+        if (hm and len(hm.group(2).strip()) >= 4
+                and not _has_question_intent(hm.group(2).strip())
+                and not [m for m in re.finditer(r"\d{1,3}(?:\.\d{1,3}){2,}", s)
+                         if m.start() > 0]
+                and not (last_qid is None
+                         or (sequential_hier and not last_hier_was_section))):
+            body = hm.group(2).strip()
+            # ponytail: 枚举型短标题（“HTTP⻓连接,短连接”）按题处理；若未来
+            # 出现误判（逗号开头的非题短行），再升级为动词开头黑名单。
+            if ((_is_question_heading(body) and len(body) <= 60
+                    and not re.search(r"[。！；]", body))
+                    or (len(body) <= 40 and re.search(r"[，,、]", body)
+                        and not re.search(r"[。！？；]", body)
+                        and not body.endswith(("：", ":")))):
+                # 标题语义（“HashMap 的底层实现原理”）：成题；last_qid 不动，
+                # 保持旧的顺延跟踪，避免级联（后续 qid==1 行被误判新题）。
+                # 整句（含 。！；）不是标题，如“搞清楚…哪些⽅向的问题吧！”。
+                bounds.append({"line": i, "parts": [(None, body)], "style": "标题"})
+                last_hier_was_section = False
+            else:
+                # 章节说明（“说⼀下Java对象的创建过程下图便是…”）：硬边界，
+                # 行与后续正文归 leftovers，不再吸入上一题答案。用独立 kind
+                # 而非 "section"：不武装 prev_blank（见上文行类型循环）。
+                kinds[i] = "hier_section"
+                hier_section_lines.add(i)
+                last_hier_was_section = True
+            list_active = False
+            list_pending = False
+            prev_blank = False
+            last_problem_mark = False
+            continue
+        if hm:
+            last_hier_was_section = False   # 走旧路径的层级行：题区上下文
         q = _match_question(ln)
         if q is None:
             # OCR/网页题库常见的“题号独占一行”：`1.` 下一行才是题干。
@@ -1175,7 +1227,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                 runs[-1] = (runs[-1][0], runs[-1][1], i + 1)   # 空行并入当前 run
                 continue
             why = {"page": "页码", "toc": "目录行", "doc_header": "文档头",
-                   "section": "章节标题",
+                   "section": "章节标题", "hier_section": "章节标题",
                    "quote": "引用块(来源)", "code": "块前代码", "table": "块前表格",
                    "ack": "致谢/广告"
                    }.get(k, None)
@@ -1198,7 +1250,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         # 上一题答案（S0060 串节）。把 end_line 收紧到该行；标题行与后续正文
         # 由下一轮 emit_gap 收进 leftovers（文档头），不进入本题 a_text。
         for k in range(i + 1, end_line):
-            if kinds[k] == "doc_header":
+            if kinds[k] == "doc_header" or k in hier_section_lines:
                 end_line = k
                 break
         b_start, b_end = starts[i], starts[end_line] if end_line < n else total
@@ -1213,7 +1265,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                 why = "页码"
             elif k == "toc":
                 why = "目录行"
-            elif k == "section":
+            elif k == "section" or k == "hier_section":
                 why = "章节标题"
             elif k == "ack":
                 why = "致谢/广告"
