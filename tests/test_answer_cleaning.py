@@ -71,6 +71,22 @@ def test_fenced_code_block_content_not_cleaned():
     assert "int a = 1;" in a and "int b = 2;" in a
 
 
+def test_unclosed_fence_content_not_cleaned():
+    """未闭合围栏（只有 ``` 没有收尾）内部仍原样保留，不删分割线、不折叠空行。
+
+    docx/OCR 转文本常有只开不关的代码围栏；清洗器不应把其中内容当普通
+    正文删掉 ----- / 折叠连续空行（§8.6 代码保留原行）。
+    """
+    md = ("1. 问题?\n\n"
+          "```\n"
+          "-----\n"
+          "int a = 1;\n\n\n\n"
+          "int b = 2;\n")
+    a = _answer_of(md, "问题")
+    assert "-----" in a, f"未闭合围栏内分割线被误删: {a!r}"
+    assert "int a = 1;" in a and "int b = 2;" in a
+
+
 def test_source_span_unchanged_after_cleaning():
     """清洗不改动原文 span——原文可回溯（chunker 判据⑥）。"""
     md = "1. 问题?\n\n答案。\n\n-----\n\n更多。"

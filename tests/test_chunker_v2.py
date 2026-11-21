@@ -392,3 +392,47 @@ def test_is_code_fragment_keeps_normal_questions():
     ]
     for q in normal:
         assert chunker.is_code_fragment(q) is False, q
+
+
+def test_v2_inline_bold_question_no_blank_line_split():
+    """P1-1：答案内无空行前置的粗体问句行，仍由 _split_answers 拆成新题。"""
+    md = """1. 谈谈你对索引的理解？
+
+索引是加速查询的数据结构。
+**什么是最左前缀原则？**
+联合索引按最左列匹配查询。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [it["q"] for it in v2["items"]]
+    assert any("索引的理解" in q for q in qs), qs
+    assert any("最左前缀" in q for q in qs), qs
+    # 第二题答案应只含联合索引的说明，不把第一题答案吞进来。
+    it = next(x for x in v2["items"] if "最左前缀" in x["q"])
+    assert "索引是加速查询" not in it["a"], it["a"]
+
+
+def test_v2_inline_question_no_blank_line_split():
+    """P1-2：主通道无空行前置的强问句行（行首问词+问号收尾）仍独立成题。"""
+    md = """说说你对索引的理解。
+索引是加速查询的数据结构。
+什么是最左前缀原则？
+联合索引按最左列匹配查询。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [it["q"] for it in v2["items"]]
+    assert any("索引的理解" in q for q in qs), qs
+    assert any("最左前缀" in q for q in qs), qs
+
+
+def test_v2_inline_non_question_not_split():
+    """P1 回归护栏：答案内无空行前置、且非行首强问词的问号句不误拆新题。"""
+    md = """1. 什么是HashMap？
+
+HashMap 允许 null。
+这个功能常用吗？
+它允许键和值都为 null。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [it["q"] for it in v2["items"]]
+    assert qs == ["什么是HashMap？"], qs
+    assert "这个功能常用吗" in v2["items"][0]["a"], v2["items"][0]["a"]

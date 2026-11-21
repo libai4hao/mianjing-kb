@@ -137,14 +137,20 @@ RE_STRONG_QSTART = re.compile(
 # ---- review2 移植（2026-11-20）：问句语义/章节/答案小节词汇 ----
 # 提问动词只在行首生效，避免答案句中的问词把列表项误判成题。
 RE_QUESTION_INTENT = re.compile(
-    r'^(?:什么是|什么叫|如何|为什么|为何|区别|比较|谈谈|介绍|说说|有没有|怎么办|怎么样|怎样|怎么|'
+    r'^(?:什么是|什么叫|如何|为什么|为何|谈谈|介绍|说说|有没有|怎么办|怎么样|怎样|怎么|'
     r'简述|解释|说明|描述|列举|列出|有哪些|哪一种|哪一个|哪些|是否|能否|请|给定|假设|已知|'
-    r'实现一个|设计一个|设计|计算|求出|写一个|写出|手写|分析|阐述|证明|判断|你知道|你了解)')
+    r'实现一个|设计一个|设计|计算|求出|写一个|写出|手写|阐述|证明)')
+# 弱问词需后接对象才是题：裸"区别/分析/判断"是答案小节标题，不误判为新题。
+RE_WEAK_INTENT = re.compile(
+    r'^(?:区别|比较|分析|判断|你知道|你了解)[\u4e00-\u9fffA-Za-z0-9(（]')
 # 句尾疑问形态：`linux常用吗` / `用户研究分为哪两个方面` 没有行首问词也是题。
 RE_QUESTION_SUFFIX = re.compile(
-    r'(?:是什么|是什么原因|有什么区别|有什么作用|有哪些内容|会怎么样|怎么回事|是否正确|如何处理|如何解决|吗|呢|'
+    r'(?:是什么|是什么原因|有什么区别|有什么作用|有哪些内容|会怎么样|怎么回事|是否正确|如何处理|如何解决|吗|'
     r'哪[一两二三四五六七八九十0-9]+(?:个(?:方面|问题|维度)?|种|方面|类|项)|哪几个|几种|几个|多少|'
     r'是(?:（|\()\s*\d+\s*个空\s*(?:）|\)))[?？。]?$')
+# `呢` 是歧义语气词：只在句中带疑问代词时才判问句（"他还没来呢"是陈述句）。
+RE_NE_QUESTION = re.compile(
+    r'(?:为什么|为何|怎么|如何|怎样|什么|哪[些几个]|谁|是否|能否|多少)[^。！？!]{0,24}呢[?？。]?$')
 # 答案小节引导词：这类编号标题留在父答案，不另起题。
 RE_LIST_INTRO = re.compile(
     r'包括|分为|有如下|如下|分别|以下|特点|优点|缺点|组成|类型|阶段|步骤|'
@@ -302,6 +308,59 @@ def _local_outline_mask(lines: List[str], blocked: set[int]) -> set[int]:
                 for x in intervening)
             if not has_answer:
                 out.add(idx)
+
+    # ---- P2-2：正文缺失/编号粘连的章内目录 run ----
+    # key 后文再现≥2 对「编号粘连」「正文缺失」两类失效，改用区间信号：
+    # 连续层级编号行之间没有实质答案正文（排除问句/粘连标题/章节标题）即为目录 run。
+    def _run_answer_len(intervening: List[str]) -> int:
+        total = 0
+        for x in intervening:
+            nfkc = unicodedata.normalize("NFKC", x)
+            if RE_SECTION_TITLE.match(nfkc):
+                continue
+            if _match_question(x):
+                continue
+            if _is_qline(x) or _is_question_heading(x):
+                continue
+            total += _qnorm_len(x)
+        return total
+
+    RUN_MIN, ANS_BREAK, REPRO_RATIO = 8, 50, 0.5
+    hier_idx = [
+        i for i, line in enumerate(lines)
+        if i not in blocked and line.strip()
+        and (RE_NESTED_NUM.match(line) or RE_HIER_NUM.match(line))
+        and _match_question(line)
+    ]
+    i = 0
+    while i < len(hier_idx):
+        run = [hier_idx[i]]
+        j = i + 1
+        while j < len(hier_idx):
+            intervening = [
+                lines[k].strip()
+                for k in range(run[-1] + 1, hier_idx[j])
+                if lines[k].strip()
+            ]
+            if _run_answer_len(intervening) >= ANS_BREAK:
+                break
+            run.append(hier_idx[j])
+            j += 1
+        if len(run) >= RUN_MIN:
+            # 只有「正文缺失/编号粘连」的目录 run 才整体标 toc：
+            # 正常目录（key 后文精确再现）交给上面的 key 再现逻辑，避免 span 归并。
+            repro = 0
+            for idx in run:
+                qq = _match_question(lines[idx])
+                if qq and qq[1].strip():
+                    key = _QNORM_CLEAN.sub("", qq[1].lower())
+                    if key in occurrences and len(occurrences[key]) >= 2:
+                        repro += 1
+            if repro / len(run) < REPRO_RATIO:
+                for k in range(run[0], run[-1] + 1):
+                    if lines[k].strip() and k not in blocked:
+                        out.add(k)
+        i = j
     return out
 
 
@@ -393,7 +452,8 @@ def _has_question_intent(text: str) -> bool:
         return False
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:[)）])?[?？]", s):
         return False
-    if RE_QEND.search(s) or RE_QUESTION_INTENT.search(s) or RE_QUESTION_SUFFIX.search(s):
+    if (RE_QEND.search(s) or RE_QUESTION_INTENT.search(s) or RE_QUESTION_SUFFIX.search(s)
+            or RE_WEAK_INTENT.search(s) or RE_NE_QUESTION.search(s)):
         return True
     # 选择题空括号占位 + 题干引导词：没有问号也是题。
     if (re.search(r"[（(]\s*[）)]$", s)
@@ -423,7 +483,21 @@ def _is_qline(s: str) -> bool:
     # `Redis 是内存数据库` 是陈述句；`ReadWriteLock 是什么` 仍是问句。
     if re.match(r'^[A-Za-z][A-Za-z0-9_\s]*是(?!什么|否)', s):
         return False
-    return RE_INTERROGATIVE.search(s[:8]) is not None or RE_QUESTION_SUFFIX.search(s) is not None
+    return (RE_INTERROGATIVE.search(s[:8]) is not None
+            or RE_QUESTION_SUFFIX.search(s) is not None
+            or RE_NE_QUESTION.search(s) is not None)
+
+
+def _is_strong_qline(s: str) -> bool:
+    """强问句信号：行首强问词（RE_STRONG_QSTART）+ 问号收尾（RE_QEND）。
+
+    P1 去掉 prev_blank 硬依赖后，用它替代过宽的 _is_qline 作为"无需空行前置
+    即可独立成题"的判定。比 _is_qline 严格（是其子集）：答案正文里的设问句
+    （"这个功能常用吗？"行首"这个"非强问词）不会被误拆，而"什么是最左前缀
+    原则？"这类行首问词+问号收尾的真题能接住（金标 E_ANSWER_BLEED 漏切）。
+    """
+    s = strip_bold(s.strip())
+    return bool(RE_QEND.search(s) and RE_STRONG_QSTART.match(s))
 
 
 def _trim_question_text(s: str) -> str:
@@ -439,7 +513,11 @@ RE_ANSWER_LEAD = re.compile(r'^(?:答案|答[：:]|解[：:]|解析|参考|示�
 
 
 def _is_stem_continuation(prev_q: str, line: str) -> bool:
-    """line 是否为悬空题干 prev_q 的换行续段（保守：只认问句形态短行）。"""
+    """line 是否为悬空题干 prev_q 的换行续段（保守）。
+
+    问句形态短行 + 非问句形态续段（数学式/中文半句被换行、空行拆断）都认；
+    答案引导、题号、代码、章节标题、列表项开路时不认，防止把真实答案误并回题干。
+    """
     s = strip_bold((line or "").strip())
     if not s or len(s) > 60 or not prev_q:
         return False
@@ -447,6 +525,12 @@ def _is_stem_continuation(prev_q: str, line: str) -> bool:
             or _match_question(line) is not None
             or _is_codeish(s) or _is_promo(s) or _looks_section_line(s)):
         return False
+    prev_done = bool(re.search(r'[。！？?!]$', prev_q.rstrip()))
+    # P1-3(b)：题干未封口时，续段以虚词开头（「…多进制」+「的计算机，为什么」）
+    # 是上一句被换行拆开的强信号；独立问句/答案句几乎不以虚词开头。
+    if (not prev_done
+            and re.match(r'^(?:的|了|是|在|和|与|及|并|而|但|就|也|都|其|此|该)(?=\S)', s)):
+        return True
     if _is_qline(s) or _is_question_heading(s):
         # 原判据：prev 以连接词/介词悬空结尾。
         if RE_STEM_DANGLING.search(prev_q.rstrip()):
@@ -458,7 +542,15 @@ def _is_stem_continuation(prev_q: str, line: str) -> bool:
                 and not RE_QUESTION_INTENT.match(s)):
             return True
         return False
-    return False
+    # P1-3(a)/(c)：非问句形态续段（金标 E_STEM_SPLIT：数学式、中文半句换行）。
+    if prev_done:
+        return False
+    # (a) 题干以「证明/求/计算」等任务词+冒号收尾 → 其后命题/公式是题干。
+    if (prev_q.rstrip().endswith(('：', ':'))
+            and re.search(r'(?:证明|求证|求|计算|求解|写出|推导|化简|等于|结果|输出)', prev_q)):
+        return True
+    # (c) 题干以助词/连接词悬空 + 续段极短（半个词/短片段）。
+    return bool(RE_STEM_DANGLING.search(prev_q.rstrip())) and len(s) <= 15
 
 
 def _join_stem(a: str, b: str) -> str:
@@ -877,11 +969,13 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             # R2' 同口径（空行前置或问题N 武装；非列表项、非小数、长度受限）。
             # 解锁讲解型 md（面向字节/连环炮系列：无数字题号，题干即独立问句行）。
             inner = strip_bold(s)
-            if ((prev_blank or last_problem_mark) and 7 < len(inner) <= 160
+            standalone = (7 < len(inner) <= 160
                     and not RE_LIST_ITEM.match(inner) and not RE_DECIMAL.match(inner)
                     and not inner.rstrip().endswith(("：", ":"))
-                    and not _is_codeish(inner)
-                    and _is_qline(inner)):
+                    and not _is_codeish(inner))
+            if standalone and (
+                    ((prev_blank or last_problem_mark) and _is_qline(inner))
+                    or _is_strong_qline(inner)):
                 bounds.append({"line": i, "parts": [(None, _trim_question_text(inner))], "style": "问句"})
                 list_pending = False
                 list_active = False
@@ -1009,13 +1103,13 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                 new_q = True          # 跳号且问号收尾
         if new_q:
             # R9 标题粘连拆分
-            parts, cur_qid, rest = [], qid, qtext
+            parts, cur_qid, seg_start = [], qid, 0
             for m in RE_GLUED.finditer(qtext):
                 num = int(m.group(1))
                 if num == cur_qid + 1:
-                    parts.append((cur_qid, rest[:m.start(1)].rstrip()))
-                    cur_qid, rest = num, qtext[m.start(1):]
-            parts.append((cur_qid, rest))
+                    parts.append((cur_qid, qtext[seg_start:m.start(1)].rstrip()))
+                    cur_qid, seg_start = num, m.start(1)
+            parts.append((cur_qid, qtext[seg_start:].rstrip()))
             bounds.append({"line": i, "parts": parts, "style": "题号"})
             last_qid = parts[-1][0]
         prev_blank = False
@@ -1263,12 +1357,13 @@ def _split_answers(a_text: str, a_base: int, a_segs: list | None = None):
         if in_code:
             cur.append(i); continue
         inner = strip_bold(s)      # v2 增强：粗体问句行与普通问句行同口径判定
-        if (prev_blank and 0 < len(inner) <= 120 and not RE_LIST_ITEM.match(inner)
+        if (0 < len(inner) <= 120 and not RE_LIST_ITEM.match(inner)
                 and not RE_DECIMAL.match(inner)
                 and not inner.rstrip().endswith(("：", ":"))
                 and not _is_codeish(inner)
                 and _qnorm_len(inner) >= 6
-                and (RE_KPOINT.match(inner) or _is_qline(inner))):
+                and ((prev_blank and (RE_KPOINT.match(inner) or _is_qline(inner)))
+                     or _is_strong_qline(inner))):
             flush(starts[i])
             cur = [i]
         else:
@@ -1332,7 +1427,8 @@ def _overlap_len(a: List[Sequence[int]], b: List[Sequence[int]]) -> int:
     return total
 
 
-_RE_FENCE_SPLIT = re.compile(r'(```.*?```|~~~.*?~~~)', re.S)
+# 成对围栏与未闭合围栏（只开不关，OCR/docx 常见）都作为代码段原样保留。
+_RE_FENCE_SPLIT = re.compile(r'(```.*?(?:```|$)|~~~.*?(?:~~~|$))', re.S)
 _RE_SEPARATOR_LINE = re.compile(r'^[ \t]*(?:-{5,}|\*{3,}|_{3,})[ \t]*$', re.M)
 _RE_BLANK_RUN = re.compile(r'\n[ \t]*\n(?:[ \t]*\n)+')
 

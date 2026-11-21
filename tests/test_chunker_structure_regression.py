@@ -331,3 +331,55 @@ Reids 提供 list 和 set 操作，能作为消息队列平台。
     assert "异步队列" in qs[1]
     assert not any("dump.rdb" in q or "容灾性" in q or q.strip() == "队列" for q in qs)
     assert "dump.rdb" in v2["items"][0]["a"]
+
+
+def test_outline_run_missing_body_is_not_emitted():
+    """P2-2 (S0500)：章内目录区（连续层级编号、正文缺失）不产出空答案题目。"""
+    md = """## MyBatis 面试题总结
+
+5.2.1 #{}和${}的区别是什么？
+
+5.2.2 Xml 映射文件中，除了常见的 select|insert 标签，还有很多动态 sql 标签
+
+5.2.3 Mybatis 是如何进行分页的？分页插件的原理是什么？
+
+5.2.4 Mybatis 是否支持延迟加载？如果支持，它的实现原理是什么？
+
+5.2.5 Mybatis 都有哪些 Executor 执行器？它们之间的区别是什么？
+
+5.2.6 Mybatis 中如何指定使用哪一种 Executor 执行器？
+
+5.2.7 Mybatis 是否可以映射 Enum 枚举类？
+
+5.2.8 为什么说 Mybatis 是半自动 ORM 映射工具？它与全自动的区别在哪里？
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [x["q"] for x in v2["items"]]
+    assert not any("Executor" in q for q in qs)
+    assert not any("#{}" in q for q in qs)
+
+
+def test_outline_run_with_body_keeps_body_questions():
+    """P2-2 守卫：目录区后接正文区时，正文题目保留、目录条目不再重复产出。"""
+    md = """## MyBatis 面试题总结
+
+5.2.1 #{}和${}的区别是什么？
+
+5.2.2 Mybatis 是如何进行分页的？
+
+5.2.3 Mybatis 都有哪些 Executor 执行器？
+
+然后进入正文。
+
+5.2.2 Mybatis 是如何进行分页的？
+Mybatis 使用 RowBounds 进行内存分页，也可以使用 PageHelper 分页插件。
+
+5.2.3 Mybatis 都有哪些 Executor 执行器？
+有 SimpleExecutor、ReuseExecutor、BatchExecutor 三种，默认是 SimpleExecutor。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [x["q"] for x in v2["items"]]
+    assert sum("分页" in q for q in qs) == 1
+    assert sum("Executor" in q for q in qs) == 1
+    assert any("RowBounds" in x["a"] for x in v2["items"] if "分页" in x["q"])
+    assert any("SimpleExecutor" in x["a"] for x in v2["items"] if "Executor" in x["q"])

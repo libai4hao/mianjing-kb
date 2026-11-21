@@ -168,3 +168,91 @@ def test_d3_plain_answer_lists_stay_merged():
     items = chunker.chunk_v2(md)["items"]
     assert len(items) == 1, [it["q"] for it in items]
     assert "实现Runnable接口" in items[0]["a"]
+
+
+# ---------------- P1-3 题干换行续接（数学式/中文半句，金标 E_STEM_SPLIT） ----------------
+
+P13_MATH_PROOF = """16.,有 b1/a1,b2/a2,....,bn/an 共 n 个分数，分母同号，证明：
+
+（b1+b2+...+bn）/(a1+a2+...+an)的值在上面 n 个分数值最大制和最小值之间.
+"""
+
+P13_SHORT_STEM = """8.在字符串 S 中寻找最长的字符串 x，条件是 x 存在于 S 中。即是如：abcabcdcd 中的
+
+abc。
+"""
+
+P13_INTERR_STEM = """18.为什么计算机中多用二进制，１６进制也用在程序中．你认为有没有可能回出现多进制
+
+的计算机，为什么
+"""
+
+P13_GUARD = """1. 介绍进程与线程的
+
+进程是资源分配单位，线程是调度单位。
+"""
+
+
+def test_p13_math_proof_stem_rejoined():
+    items = chunker.chunk_v2(P13_MATH_PROOF)["items"]
+    assert len(items) == 1, [it["q"] for it in items]
+    assert "证明" in items[0]["q"] and "（b1+b2" in items[0]["q"], items[0]["q"]
+    assert "（b1+b2" not in items[0]["a"]
+
+
+def test_p13_short_stem_rejoined():
+    items = chunker.chunk_v2(P13_SHORT_STEM)["items"]
+    assert len(items) == 1, [it["q"] for it in items]
+    assert "abc。" in items[0]["q"], items[0]["q"]
+    assert "abc。" not in items[0]["a"]
+
+
+def test_p13_interrogative_split_stem_rejoined():
+    items = chunker.chunk_v2(P13_INTERR_STEM)["items"]
+    assert len(items) == 1, [it["q"] for it in items]
+    assert "的计算机，为什么" in items[0]["q"], items[0]["q"]
+
+
+def test_p13_answer_not_overjoined():
+    items = chunker.chunk_v2(P13_GUARD)["items"]
+    assert len(items) == 1, [it["q"] for it in items]
+    assert "资源分配单位" in items[0]["a"]
+    assert "资源分配单位" not in items[0]["q"]
+
+
+# ---------------- P1-4 编号粘连正文（RE_GLUED ≥3 个粘连编号，金标 S0496） ----------------
+
+P14_TRIPLE_GLUED = """5. ThreadPoolExecutor 类分析ThreadPoolExecutor 构造函数重要参数分析ThreadPoolExecutor 饱和策略6. 一个简单的线程池Demo: Runnable + ThreadPoolExecutor 7. 线程池原理分析
+"""
+
+P14_DOUBLE_GLUED = """## 2. 实现Runnable接口和Callable接口的区别3. 执行execute()方法和submit()方法的区别是什么呢？
+"""
+
+P14_GAP_GLUED = """5. 第一个问题8. 第八个问题
+"""
+
+
+def test_p14_triple_glued_numbering_split():
+    """金标 S0496：一行含 3 个粘连编号（5/6/7）应拆成 3 个独立题目，6 与 7 不再粘连。"""
+    items = chunker.chunk_v2(P14_TRIPLE_GLUED)["items"]
+    qs = [it["q"] for it in items]
+    assert len(items) == 3, qs
+    assert "ThreadPoolExecutor 类分析" in qs[0] and "饱和策略" in qs[0], qs[0]
+    assert qs[1].startswith("6.") and "一个简单的线程池Demo" in qs[1], qs[1]
+    assert "7. 线程池原理分析" not in qs[1], qs[1]
+    assert qs[2].startswith("7.") and "线程池原理分析" in qs[2], qs[2]
+
+
+def test_p14_double_glued_numbering_split():
+    """守卫：2 个粘连编号仍拆成 2 题，行为不回退。"""
+    items = chunker.chunk_v2(P14_DOUBLE_GLUED)["items"]
+    qs = [it["q"] for it in items]
+    assert len(items) == 2, qs
+    assert "实现Runnable接口" in qs[0]
+    assert qs[1].startswith("3.") and "submit" in qs[1], qs[1]
+
+
+def test_p14_gap_numbering_not_split():
+    """守卫：不连续编号（5 与 8）不得误拆。"""
+    items = chunker.chunk_v2(P14_GAP_GLUED)["items"]
+    assert len(items) == 1, [it["q"] for it in items]
