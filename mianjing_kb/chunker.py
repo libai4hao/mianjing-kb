@@ -74,6 +74,7 @@ render(md_text)：两步输出（第一步纯文本清单 ≤12 字/行，第二
 """
 from __future__ import annotations
 
+import bisect
 import re
 import unicodedata
 from collections import Counter
@@ -252,6 +253,14 @@ def _toc_mask(lines: List[str]) -> set[int]:
     saw_entry = False
     end = n
     ended_at_heading = False
+    # F7：预计算 H1/H2 行号索引，两处“后 5000 行内是否有 H12”的窗口扫描
+    # 从 O(n·5000) 降为 O(log n)；行为与逐行 any() 完全一致。
+    h12_idx = [i for i, x in enumerate(lines) if RE_MD_H12.match(x.strip())]
+
+    def _future_h12(j: int) -> bool:
+        pos = bisect.bisect_left(h12_idx, j)
+        return pos < len(h12_idx) and h12_idx[pos] < j + 5000
+
     for j in range(start + 1, n):
         s = lines[j].strip()
         if not s:
@@ -286,13 +295,12 @@ def _toc_mask(lines: List[str]) -> set[int]:
         # 避免把正文全部当作目录。
         if (saw_entry and not RE_TOC.search(s)
                 and (_match_question(s) or _is_qline(s))
-                and not any(RE_MD_H12.match(x.strip()) for x in lines[j:j + 5000])):
+                and not _future_h12(j)):
             end = j
             break
         # 无 Markdown 标题的 PDF 目录：连续页码后，首个不缩进、非目录样式行视为正文。
         # 但若后面 5000 行内还有 H1/H2，优先等真正的正文标题，避免目录页脚提前截断。
-        future_h12 = any(RE_MD_H12.match(x.strip()) for x in lines[j:j + 5000])
-        if (pages >= 3 and not future_h12 and not s.startswith((" ", "\t"))
+        if (pages >= 3 and not _future_h12(j) and not s.startswith((" ", "\t"))
                 and not RE_TOC.search(s) and len(CJK.findall(s)) >= 4):
             end = j
             break
