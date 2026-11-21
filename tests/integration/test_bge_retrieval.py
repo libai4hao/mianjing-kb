@@ -24,9 +24,16 @@ def db(tmp_path):
     path = tmp_path / "kb.db"
     con = sqlite3.connect(str(path))
     con.row_factory = sqlite3.Row
-    con.execute("CREATE TABLE questions(qid INTEGER PRIMARY KEY, doc_hash TEXT, q_text TEXT, "
-                "a_text TEXT, qtype TEXT, topic TEXT, difficulty INTEGER, tags_json TEXT, "
-                "position TEXT, quality TEXT, q_key TEXT, q_norm_hash TEXT)")
+    con.enable_load_extension(True)
+    sqlite_vec.load(con)
+    con.enable_load_extension(False)
+    con.executescript(
+        "CREATE TABLE documents(doc_hash TEXT PRIMARY KEY, file_name TEXT);"
+        "CREATE TABLE doc_contents(doc_id INTEGER PRIMARY KEY, md_rel TEXT, doc_hash TEXT, "
+        "mirror_hash TEXT, content TEXT);"
+        "CREATE TABLE questions(qid INTEGER PRIMARY KEY, doc_hash TEXT, q_text TEXT, "
+        "a_text TEXT, qtype TEXT, topic TEXT, difficulty INTEGER, tags_json TEXT, "
+        "position TEXT, quality TEXT, q_key TEXT, q_norm_hash TEXT);")
     rows = [
         (1, "MySQL 索引为什么用 B+ 树", "B+ 树叶子链表适合范围查询。", "MySQL", "d1", "n1"),
         (2, "Redis 持久化 RDB 和 AOF 的区别", "RDB 快照，AOF 日志。", "Redis", "d2", "n2"),
@@ -39,9 +46,12 @@ def db(tmp_path):
     E.create_vec_table(con)
     model = TextEmbedding(E.MODEL)
     vecs = list(model.embed([r[1] for r in rows]))
-    for (qid, *_rest), vec in zip(rows, vecs):
-        con.execute("INSERT INTO vec_questions(rowid, embedding) VALUES (?,?)",
-                    (qid, sqlite_vec.serialize_float32(vec)))
+    for row, vec in zip(rows, vecs):
+        qid, _text, _answer, topic, doc, norm = row
+        con.execute(
+            "INSERT INTO vec_questions(rowid, embedding, topic, qtype, difficulty, q_key) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (qid, sqlite_vec.serialize_float32(vec), topic, "八股", 3, f"{doc}:{norm}"))
     E.write_vec_meta(con)
     con.commit()
     E._MODEL = model
