@@ -1025,6 +1025,19 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                         list_pending = False
                         last_problem_mark = False
                         continue
+            # F4a（金标 075 分⻚/分段）：PDF 粘连的“节标题+面试官问句”整行，
+            # 题号被 RE_DECIMAL 吞掉后真问题随行丢失/被吸入上一题答案。
+            # 剥出面试官问句部分成题，节标题前缀丢弃。
+            m_iv = re.search(r'(?:⾯试官|面试官|追问|继续问|接着问)\s*[：:]\s*(.+)$', s)
+            if m_iv and _is_qline(m_iv.group(1).strip()):
+                bounds.append({"line": i,
+                               "parts": [(None, _trim_question_text(m_iv.group(1).strip()))],
+                               "style": "问句"})
+                list_active = False
+                list_pending = False
+                prev_blank = False
+                last_problem_mark = False
+                continue
             # 无编号章节标题（面经里的“阿里二面/HR面”）重置题号上下文：
             # 下一节的 1. 虚函数/2. ... 不能被上一节的 20 判成列表。
             if _looks_section_line(s):
@@ -1111,6 +1124,18 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             qtext.strip()))
         # review2：明确问句/任务语义优先于题号连续性（跨章节跳号不再吞题）。
         explicit_question = _has_question_intent(qtext)
+        # F4b（金标 075 分⻚/分段）：qnorm<6 且冒号结尾的顺延编号标题
+        # （“## 2. 区别 ：”）是答案小节标签，不是题——留在父题答案，否则
+        # 碎片题偷走答案后半。_is_question_heading 会因“区别”关键词放行，
+        # 故在 new_q 之前拦。无冒号的短标题（“下一题”）不受影响。
+        if (md_num_heading and _qnorm_len(qtext) < 6
+                and qtext.rstrip().endswith(("：", ":"))
+                and not explicit_question):
+            list_active = False
+            list_pending = False
+            prev_blank = False
+            last_problem_mark = False
+            continue
         # 显式 Markdown 编号题头（`## 11. Oracle JDK 和 OpenJDK 的对比`）即使没有
         # 问词也是题；答案小节/章节标题除外。答案要点会在父题下重启编号
         # （`## 1、只有一个文件 dump.rdb…` 紧跟 `## 38、…？`），qid<=last_qid

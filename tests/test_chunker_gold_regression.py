@@ -161,3 +161,42 @@ def test_substantive_answer_not_replaced_by_ghost():
     assert len(jvm) == 1, "实质答案在前、幽灵在后时应丢弃幽灵"
     assert "虚拟机" in jvm[0]["a"], "实质答案应保留"
     assert "运⾏时常量池" not in jvm[0]["a"], "幽灵答案不应替换实质答案"
+
+
+# ---------------------------------------------------------------- T4 / F4
+# 075 分⻚/分段：PDF 粘连“节标题+面试官问句”整行被丢弃（真问题丢失），
+# 随后 “## 2. 区别 ：” 因顺延编号 bypass 成碎片题，偷走答案后半。
+
+DOC_INTERVIEWER_GLUED = """# ⾯试题
+
+1. 什么是虚拟内存？
+
+虚拟内存是操作系统提供的⼀种内存抽象。
+
+3.4 分⻚机制和分段机制的共同点和区别! ⾯试官 ： 分⻚机制和分段机制有哪些共同点和区别呢？
+
+分⻚和分段都是内存管理⽅式。
+
+## 1. 共同点 ：
+
+都是连续的。
+
+## 2. 区别 ：
+
+⻚的⼤⼩是固定的，由操作系统决定；⽽段的⼤⼩不固定。
+"""
+
+
+def test_interviewer_glued_question_recovered():
+    items = chunker.chunk_v2(DOC_INTERVIEWER_GLUED)["items"]
+    iv = [it for it in items
+          if "共同点和区别" in it["q"] and "⾯试官" not in it["q"]]
+    assert iv, "粘连行里的面试官真问题应被剥出成题"
+    a = iv[0]["a"]
+    assert "都是连续的" in a, "共同点内容应留在该题答案"
+    assert "⼤⼩是固定的" in a, "区别内容应留在该题答案（不被碎片题偷走）"
+    assert not any(it["q"].strip() in ("区别 ：", "区别:", "区别") for it in items), \
+        "碎片标签不应成题"
+    vm = [it for it in items if "虚拟内存" in it["q"]]
+    assert vm, "上一题应保留"
+    assert "分⻚" not in vm[0]["a"], "粘连行不应被吸入上一题答案"
