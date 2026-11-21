@@ -116,3 +116,48 @@ def test_toc_h12_entries_masked():
     body_q = [it for it in items if "Java 语⾔有哪些特点" in it["q"]]
     assert body_q, "正文题应保留"
     assert "封装" in body_q[0]["a"], "正文题答案应完整"
+
+
+# ---------------------------------------------------------------- T3 / F2
+# 评审评论2：同题干去重不吞目录幽灵。TOC 逃逸条目（答案=目录邻行垃圾，
+# 如“运⾏时常量池\\n直接内存”）与正文真身并存时，去重应保留实质答案。
+
+DOC_GHOST_DUP = """# ⾯试题
+
+1. 什么是 JVM？
+
+运⾏时常量池
+直接内存
+
+2. 什么是 JVM？
+
+JVM 是 Java 虚拟机，负责把字节码解释或编译成机器码执⾏。
+"""
+
+DOC_GHOST_DUP_REVERSE = """# ⾯试题
+
+1. 什么是 JVM？
+
+JVM 是 Java 虚拟机，负责把字节码解释或编译成机器码执⾏。
+
+2. 什么是 JVM？
+
+运⾏时常量池
+直接内存
+"""
+
+
+def test_ghost_answer_replaced_by_substantive():
+    items = chunker.chunk_v2(DOC_GHOST_DUP)["items"]
+    jvm = [it for it in items if "JVM" in it["q"]]
+    assert len(jvm) == 1, "幽灵答案与实质答案同题干时应合并为一条"
+    assert "虚拟机" in jvm[0]["a"], "应保留实质答案"
+    assert "运⾏时常量池" not in jvm[0]["a"], "目录邻行垃圾不应留为答案"
+
+
+def test_substantive_answer_not_replaced_by_ghost():
+    items = chunker.chunk_v2(DOC_GHOST_DUP_REVERSE)["items"]
+    jvm = [it for it in items if "JVM" in it["q"]]
+    assert len(jvm) == 1, "实质答案在前、幽灵在后时应丢弃幽灵"
+    assert "虚拟机" in jvm[0]["a"], "实质答案应保留"
+    assert "运⾏时常量池" not in jvm[0]["a"], "幽灵答案不应替换实质答案"

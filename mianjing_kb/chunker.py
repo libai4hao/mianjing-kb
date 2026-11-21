@@ -1409,6 +1409,19 @@ def _conf_of(style: str, q_text: str) -> str:
     return "high" if _is_qline(q_text) else "low"
 
 
+def _toc_ghost_answer(a: str) -> bool:
+    """目录幽灵答案：1-6 个短行、全无句读标点（F2，评审评论2）。
+
+    形态来自目录条目的邻行（“运⾏时常量池\\n直接内存”），不是真答案。
+    同题干去重时幽灵让位给实质答案，兜住 TOC 掩码逃逸的条目。
+    """
+    lines = [x.strip() for x in a.splitlines() if x.strip()]
+    if not 1 <= len(lines) <= 6:
+        return False
+    return all(len(x) <= 24 and not re.search(r"[。！？!?；;：:]", x)
+               for x in lines)
+
+
 def _split_answers(a_text: str, a_base: int, a_segs: list | None = None):
     """v2 后置切分：a_text 内"空行前置的独立问句/考点行"另起新题（R2' 守卫）。
 
@@ -1582,7 +1595,16 @@ def chunk_v2(md_text: str) -> Dict:
             items_after.append(it)
             continue
         old = dedup[key]
-        if not old["a"].strip() and it["a"].strip():
+        # F2（评审评论2）：幽灵答案（目录邻行垃圾）让位给实质答案，
+        # 必须先于空答案规则，否则“空答案被幽灵替换”会复活幽灵。
+        old_ghost = _toc_ghost_answer(old["a"])
+        new_ghost = _toc_ghost_answer(it["a"])
+        if old_ghost and not new_ghost:
+            items_after[items_after.index(old)] = it
+            dedup[key] = it
+        elif new_ghost and not old_ghost:
+            continue
+        elif not old["a"].strip() and it["a"].strip():
             items_after[items_after.index(old)] = it
             dedup[key] = it
         elif old["a"].strip() and not it["a"].strip():
