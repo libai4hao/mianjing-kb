@@ -8,6 +8,12 @@
 
 ## 2026-11-23
 
+- **复盘处置（`docs/48`）**：`kb status` 对过期门禁报告改输出 `verdict=INVALID（报告 PASS 已过期）`（原样打印
+  PASS 会误导）；`docs/32` 门禁表加"实际强制"列并换新基线（19,913 / canonical 11,002 / 标签 36）；
+  新增 `mianjing_kb.chunk_regress`（20 篇固定 `doc_hash`，题数/空答案/弱题/probe 四项 + 容差判定，
+  基线 9,858 题），改切题器前后可比；补 `test_seed_persists_without_caller_commit`（写库后关连接重读，
+  防 `--seed` 回滚复发）；删 0 引用模块 `baseline_stats` / `label_samples`，`docs/33` 收录 12 个
+  `python -m` 入口；8 篇文档补状态头并进索引，`doc_audit` 恢复 `[ok]`。
 - **项目复盘（`docs/47`）**：只出结论不改代码。判定三处过度设计（G6b 金标空转、99 区/`pilot5000` 线、
   文档与词表治理超前于数据）、一处真实跑偏（36/19,913 标签覆盖 vs 60 篇文档 10 个门禁）、
   错漏按 P0/P1/P2 分级（P0：26.4% 空答案 + 切块标题题 + 门禁 `STALE` 仍显示 `PASS` 且 G6/G6b 不在

@@ -64,6 +64,19 @@ def test_gate_report_stale_when_db_changes(mini_env):
     data = ks.collect()
     assert data["gates"]["state"] == "STALE"
     assert any("kb" in r for r in data["gates"]["stale_reasons"])
+    # P0-2：过期报告里的 PASS 不能当成结论（docs/47）
+    assert data["gates"]["effective_verdict"] == "INVALID"
+    text = ks.render_text(data)
+    assert "INVALID" in text and "已过期" in text
+
+
+def test_gate_line_marks_stale_verdict_invalid():
+    stale = ks._gate_line({"state": "STALE", "verdict": "PASS", "stale": True,
+                           "effective_verdict": "INVALID", "at": "2026-11-23T02:34:09"})
+    assert "INVALID" in stale and "已过期" in stale
+    fresh = ks._gate_line({"state": "PASS", "verdict": "PASS", "stale": False,
+                           "effective_verdict": "PASS", "at": "2026-11-23T03:00:00"})
+    assert "verdict=PASS" in fresh and "INVALID" not in fresh
 
 
 def test_missing_kb_does_not_crash(tmp_path, monkeypatch):

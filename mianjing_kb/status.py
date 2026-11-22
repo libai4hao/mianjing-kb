@@ -226,7 +226,10 @@ def _gate_summary(build_dir: Path, kb_id: dict, out_id: dict) -> dict:
     if not stale and age is not None and age > STALE_SEC:
         # 文件旧但库没变仍是有效结论；单独标 age 供人判断，不升级为 STALE
         pass
+    # 过期报告的 verdict 不作数：库里已变，PASS 是对旧库的结论（P0-2，docs/47）
+    effective = "INVALID" if stale else summary.get("verdict")
     return {"present": True, "state": state, "verdict": summary.get("verdict"),
+            "effective_verdict": effective,
             "at": summary.get("at"), "age_sec": age, "stale": stale,
             "stale_reasons": reasons, "gates": summary.get("gates"),
             "hard_fail": summary.get("hard_fail")}
@@ -331,6 +334,15 @@ def _fmt(n) -> str:
     return "-" if n is None else str(n)
 
 
+def _gate_line(gates: dict) -> str:
+    """门禁一行：过期报告的原 verdict 不作数（P0-2，docs/47）。"""
+    state = gates.get("state")
+    verdict = gates.get("effective_verdict") or gates.get("verdict")
+    if gates.get("stale") and gates.get("verdict"):
+        verdict = f"INVALID（报告 {gates['verdict']} 已过期）"
+    return f"  {state}  verdict={verdict}  at={gates.get('at')}"
+
+
 def render_text(data: dict) -> str:
     kb = data["kb"]
     src = kb.get("source") or {}
@@ -370,7 +382,7 @@ def render_text(data: dict) -> str:
         f"标签行 {_fmt(ret.get('question_tags'))}",
         "",
         "[门禁]",
-        f"  {gates.get('state')}  verdict={gates.get('verdict')}  at={gates.get('at')}",
+        _gate_line(gates),
     ]
     astate = qs.get("by_answer_state") or {}
     if astate:

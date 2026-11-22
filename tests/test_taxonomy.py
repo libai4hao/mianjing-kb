@@ -40,6 +40,22 @@ def test_taxonomy_add_and_disable(conn):
     assert "Netty" not in taxonomy.load(conn)["tags"]
 
 
+def test_seed_persists_without_caller_commit(tmp_path):
+    """P1-2（docs/47）：--seed 曾只 INSERT 不 commit，打印 seeded 却回滚。
+
+    断言口径是"写完关连接、重开再读"，不是"同一连接里能看到"。
+    """
+    path = tmp_path / "seed.sqlite"
+    expected = len(taxonomy.load()["tags"])
+    c = db.connect(path)
+    taxonomy.seed(c, only_if_empty=False)       # 013 迁移可能已灌过一部分，只看最终行数
+    c.close()                                   # 故意不显式 commit
+    c2 = db.connect(path, create=False)
+    rows = c2.execute("SELECT COUNT(*) FROM label_taxonomy").fetchone()[0]
+    c2.close()
+    assert rows == expected
+
+
 def test_prompt_uses_taxonomy_groups(conn):
     tax = taxonomy.load(conn)
     prompt = bl.build_system_prompt(("JVM", "Redis", "其他"), tax)
