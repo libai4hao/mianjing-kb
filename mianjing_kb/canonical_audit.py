@@ -1,0 +1,227 @@
+# -*- coding: utf-8 -*-
+"""canonical 正向审计：按 Jaccard 契约核对"该合的能合"。
+
+`canonical` 的合并契约是 2-gram Jaccard >= `ATTACH_JAC`（默认 0.7）。小规模测试里
+0 合并只说明"没有重复件、不误合"，不能说明"有重复件时会合"。本模块把这件事做成可复跑的审计：
+
+  1. 契约召回：全量枚举 jaccard>=阈值 的题对，看是否都落在同一簇（跨簇 = 漏合）
+  2. 链式副作用：同簇内 jaccard<阈值 的对（A~B、B~C 传递合簇）有多少
+  3. 改写证据：同簇且 `q_norm` 不同的对数 + 样例（"换了说法仍合上"的实证）
+  4. 候选带：jaccard 落在 [band, 阈值) 的题对数量（全量重建不登记人工候选，只作计数）
+
+用法：
+    python -m mianjing_kb.canonical_audit --db build/kb.sqlite
+    python -m mianjing_kb.canonical_audit --db build/kb.sqlite --out build/canonical_audit.json
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from mianjing_kb import canonical as cn  # noqa: E402
+from mianjing_kb import report as rp  # noqa: E402
+
+MAX_PAIRS_DEFAULT = 80_000_000
+
+
+def _ro_uri(path: Path) -> str:
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
+def _within_stats(qs: list[dict], clusters: list[dict], grams: dict,
+                  jac: float, samples: int) -> dict:
+    """同簇成对统计：总对数、低于阈值的链式对、归一化文本不同的改写对。"""
+    pairs = below = paraphrase = 0
+    rewrite_samples: list[dict] = []
+    chain_samples: list[dict] = []
+    sampled_rewrite: set[int] = set()
+    sampled_chain: set[int] = set()
+    for ci, c in enumerate(clusters):
+        ms = c["members"]
+        for x in range(len(ms)):
+            for y in range(x + 1, len(ms)):
+                i, j = ms[x], ms[y]
+                same = cn.jaccard(grams[i], grams[j])
+                pairs += 1
+                if same < jac:
+                    below += 1
+                    if len(chain_samples) < samples and ci not in sampled_chain:
+                        sampled_chain.add(ci)
+                        chain_samples.append({"jac": round(same, 3), "a": qs[i]["q_text"][:80],
+                                              "b": qs[j]["q_text"][:80]})
+                if qs[i]["q_norm"] != qs[j]["q_norm"]:
+                    paraphrase += 1
+                    # 每簇只取一条：否则一个 19 成员的 Spring 簇会占满 8 条样例。
+                    if (len(rewrite_samples) < samples and same >= jac
+                            and ci not in sampled_rewrite):
+                        sampled_rewrite.add(ci)
+                        rewrite_samples.append({"jac": round(same, 3), "a": qs[i]["q_text"][:80],
+                                                "b": qs[j]["q_text"][:80]})
+    return {"pairs": pairs, "below": below, "paraphrase": paraphrase,
+            "rewrite_samples": rewrite_samples, "chain_samples": chain_samples}
+
+
+def _enumerate_pairs(qs: list[dict], grams: dict, owner: dict,
+                     jac: float, band: float, max_pairs: int, samples: int) -> dict:
+    """倒排前缀过滤后逐对精算 jaccard：统计契约对是否同簇、候选带对数。
+
+    前缀过滤沿用 canonical 的 `_prefix_grams`（Jaccard>=t 的两集合必有共享 token
+    落在双方前缀），所以它枚举的是"可能 >=t 的全部对"，不是抽样。
+    """
+    n = len(qs)
+    index: dict[str, list[int]] = defaultdict(list)
+    for i, g in grams.items():
+        for token in cn._prefix_grams(g, jac):
+            index[token].append(i)
+    checked = compared = 0
+    high = high_same = band_pairs = 0
+    violators: list[dict] = []
+    seen: set[int] = set()
+    for lst in index.values():
+        if len(lst) < 2:
+            continue
+        for x in range(len(lst)):
+            i = lst[x]
+            gi = grams[i]
+            for y in range(x + 1, len(lst)):
+                j = lst[y]
+                if i == j:
+                    continue
+                compared += 1
+                if compared > max_pairs:
+                    raise SystemExit(f"候选对超过上限 {max_pairs}，调大 --max-pairs 或收窄 --jac")
+                key = i * n + j if i < j else j * n + i
+                if key in seen:
+                    continue
+                sim = cn.jaccard(gi, grams[j])
+                if sim >= band:
+                    # 只有跨过候选带的 pair 才值得去重：低于带的对重复精算很便宜，
+                    # 而把它们全塞进 set 会让 2 万题的审计吃掉几百 MB。
+                    seen.add(key)
+                    if sim >= jac:
+                        high += 1
+                        checked += 1
+                        if owner[i] == owner[j]:
+                            high_same += 1
+                        elif len(violators) < samples:
+                            violators.append({"jac": round(sim, 3),
+                                              "a": qs[i]["q_text"][:80],
+                                              "b": qs[j]["q_text"][:80]})
+                    else:
+                        band_pairs += 1
+    return {"compared": compared, "high": high, "high_same": high_same,
+            "band": band_pairs, "violators": violators}
+
+
+def audit_questions(qs: list[dict], jac: float = cn.ATTACH_JAC,
+                    band: float = cn.CANDIDATE_JAC,
+                    max_pairs: int = MAX_PAIRS_DEFAULT, samples: int = 8) -> dict:
+    """对一批题目（report.load_questions 口径）做正向合并审计。"""
+    clusters = rp.build_clusters(qs, 24, jac)
+    owner: dict[int, int] = {}
+    for cid, c in enumerate(clusters):
+        for i in c["members"]:
+            owner[i] = cid
+    grams = {i: cn._grams(q["q_norm"]) for i, q in enumerate(qs)}
+    inside = _within_stats(qs, clusters, grams, jac, samples)
+    enum = _enumerate_pairs(qs, grams, owner, jac, band, max_pairs, samples)
+    size_dist: dict[str, int] = defaultdict(int)
+    for c in clusters:
+        size_dist[str(len(c["members"]))] += 1
+    return {
+        "questions": len(qs),
+        "clusters": len(clusters),
+        "merged_away": len(qs) - len(clusters),
+        "multi_doc_clusters": sum(1 for c in clusters if c["n_docs"] >= 2),
+        "cluster_size_dist": dict(sorted(size_dist.items(), key=lambda kv: int(kv[0]))),
+        "pairs_within_cluster": inside["pairs"],
+        "pairs_within_below_jac": inside["below"],
+        "pairs_within_paraphrase": inside["paraphrase"],
+        "candidate_comparisons": enum["compared"],
+        "pairs_jaccard_ge_jac": enum["high"],
+        "pairs_ge_jac_same_cluster": enum["high_same"],
+        "pairs_ge_jac_cross_cluster": enum["high"] - enum["high_same"],
+        "pairs_in_band": enum["band"],
+        "rewrite_samples": inside["rewrite_samples"],
+        "chain_samples": inside["chain_samples"],
+        "violators": enum["violators"],
+    }
+
+
+def audit_db(db_path: Path, jac: float = cn.ATTACH_JAC,
+             band: float = cn.CANDIDATE_JAC,
+             max_pairs: int = MAX_PAIRS_DEFAULT, samples: int = 8) -> dict:
+    import sqlite3
+    con = sqlite3.connect(_ro_uri(db_path), uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        qs = rp.load_questions(con)
+    finally:
+        con.close()
+    out = audit_questions(qs, jac, band, max_pairs, samples)
+    out["db"] = str(Path(db_path).resolve())
+    return out
+
+
+def render_md(data: dict) -> str:
+    ok = data["pairs_ge_jac_cross_cluster"] == 0
+    lines = [
+        "# canonical 正向合并审计", "",
+        f"- 库：`{data.get('db', '')}`",
+        f"- 题 {data['questions']} → 簇 {data['clusters']}（合并掉 {data['merged_away']}，"
+        f"跨文档簇 {data['multi_doc_clusters']}）",
+        f"- 契约召回（jaccard≥阈值 的题对是否同簇）："
+        f"**{data['pairs_ge_jac_same_cluster']}/{data['pairs_jaccard_ge_jac']}**"
+        f"（跨簇 {data['pairs_ge_jac_cross_cluster']}）→ {'PASS' if ok else 'FAIL'}",
+        f"- 同簇但 jaccard 低于阈值（链式传递）：{data['pairs_within_below_jac']}"
+        f"/{data['pairs_within_cluster']}",
+        f"- 同簇且归一化文本不同（换说法仍合）：{data['pairs_within_paraphrase']}",
+        f"- 候选带 [{data.get('band', cn.CANDIDATE_JAC)}, 阈值)：{data['pairs_in_band']} 对（全量只拆不合）",
+        "",
+    ]
+    if data["rewrite_samples"]:
+        lines += ["## 改写合并样例", ""]
+        for s in data["rewrite_samples"]:
+            lines.append(f"- jac={s['jac']}：`{s['a']}` ↔ `{s['b']}`")
+        lines.append("")
+    if data["chain_samples"]:
+        lines += ["## 链式传递样例（同簇但低于阈值）", ""]
+        for s in data["chain_samples"]:
+            lines.append(f"- jac={s['jac']}：`{s['a']}` ↔ `{s['b']}`")
+        lines.append("")
+    if data["violators"]:
+        lines += ["## 漏合样例（jaccard 达标却不同簇）", ""]
+        for s in data["violators"]:
+            lines.append(f"- jac={s['jac']}：`{s['a']}` ↔ `{s['b']}`")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="canonical 正向合并审计（只读）")
+    ap.add_argument("--db", required=True, help="kb.sqlite 路径")
+    ap.add_argument("--jac", type=float, default=cn.ATTACH_JAC)
+    ap.add_argument("--band", type=float, default=cn.CANDIDATE_JAC)
+    ap.add_argument("--max-pairs", type=int, default=MAX_PAIRS_DEFAULT)
+    ap.add_argument("--samples", type=int, default=8)
+    ap.add_argument("--out", default="", help="JSON 输出路径（可选）")
+    ap.add_argument("--md", default="", help="Markdown 输出路径（可选）")
+    args = ap.parse_args(argv)
+    data = audit_db(Path(args.db), args.jac, args.band, args.max_pairs, args.samples)
+    data["band"] = args.band
+    text = json.dumps(data, ensure_ascii=False, indent=1)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+    if args.md:
+        Path(args.md).write_text(render_md(data), encoding="utf-8")
+    print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

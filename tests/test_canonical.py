@@ -374,3 +374,45 @@ def test_incremental_does_not_store_unclassified_topic(mini_db, capsys):
     row = mini_db.execute(
         "SELECT topic FROM canonical_questions WHERE title_norm='完全新的未分类题'").fetchone()
     assert row is not None and row["topic"] is None
+
+
+def test_paraphrase_variants_merge_across_docs(mini_db, capsys):
+    """正向能力：同一道题的不同写法（不是完全同文），jaccard≥阈值时必须跨文档合成一簇。
+
+    这是小规模测试"0 合并"没覆盖到的一半：0 合并只能证明"不误合"。
+    """
+    long_form = "mysql索引为什么用b+树不用b树"
+    short_form = "mysql索引为什么用b+树"
+    assert cn.similarity(long_form, short_form) >= cn.ATTACH_JAC
+    _add_source_and_question(mini_db, "h8", 1, long_form, "h8:idx", topic="MySQL", collection="c8")
+    _add_source_and_question(mini_db, "h9", 1, short_form, "h9:idx", topic="MySQL", collection="c9")
+    assert cn.main([]) == 0
+
+    cids = {r["q_key"]: r["canonical_id"] for r in mini_db.execute(
+        "SELECT q_key, canonical_id FROM question_variants").fetchall()}
+    assert cids["h8:idx"] == cids["h9:idx"]
+    members = mini_db.execute("SELECT COUNT(*) FROM canonical_dependents WHERE canonical_id=?",
+                              (cids["h8:idx"],)).fetchone()[0]
+    assert members == 2
+    cluster = mini_db.execute("SELECT witness FROM canonical_questions WHERE canonical_id=?",
+                              (cids["h8:idx"],)).fetchone()
+    assert cluster["witness"] == 2                      # c8 + c9 两个来源
+
+
+def test_near_miss_band_variants_stay_split(mini_db, capsys):
+    """口径边界（不是 bug）：字面差异大到 jaccard 落在 0.65–0.7 的改写会被拆开。
+
+    `什么是springmvc` / `springmvc是什么` 是同题换语序，相似度 0.692 < 0.7：
+    全量重建按契约不合并，也不登记人工候选（merge_candidates=0）——这是当前能力上限。
+    """
+    a, b = "什么是springmvc", "springmvc是什么"
+    assert cn.similarity(a, b) < cn.ATTACH_JAC
+    _add_source_and_question(mini_db, "h8", 1, a, "h8:mvc", topic="JVM", collection="c8")
+    _add_source_and_question(mini_db, "h9", 1, b, "h9:mvc", topic="JVM", collection="c9")
+    assert cn.main([]) == 0
+
+    cids = {r["q_key"]: r["canonical_id"] for r in mini_db.execute(
+        "SELECT q_key, canonical_id FROM question_variants").fetchall()}
+    assert cids["h8:mvc"] != cids["h9:mvc"]
+    assert mini_db.execute("SELECT COUNT(*) FROM merge_candidates").fetchone()[0] == 0
+
