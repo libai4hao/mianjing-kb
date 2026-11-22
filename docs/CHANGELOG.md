@@ -1,10 +1,26 @@
 # 工程变更日志（CHANGELOG）
 
-> 状态：现行 · 最后更新：2026-11-20 · 适用版本：v2-R3
+> 状态：现行 · 最后更新：2026-11-22 · 适用版本：v2-R3
 >
 > 只记**工程变更**（代码、门禁、依赖、文档结构），不记数据快照——题数、库大小会随重建漂移，
 > 一律以 `docs/29-数据基线与统计口径-2026-11-19.md` 为准。历史里程碑按日期倒序。
 > 2026-11-16 之前的记录见 `docs/archive/` 与 git 历史，本表从外部 review 落地开始。
+
+## 2026-11-22
+
+- **切题逻辑金标驱动修复（F1–F7，7 提交 `2a9a58d..21dc1d5`）**：依据人工金标 100 条样本中
+  5 篇文档 20 条的复核，修复 8 类结构性错误中的 8 条（TOC 条目被当题、目录幽灵答案与真身
+  并存、PDF 粘连层级节标题导致答案 bleed、面试官嵌入问句丢失 + 短标签碎片偷答案、
+  编号标题无问句语义门槛把技能罗列/叙述行/列表项当题）。新增 `_toc_density`、`_toc_ghost_answer`、
+  `_heading_questionish`、`hier_section` 硬边界、`last_qid` 单调推进、`RE_QUESTION_INTENT`
+  补"说一下"；`_toc_mask` 窗口扫描改 H12 索引 + bisect（O(n·5000)→O(n+log n)）。
+  新增 `tests/test_chunker_gold_regression.py`（每任务 TDD，先红后绿）。
+  公共 API 与输出 schema 不变。20 条金标对账 8 条结构性错误全部不再复现；075 文档
+  幽灵/假题 276→225；coverage 0.992→0.828 是**诚实下降**——旧值把 bleed 内容计入
+  covered 虚高，层级节标题按标注口径（E_SECTION_HEADER）归 leftovers，非回归。
+  全量 pytest 725 passed / 7 skipped / 1 failed（唯一失败为基线既有、与 chunker 无关的
+  `test_doc_convert_isolation.py::test_hanging_file_is_recorded_and_batch_continues`）。
+  详见 `docs/superpowers/plans/2026-11-22-chunker-gold-fixes.md`。
 
 ## 2026-11-20
 
