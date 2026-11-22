@@ -24,6 +24,13 @@
 - **G4 门禁的一次真实拦截**：标签 merge 后直接 `refresh` 被 G4 判 `vec_metadata_mismatch 36 rows`
   并阻止切换（线上库未动），`--reembed` 后恢复 PASS——向量 metadata 里带 topic/position/tags 快照，
   改标签必须重嵌入。
+- **词表补全（`docs/46`）**：`meta/tag_vocab.yaml` 新增一级组「产品与运营」（9 项）「求职与行为」（8 项），
+  生产 `label_taxonomy` 由 83 行 / 10 组 → 100 行 / 12 组；`meta/topic_rules.yaml` 的 `title_only_rules`
+  在 `非技术` 兜底前插「产品运营」「HR与求职」两条，topic 枚举 38 → 40。同时修三个"改了也不生效"的坑：
+  `taxonomy.prompt_lines()` 默认预算 `10 组 / 60 标签` 早已截断（改 14/110 + 新增不截断测试）；
+  `kb.taxonomy.seed()` 缺 `commit` 导致 `--seed` 打印 `seeded` 却回滚（补提交）；prompt 的"拿不准选其他"
+  改为按领域就近映射、`其他` 只作兜底。19 条被 G6 打回的 `其他` 题重打验证：`其他` 率 73.7% → 47.4%，
+  新主题归入 HR 2 条 + 产品运营 1 条。
 
 ## 2026-11-23（更早）
 

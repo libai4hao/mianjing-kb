@@ -77,7 +77,10 @@ def build_system_prompt(vocab: tuple[str, ...] = (), tax: dict | None = None) ->
     pos = "、".join(labelspec.positions())
     quality = "、".join(labelspec.quality_flags())
     rec = taxonomy.prompt_lines(tax)
-    topic_rule = (f"必须从词表中选恰好一个：{'、'.join(vocab)}；拿不准选其他"
+    topic_rule = (f"必须从词表中选恰好一个：{'、'.join(vocab)}；"
+                  "词表外领域按最接近的选（产品/需求/运营/增长→产品运营，"
+                  "HR/求职/自我介绍/职业规划/离职→HR与求职，非技术杂项→非技术）；"
+                  "确实无法归类才选其他"
                   if vocab else "2-8 字主题，如 Java基础/MySQL/Redis")
     return (
         "你是面试题标注器。阅读题目与答案片段，只输出 JSON 对象，格式：{"

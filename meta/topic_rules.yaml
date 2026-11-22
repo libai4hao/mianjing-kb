@@ -43,6 +43,8 @@ title_only_rules:
   - {re: '运维|DevOps|Kubernetes|K8s',    topic: 运维}
   - {re: '大数据|Hadoop|Spark|Flink|Hive|数据开发', topic: 大数据}
   - {re: '测试|测开|QA|自动化测试',          topic: 软件测试}
+  - {re: '产品经理|产品设计|PRD|需求分析|竞品|用户增长|数据运营|运营策略|用户运营|活动运营', topic: 产品运营}
+  - {re: 'HR|人力|招聘|职业规划|自我介绍|离职|薪酬|Offer|管培', topic: HR与求职}
   - {re: '产品|运营|销售|人力|行政|财务|投资|金融|市场|管培|非技术', topic: 非技术}
   - {re: 'Java|JAVA',                     topic: Java基础}
 

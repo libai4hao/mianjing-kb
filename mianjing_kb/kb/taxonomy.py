@@ -32,6 +32,8 @@ DEFAULT_GROUPS = {
     "算法与数据结构": ["二叉树", "动态规划", "排序", "算法复杂度", "手撕代码"],
     "项目与行为": ["项目追问", "难点与取舍", "职业规划"],
     "工程与质量": ["幂等", "限流", "熔断", "监控", "数据一致"],
+    "产品与运营": ["产品设计", "需求分析", "用户增长", "数据运营", "运营策略"],
+    "求职与行为": ["自我介绍", "求职动机", "薪资谈判", "面试复盘"],
 }
 
 
@@ -124,6 +126,7 @@ def seed(conn, *, only_if_empty: bool = True) -> int:
                 "VALUES (?,?,?,1,?)", (g["level1"], level2, json.dumps(sorted(syn), ensure_ascii=False),
                                       gi * 100 + ti))
             added += cur.rowcount
+    conn.commit()          # 不提交则 CLI 退出即回滚，--seed 变空操作
     return added
 
 
@@ -159,8 +162,11 @@ def export_yaml(conn, path: Path) -> Path:
     return path
 
 
-def prompt_lines(tax: dict | None = None, max_groups: int = 10, max_tags: int = 60) -> str:
-    """prompt 用的一二级分组摘要：`Java（JVM、集合…）；数据库（索引…）`。"""
+def prompt_lines(tax: dict | None = None, max_groups: int = 14, max_tags: int = 110) -> str:
+    """prompt 用的一二级分组摘要：`Java（JVM、集合…）；数据库（索引…）`。
+
+    预算按当前词表规模（12 组 / 100 项）留余量；新增分组后不要回落到截断。
+    """
     tax = tax or _yaml_snapshot()
     parts = []
     budget = max_tags

@@ -47,6 +47,15 @@ def test_prompt_uses_taxonomy_groups(conn):
     assert "position" in prompt and "canonical_q" in prompt
 
 
+def test_prompt_does_not_truncate_groups_or_tags(conn):
+    """新增一级分组后 prompt 必须全部带出，否则场景/HR 类问题只能落"其他"。"""
+    tax = taxonomy.load(conn)
+    lines = taxonomy.prompt_lines(tax)
+    for g in tax["groups"]:
+        assert f"{g['level1']}（" in lines
+        assert g["level2"][-1] in lines, g["level1"]  # 每组最后一项也没被预算砍掉
+
+
 def test_manual_template_and_import(conn, tmp_path):
     path = tmp_path / "manual.csv"
     out = bl.manual_template(conn, 2, path, seed=1)
