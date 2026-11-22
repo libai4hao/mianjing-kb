@@ -8,6 +8,10 @@
 
 ## 2026-11-23
 
+- **打标 60 条探针（`docs/48` §7）**：新词表 + 新 prompt 下随机 60 条待打标题，`other_topic_rate` 16.7%
+  （10/60，`docs/45` 同口径为 34.55%）；卡合并的只剩 `pending_review=8`，全部是越界上位词，成为 P1-3 的样本。
+- **补答 pilot（`docs/48` §6）**：30 `boundary_gap` + 20 `no_answer_source`，qwen3-8b，50 题 37.5 s、
+  拒答 12、答案中位 53 字；题干残缺居多，结论"不做全量补答"，先修切块。脚本 `scripts/pilot_answer_backfill.py`。
 - **复盘处置（`docs/48`）**：`kb status` 对过期门禁报告改输出 `verdict=INVALID（报告 PASS 已过期）`（原样打印
   PASS 会误导）；`docs/32` 门禁表加"实际强制"列并换新基线（19,913 / canonical 11,002 / 标签 36）；
   新增 `mianjing_kb.chunk_regress`（20 篇固定 `doc_hash`，题数/空答案/弱题/probe 四项 + 容差判定，
