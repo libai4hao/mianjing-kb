@@ -2,12 +2,12 @@
 
 ## 背景
 
-五轴 code review（报告：`D:\Project\my\vibe-ready-code\.review_mianjing\code_review_切题逻辑.md`）用当前 `chunk_v2` 实跑 5 篇金标原文（047/074/075/009/028）与 20 条人工金标对账：9 条已修复、8 条仍复现、3 条属内容质量。8 条复现错误归为 5 类结构性 Must fix。用户已确认"处理"，按 TDD 逐类修复。
+五轴 code review（报告：`<REVIEW_DIR>\code_review_切题逻辑.md`，仓库外评审辅助目录）用当前 `chunk_v2` 实跑 5 篇金标原文（047/074/075/009/028）与 20 条人工金标对账：9 条已修复、8 条仍复现、3 条属内容质量。8 条复现错误归为 5 类结构性 Must fix。用户已确认"处理"，按 TDD 逐类修复。
 
 涉及文件：
 - `mianjing_kb/chunker.py`（1639 行，唯一改动源）
 - `tests/test_chunker_gold_regression.py`（新建）
-- 辅助验证脚本：`D:\Project\my\vibe-ready-code\.review_mianjing\reconcile.py`（仓库外，不提交）
+- 辅助验证脚本：`<REVIEW_DIR>\reconcile.py`（仓库外，不提交；`<REVIEW_DIR>` 为评审辅助目录占位符）
 
 ## 目标与验收
 
@@ -27,10 +27,10 @@
 ## 基线（动手前先跑）
 
 ```powershell
-$PY = "C:\Users\li\.dsh\dsh-runtimes\dsh-next-primary-runtime\dependencies\python\python.exe"
-Set-Location D:\Project\my\vibe-work\mianjing-kb
+$PY = "<PYTHON>"   # 任一可用的 Python 3.11+ 解释器
+Set-Location <REPO_ROOT>   # 本仓库根目录
 & $PY -m pytest tests -q          # 记录既有失败清单（基线）
-& $PY D:\Project\my\vibe-ready-code\.review_mianjing\reconcile.py   # 记录当前 8 条复现
+& $PY <REVIEW_DIR>\reconcile.py   # 记录当前 8 条复现
 ```
 
 chunker 相关套件（每任务 GREEN 后必跑）：
@@ -157,7 +157,7 @@ chunker 相关套件（每任务 GREEN 后必跑）：
 ## 收尾验证
 
 1. 全量：`& $PY -m pytest tests -q`，对照基线无新失败。
-2. 金标：`& $PY D:\Project\my\vibe-ready-code\.review_mianjing\reconcile.py`——8 条复现错误全部消除、9 条已修复不回归、3 条内容质量类不变。
+2. 金标：`& $PY <REVIEW_DIR>\reconcile.py`——8 条复现错误全部消除、9 条已修复不回归、3 条内容质量类不变。
 3. 汇报：改动清单、测试结果、reconcile 前后对照、残余风险（两段式粘连残余、金标 100 条中未覆盖的 80 条建议后续全量对账）。
 
 ## 风险与回滚
