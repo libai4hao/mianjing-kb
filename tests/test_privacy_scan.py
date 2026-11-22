@@ -32,3 +32,10 @@ def test_noreply_github_mail_is_fine(tmp_path, monkeypatch):
 def test_placeholder_is_fine(tmp_path, monkeypatch):
     hits = _hits(tmp_path, monkeypatch, "d.md", "语料根：<CORPUS_ROOT>\\20-题库MD\n")
     assert hits == []
+
+
+def test_abs_path_any_drive_not_just_whitelist(tmp_path, monkeypatch):
+    hits = _hits(tmp_path, monkeypatch, "e.md",
+                 "临时目录：D:\\tmp\\x\n输出：E:\\work\\out\\a.log\n")
+    assert [h["rule"] for h in hits] == ["abs_path", "abs_path"]
+

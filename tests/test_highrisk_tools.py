@@ -64,7 +64,7 @@ def test_ocr_parse_range():
 
 def test_ocr_text_path_for_rel():
     from mianjing_kb.ocr_pages import text_path_for
-    p = text_path_for("01-Java基础\\甲.pdf", Path(r"D:\build\ocr_text"))
+    p = text_path_for("01-Java基础\\甲.pdf", Path(r"D:\build\ocr_text"))  # privacy-scan: allow 合成测试路径
     assert p.name == "甲.pdf.txt" and "01-Java基础" in p.parts
     assert str(p).endswith(".pdf.txt")              # 相对 rel + .txt 后缀
 
@@ -161,7 +161,7 @@ def test_purge_decision_guard():
     rows_q = [{"status": "quarantined", "src_path": str(corpus / "x.pdf")}]
     assert decide(rows_ok, corpus / "x.pdf") == "可删"
     assert decide(rows_q, corpus / "x.pdf") == "只有隔离副本"
-    assert decide(rows_ok, r"D:\elsewhere\x.pdf") == "保留副本不在语料根内"
+    assert decide(rows_ok, r"D:\elsewhere\x.pdf") == "保留副本不在语料根内"  # privacy-scan: allow 合成测试路径
     assert decide(rows_ok, corpus / "x.pdf", keep_exists=False) == "保留副本不存在"
 
 

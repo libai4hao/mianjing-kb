@@ -1,0 +1,47 @@
+#!/bin/sh
+# 隐私门禁（pre-push）：推送前扫描已跟踪文件里的本机绝对路径 / 个人信息。
+# 由 scripts/hooks/install.ps1 安装到 .git/hooks/pre-push；仓库里只保留这份源文件。
+# 找不到可用的 Python 时只告警、不拦推送，避免误伤（要指定解释器就设 KB_PYTHON）。
+set -u
+
+repo_root=$(git rev-parse --show-toplevel) || exit 0
+cd "$repo_root" || exit 0
+
+find_python() {
+    # 先看安装时写下的本机解释器（.git/hooks/pre-push-python，不入库）
+    if [ -f "$repo_root/.git/hooks/pre-push-python" ]; then
+        cand=$(head -n 1 "$repo_root/.git/hooks/pre-push-python" 2>/dev/null)
+        if [ -n "$cand" ] && [ -x "$cand" ] && "$cand" -c 'import mianjing_kb' >/dev/null 2>&1; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    fi
+    for cand in "${KB_PYTHON:-}" python python3 py; do
+        [ -n "$cand" ] || continue
+        if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import mianjing_kb' >/dev/null 2>&1; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
+    for cand in .venv/Scripts/python.exe .venv/bin/python; do
+        if [ -x "$cand" ] && "$cand" -c 'import mianjing_kb' >/dev/null 2>&1; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if ! py=$(find_python); then
+    echo "[pre-push] 没找到能导入 mianjing_kb 的 Python，跳过隐私门禁（可用 KB_PYTHON 指定）" >&2
+    exit 0
+fi
+
+"$py" -m mianjing_kb.privacy_scan
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "[pre-push] 隐私门禁未通过，推送已阻止：把本机绝对路径改成占位符后重试" >&2
+    echo "[pre-push] 确需临时跳过：git push --no-verify" >&2
+    exit 1
+fi
+exit 0

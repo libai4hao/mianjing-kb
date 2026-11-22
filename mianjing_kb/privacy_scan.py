@@ -34,7 +34,9 @@ TEXT_EXT = {".py", ".md", ".txt", ".toml", ".yaml", ".yml", ".json", ".sql", ".p
             ".cfg", ".ini", ".html", ".js", ".ts", ".css", ".gitignore", ""}
 
 RULES = [
-    ("abs_path", re.compile(r"[A-Za-z]:[\\/](?:Users|dev|utools|my-resource|Project|Infra)[\\/]")),
+    # 盘符 + 至少一级目录：不再只认 Users/dev/Project 这类白名单前缀，
+    # 否则 D:\tmp\x、E:\work\out 这种同样泄露本机布局的路径会漏检。
+    ("abs_path", re.compile(r"[A-Za-z]:[\\/][^\s\\/\"'`<>|]+[\\/]")),
     ("home_path", re.compile(r"(?:[A-Za-z]:[\\/]Users[\\/]|/home/)[^\s\\/]+")),
     ("personal_mail", re.compile(r"[\w.+-]+@(?:qq|163|126|gmail|outlook|foxmail|sina|hotmail)\.com",
                                  re.IGNORECASE)),

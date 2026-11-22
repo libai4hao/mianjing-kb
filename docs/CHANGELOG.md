@@ -8,6 +8,17 @@
 
 ## 2026-11-22
 
+- **公开仓库禁写本机绝对路径：规则加宽 + 推送前门禁**：`privacy_scan` 的 `abs_path` 原来只认
+  `Users/dev/utools/my-resource/Project/Infra` 这几个白名单前缀，盘符后接别的目录（如 `TMP` 下两级）
+  这类同样暴露本机布局的路径直接漏检；改成“盘符 + 至少一级目录”后全仓复扫，捞出 19 处历史遗留：`docs/35` 与
+  `docs/CHANGELOG` 里的试跑目录（盘符 + `pilot` 两级）统一改成 `<PILOT_ROOT>` 占位符，`tests/test_highrisk_tools.py`
+  的两处合成测试路径按行标注 `privacy-scan: allow`。新增 `scripts/hooks/pre-push`（POSIX sh）+
+  `scripts/hooks/install.ps1`（UTF-8 BOM、兼容 5.1/7）：推送前自动跑 `python -m mianjing_kb.privacy_scan`，
+  命中即 `exit 1` 阻断；解释器优先读 `.git/hooks/pre-push-python`（安装时探测写入，避免仓库出现本机绝对路径），
+  再回落 `KB_PYTHON` → `python`/`python3`/`py` → `.venv`，全不可用只告警不拦。探针实测：
+  `docs/_tmp_privacy_probe.md` 写入一条盘符 + 两级目录的假路径并暂存后，钩子报 `[scan] 271 个文件，命中 1 处`、`exit 1`；
+  清理后全仓 270 文件 0 命中。配套 `tests/test_privacy_scan.py` 补“任意盘符路径都命中、占位符不误伤”用例。
+
 - **原始 PDF/DOCX 全链路小规模测试 + 检索层 F1 修复**：11 件原始文件（8 pdf + 3 docx，55 页）在独立测试库
   （`build/test-run-2026-11-22/`）从头跑 intake→classify→convert→gate→extract→canonical→build_db→embed→verify→refresh：
   11/11 转换、219 题零空答案、G1–G5/G8 全 PASS，生产库指纹前后一致。报告 `docs/41-原始PDF-DOCX全链路小规模测试-2026-11-22.md`
@@ -122,7 +133,7 @@
   （只读抽样：按 `q_norm_hash` 去重的切题样本 + 对应原始 Markdown 全文 + 逐题原文片段/前后文；
   CSV 公式注入防护、sha256 清单、manifest/metrics、无第三方依赖自检脚本口径）。打标审核样本
   沿用既有 `mianjing_kb/label_samples.py`（pilot100 schema）。样本数据属内部资料，落
-  `D:\pilot\5000\build\samples`，不入仓库。新切题器口径样本流程：复制基线库到隔离副本 →
+  `<PILOT_ROOT>\build\samples`，不入仓库。新切题器口径样本流程：复制基线库到隔离副本 →
   `extract --allow-empty-overwrite` 全量重抽（清空新切题器判 0 题的旧碎片文档，保证纯新口径）→
   以重抽副本为源抽样；全程不写生产库与基线库。
 
@@ -146,7 +157,7 @@
   `max_context_chars=6000` 全局预算并保留 `q_key`/来源。新增 BGE 单元契约测试与真实模型夜间集成
   工作流（`.github/workflows/bge-integration.yml`，模型缓存 + `RUN_BGE_INTEGRATION=1`）。
 - **5,000 题预生产一键试跑**：新增 `mianjing_kb/pilot5000.py`（`prepare`/`run`/`report`）
-  与 `scripts/pilot5000.ps1`，以 `D:\pilot\5000\config.json` 为唯一配置入口；`prepare` 只读生产库、
+  与 `scripts/pilot5000.ps1`，以 `<PILOT_ROOT>\config.json` 为唯一配置入口；`prepare` 只读生产库、
   SQLite Backup API 复制副本并按目标题数估算抽 121 文档（4,544 题），`run` 串起
   extract→canonical→refresh→检索冒烟/评估，`--with-label`/`label` 追加 100 题打标冒烟。首轮
   副本实测 refresh PASS（4,544 题 / 4,544 向量）。新增 `tests/test_pilot5000.py`。同时更新
