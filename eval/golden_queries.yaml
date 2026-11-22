@@ -86,15 +86,15 @@ queries:
   - query: "CHAR 和 VARCHAR 存储上有什么不一样"
     topic: "MySQL"
     category: paraphrase
-    expect_q_keys: ["0028b779a93a1305:1288a576ff86deab"]
-    relevance: [{q_key: "0028b779a93a1305:1288a576ff86deab", grade: 3}]
+    expect_q_keys: ["0028b779a93a1305:7e5b1536c37a1661"]
+    relevance: [{q_key: "0028b779a93a1305:7e5b1536c37a1661", grade: 3}]
     reviewed: false
     reviewer: "待人工审核（首版候选）"
   - query: "Redis 能存哪些数据类型"
     topic: "Redis"
     category: paraphrase
-    expect_q_keys: ["20f6fd191619ffcc:f455f058fa271406"]
-    relevance: [{q_key: "20f6fd191619ffcc:f455f058fa271406", grade: 3}]
+    expect_q_keys: ["20f6fd191619ffcc:d344b57bd05d40f1"]
+    relevance: [{q_key: "20f6fd191619ffcc:d344b57bd05d40f1", grade: 3}]
     reviewed: false
     reviewer: "待人工审核（首版候选）"
   - query: "GC 是干什么的，为什么需要垃圾回收"
@@ -162,9 +162,9 @@ queries:
     topic: "Redis"
     category: multi_keyword
     expect_q_keys:
-      ["20f6fd191619ffcc:f455f058fa271406", "20f6fd191619ffcc:f1f33286d0dfcfd5"]
+      ["20f6fd191619ffcc:d344b57bd05d40f1", "20f6fd191619ffcc:f1f33286d0dfcfd5"]
     relevance:
-      [{q_key: "20f6fd191619ffcc:f455f058fa271406", grade: 3},
+      [{q_key: "20f6fd191619ffcc:d344b57bd05d40f1", grade: 3},
        {q_key: "20f6fd191619ffcc:f1f33286d0dfcfd5", grade: 2}]
     reviewed: false
     reviewer: "待人工审核（首版候选）"

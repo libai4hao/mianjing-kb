@@ -8,6 +8,15 @@
 
 ## 2026-11-22
 
+- **归一器 v2 生产迁移（T35 落地）**：`preflight` 确认生产 schema 已到 017、无待应用迁移，遗留的只有题目侧
+  归一版本。dry-run 显示 19,916 题中 403 题 `q_norm/q_key/simhash` 变化（行首序号被剥）、3 题因同文档
+  同新 hash 碰撞删除；先按 SQLite Backup API 备份 kb 与线上库（125.0 MB / 405.3 MB，quick_check ok），
+  再 `--apply` 单事务写 19,913 题，随后 canonical 全量重建（11,046 簇 / 19,913 variant / 悬空 0），
+  `refresh` 首次因 403 行向量对不上而 ABORT（线上库未动），`--reembed` 重嵌入后 G1–G5/G8 全 PASS、
+  原子切换、`status` PASS（19,913 题 / 19,913 向量）。金标 50 条 hybrid recall@5 0.7386、MRR@10 0.6616
+  与迁移前逐条一致；golden 中 2 个期望 `q_key` 按新归一重算。过程与回滚见
+  `docs/42-归一器v2生产迁移-2026-11-22.md`。
+
 - **外部审查修复（P1 外发授权 + P2 短查询排序 + P3 迁移文档）**：P1——外发边界原先按 `LLM_PROVIDER`
   判定，`LLM_PROVIDER=local` + 远程 `LLM_BASE` 可绕过 `LLM_ALLOW_CONTENT_UPLOAD` 与脱敏；
   改为按实际 endpoint 判定（`is_local_endpoint()`：localhost/127.0.0.0/8/::1 之外一律视为外发），
