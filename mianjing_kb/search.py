@@ -81,13 +81,21 @@ def _con(db_path: Path):
     return con
 
 
-_JOIN = (
-    " LEFT JOIN documents d ON d.doc_hash=q.doc_hash "
-    " LEFT JOIN doc_contents dc ON dc.mirror_hash=q.doc_hash "
-)
+# F2（2026-11-22）：source_path 原先只按 dc.mirror_hash=q.doc_hash 连接，正常进库文档
+# （questions.doc_hash = 源 doc_hash）连不上 doc_contents，source_path 恒空。改为 doc_hash 优先、
+# mirror_hash 兜底（孤儿 md 题的 doc_hash 就是镜像哈希）。生产有 48 个 doc_hash 对应多份 md
+# （同一原文在库内的多份镜像），用标量子查询挑一条，避免 JOIN 把一行题放大成多行。
+_MD_REL_BY = ("SELECT md_rel FROM doc_contents WHERE {col} = q.doc_hash "
+              "ORDER BY (md_rel NOT LIKE '题库/%'), length(md_rel), md_rel LIMIT 1")
+_MD_BY_DOC = _MD_REL_BY.format(col="doc_hash")
+_MD_BY_MIRROR = _MD_REL_BY.format(col="mirror_hash")
+_MD_PICK = f"COALESCE(({_MD_BY_DOC}), ({_MD_BY_MIRROR}))"
+
+_JOIN = " LEFT JOIN documents d ON d.doc_hash=q.doc_hash "
 _SELECT = ("SELECT q.qid, q.q_key, q.doc_hash, q.q_text, q.qtype, q.topic, q.difficulty, "
-           "q.tags_json, q.position, q.quality, COALESCE(d.file_name, dc.md_rel) AS source, "
-           "dc.md_rel AS source_path, q.a_text ")
+           "q.tags_json, q.position, q.quality, "
+           f"COALESCE(d.file_name, {_MD_PICK}) AS source, "
+           f"{_MD_PICK} AS source_path, q.a_text ")
 VEC_OVERSAMPLE = 4          # 多选/标签只能在 KNN 后过滤，先过采样再截断
 VEC_MAX_CANDIDATES = 512    # 过采样上限，防止极端过滤把 k 放大到全表
 

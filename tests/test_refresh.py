@@ -81,6 +81,27 @@ def test_full_path_swap(mini_env):
     assert not Path(str(mini_env["online"]) + "-wal").exists()
 
 
+def test_swap_writes_verify_report_bound_to_post_swap_files(mini_env):
+    """F3：切换 + indexed_at 回写之后再写报告，status 才能判 PASS 而不是恒 STALE。"""
+    from mianjing_kb import status as st
+
+    assert rf.main([]) == 0
+    build = mini_env["build"]
+    rep = json.loads((build / "verify_report.json").read_text(encoding="utf-8"))
+    ids = rep["summary"]["db_identity"]
+
+    def ident(p: Path) -> dict:
+        s = Path(p).stat()
+        return {"path": str(p), "size_bytes": s.st_size, "mtime_ns": s.st_mtime_ns}
+
+    for key, path in (("kb", config.DB_PATH), ("out", mini_env["online"])):
+        assert ids[key]["size_bytes"] == ident(path)["size_bytes"]
+        assert ids[key]["mtime_ns"] == ident(path)["mtime_ns"]
+    gate = st._gate_summary(build, ident(config.DB_PATH), ident(mini_env["online"]))
+    assert gate["state"] == "PASS" and gate["stale"] is False
+    assert (build / "verify_report.md").exists()
+
+
 def test_swap_keeps_rollback_snapshot(mini_env):
     """切换前必须留旧库快照，回滚窗口不能靠"再跑一次 refresh"。"""
     assert rf.main([]) == 0

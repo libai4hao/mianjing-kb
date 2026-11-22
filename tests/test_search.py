@@ -73,6 +73,28 @@ def test_source_resolution(mini_db):
     assert len(hits) == 1 and hits[0]["source"] == MIRROR_REL
 
 
+def test_source_path_resolves_by_doc_hash(mini_db):
+    """F2：正常文档（questions.doc_hash=源 doc_hash）也要能回链到 md，而不是恒空。"""
+    mini_db.execute("INSERT INTO doc_contents(md_rel, doc_hash, mirror_hash, content) "
+                    "VALUES('题库/MySQL/MySQL面试题.md','h1','r'*16,'x')")
+    mini_db.commit()
+    hits = keyword_search(mini_db, "主从复制", 5)
+    assert hits[0]["source_path"] == "题库/MySQL/MySQL面试题.md"
+    hits = keyword_search(mini_db, "手写LRU", 5)          # 孤儿 md：doc_hash 为空，走 mirror 兜底
+    assert hits[0]["source_path"] == MIRROR_REL
+
+
+def test_duplicate_md_rows_do_not_multiply_hits(mini_db):
+    """同一 doc_hash 有多份 md（生产 48 组）时只挑一条，且优先题库/ 路径、行数不翻倍。"""
+    mini_db.execute("INSERT INTO doc_contents(md_rel, doc_hash, mirror_hash, content) VALUES"
+                    "('面经/MySQL/MySQL面试题.md','h1','a'*16,'x'),"
+                    "('题库/MySQL/MySQL面试题.md','h1','b'*16,'x')")
+    mini_db.commit()
+    hits = keyword_search(mini_db, "主从复制", 5)
+    assert len(hits) == 1
+    assert hits[0]["source_path"] == "题库/MySQL/MySQL面试题.md"
+
+
 def test_rag_contexts(mini_db):
     out = rag_contexts(mini_db, "手写LRU", 3)
     ctx = out["contexts"]

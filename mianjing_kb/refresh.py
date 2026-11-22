@@ -632,6 +632,29 @@ def _mark_indexed(kb_path: Path) -> str | None:
         return f"{type(ex).__name__}: {ex}"
 
 
+def _stamp_verify_report(build_dir: Path, online: Path) -> dict:
+    """F3：切换后按线上库实跑 G1-G5/G8 并落 verify_report.json/.md。
+
+    修的是"refresh 换完库却不换报告"：报告里的 db_identity 还绑在切换前的影子/旧库上，
+    status 每跑一次都判 STALE（生产 425 MB 库 2026-11-19 那版报告绑 425,476,096 B，
+    线上已 425,480,192 B，一直红着）。必须在 os.replace + _mark_indexed 之后写，
+    顺序反了就等于给旧指纹盖章。生产 2 万题实测这套门禁 15s 量级，代价可接受。
+    G9 是软门且字段口径（details 而非 detail/sql）与 verify_report 不同，留在 refresh
+    自己的 summary 里，不混进报告。
+    """
+    from mianjing_kb import verify_ledger as vl
+    t0 = time.perf_counter()
+    gates = [g for g in run_gates(online) if g.get("id") != "G9"]
+    identity = {"kb": vl._db_identity(Path(config.DB_PATH)),
+                "out": vl._db_identity(online)}
+    js, _md = vl.write_report(build_dir, gates, time.perf_counter() - t0, identity)
+    vl.write_backfill_plan(build_dir, gates)
+    hard = [g["id"] for g in gates if g.get("level") == "硬" and g.get("state") == "FAIL"]
+    return {"verdict": "FAIL" if hard else "PASS", "hard_fail": hard,
+            "gates": {g["id"]: g.get("state") for g in gates},
+            "report": js.name, "elapsed_sec": round(time.perf_counter() - t0, 1)}
+
+
 def _log(build_dir: Path, summary: dict) -> None:
     try:
         with (build_dir / LOG_NAME).open("a", encoding="utf-8") as fh:
@@ -884,6 +907,12 @@ def main(argv=None) -> int:
         mark_warn = _mark_indexed(Path(config.DB_PATH))
         if mark_warn:
             warns.append(f"indexed_at 回写失败：{mark_warn}")
+        # F3：报告必须晚于 _mark_indexed——回写会改 kb.sqlite 指纹，先写就又是 STALE。
+        # 失败不回滚：切换本身已成功，报告写不出来只降级成"下次 status 仍提示跑 verify"。
+        try:
+            summary["verify_report"] = _stamp_verify_report(build_dir, online)
+        except Exception as ex:  # noqa: BLE001
+            warns.append(f"verify_report 落盘失败：{type(ex).__name__}: {ex}")
         removed = _snapshot_gc(online)
         summary.update({
             "verdict": "PASS",
