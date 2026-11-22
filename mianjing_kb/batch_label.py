@@ -10,8 +10,9 @@
   --merge            G6 门禁复核 → PASS 才单事务 merge 进 questions（失败可整批回滚）
 
 环境变量见 llm_client（LLM_PROVIDER/LLM_BASE/LLM_KEY/LLM_MODEL/LLM_CONCURRENCY/
-LLM_PRICE/LLM_JSON_MODE/LLM_ALLOW_CONTENT_UPLOAD。在线 provider 默认拒绝外发题库文本，
-需明确设置 LLM_ALLOW_CONTENT_UPLOAD=1；--budget 是软上限，超限后不再提交新请求，
+LLM_PRICE/LLM_JSON_MODE/LLM_ALLOW_CONTENT_UPLOAD）。是否"外发"只看实际 LLM_BASE：
+非回环地址（含 local + 远程 base）默认拒绝发送题库文本，需明确设置
+LLM_ALLOW_CONTENT_UPLOAD=1；--budget 是软上限，超限后不再提交新请求，
 但会收割已在途请求，实际费用最多可能超过一个并发窗口内的请求费用。
 
 用法：

@@ -151,11 +151,29 @@ def keyword_search(con, query: str, limit: int = 10, topic: str | None = None,
             [fts_query, *params, limit]).fetchall()
 
     def run_like(needles: list[str]) -> list:
+        """LIKE 兜底（短查询、FTS 无结果）也要按相关度取前 N，不能直接 `ORDER BY qid`。
+
+        排序分三层：题干与关键词完全相等 → 题干包含 → 仅答案包含；同层内题干里出现
+        次数多的优先、题干更短（更聚焦）优先，最后才用 qid 做稳定平局。
+        否则两字词（如“并发”）命中几百题时，返回的是入库最早那批，跟相关度无关。
+        """
+        if not needles:
+            return []
         cond = " OR ".join(["(q.q_text LIKE ? OR q.a_text LIKE ?)"] * len(needles))
+        q_only = " OR ".join(["q.q_text LIKE ?"] * len(needles))
+        exact = ",".join(["?"] * len(needles))
+        occur = " + ".join(
+            ["(length(q.q_text) - length(replace(q.q_text, ?, '')))"] * len(needles))
+        order = (
+            f" ORDER BY CASE WHEN q.q_text IN ({exact}) THEN 0 ELSE 1 END,"
+            f" CASE WHEN ({q_only}) THEN 0 ELSE 1 END,"
+            f" -({occur}), length(q.q_text), q.qid LIMIT ?")
+        like_params = [p for n in needles for p in (f"%{n}%", f"%{n}%")]
+        params_like = (like_params + params + needles
+                       + [f"%{n}%" for n in needles] + needles + [limit])
         return con.execute(
-            _SELECT + "FROM questions q" + _JOIN + "WHERE (" + cond + ")" + filt +
-            " ORDER BY q.qid LIMIT ?",
-            [p for n in needles for p in (f"%{n}%", f"%{n}%")] + params + [limit]).fetchall()
+            _SELECT + "FROM questions q" + _JOIN + "WHERE (" + cond + ")" + filt + order,
+            params_like).fetchall()
 
     rows: list = []
     if len(query) >= 3:

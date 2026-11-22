@@ -13,7 +13,7 @@ def _hits(tmp_path, monkeypatch, rel, text):
 
 
 def test_abs_path_and_secret_are_flagged(tmp_path, monkeypatch):
-    hits = _hits(tmp_path, monkeypatch, "a.py", 'P = r"D:\\Project\\x"\nKEY = "sk-' + "a" * 24 + '"\n')
+    hits = _hits(tmp_path, monkeypatch, "a.py", 'P = r"D:\\Project\\x"\nKEY = "sk-' + "a" * 24 + '"\n')  # privacy-scan: allow 合成测试数据
     rules = {h["rule"] for h in hits}
     assert "abs_path" in rules and "secret" in rules
 
@@ -36,6 +36,14 @@ def test_placeholder_is_fine(tmp_path, monkeypatch):
 
 def test_abs_path_any_drive_not_just_whitelist(tmp_path, monkeypatch):
     hits = _hits(tmp_path, monkeypatch, "e.md",
-                 "临时目录：D:\\tmp\\x\n输出：E:\\work\\out\\a.log\n")
+                 "临时目录：D:\\tmp\\x\n输出：E:\\work\\out\\a.log\n")  # privacy-scan: allow 合成测试数据
     assert [h["rule"] for h in hits] == ["abs_path", "abs_path"]
+
+
+def test_abs_path_single_segment_and_custom_dir(tmp_path, monkeypatch):
+    """带盘符就够：D: 下自定义目录、系统目录都不再靠目录白名单才命中。"""
+    hits = _hits(tmp_path, monkeypatch, "f.md",
+                 "语料放在 D:\\corpus\n工具在 C:\\Program Files\\PowerShell\n")  # privacy-scan: allow 合成测试数据
+    assert [h["rule"] for h in hits] == ["abs_path", "abs_path"]
+
 

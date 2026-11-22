@@ -59,6 +59,38 @@ def test_kw_search_routes(mini_db):
     assert len(hits) == 1 and hits[0]["topic"] == "MySQL"
 
 
+def test_short_query_like_ranks_by_relevance_not_qid():
+    """P2：两字查询走 LIKE 兜底时，必须先按相关度再截断，而不是取 qid 最小的前 N。"""
+    import sqlite3 as s3
+    con = s3.connect(":memory:")
+    con.row_factory = s3.Row
+    con.executescript("""
+CREATE TABLE documents(doc_hash TEXT PRIMARY KEY, file_name TEXT);
+CREATE TABLE doc_contents(doc_id INTEGER PRIMARY KEY, md_rel TEXT, doc_hash TEXT, mirror_hash TEXT, content TEXT);
+CREATE TABLE questions(qid INTEGER PRIMARY KEY, doc_hash TEXT, q_text TEXT, a_text TEXT,
+                       qtype TEXT, topic TEXT, category TEXT, difficulty INTEGER,
+                       tags_json TEXT, position TEXT, quality TEXT, q_key TEXT);
+CREATE TABLE question_tags(qid INTEGER, tag TEXT, tag_norm TEXT, PRIMARY KEY(qid, tag_norm));
+CREATE VIRTUAL TABLE questions_fts USING fts5(q_text, a_text, tokenize='trigram');
+""")
+    rows = [
+        # qid 越小越"早入库"，但相关度都更差：答案里才出现 / 题干只出现一次
+        (1, "h1", "Redis持久化有哪几种方式？", "与缓存无关但答案提到缓存", "八股"),
+        (2, "h1", "手写LRU缓存如何实现？", "哈希表加双向链表。", "算法"),
+        (3, "h1", "MySQL主从复制原理？", "binlog 回放。", "八股"),
+        # qid 大但相关度高：题干两次出现关键词
+        (9, "h1", "多级缓存怎么设计？缓存穿透如何避免？", "布隆过滤器。", "八股"),
+        # 题干与关键词完全相等 → 最高优先
+        (10, "h1", "缓存", "一句话答案。", "八股"),
+    ]
+    for qid, dh, qt, at, typ in rows:
+        con.execute("INSERT INTO questions(qid, doc_hash, q_text, a_text, qtype, category) "
+                    "VALUES(?,?,?,?,?,'题库')", (qid, dh, qt, at, typ))
+    top2 = [r["qid"] for r in keyword_search(con, "缓存", 2)]
+    assert top2 == [10, 9], top2          # 完全相等 > 两次出现；qid=1/2 虽小但排在后面
+    con.close()
+
+
 def test_hybrid_degrades_to_kw(mini_db):
     assert has_vec_table(mini_db) is False
     hits = hybrid_search(mini_db, "主从复制", 5)

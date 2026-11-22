@@ -142,7 +142,7 @@ def test_purge_decision_guard():
     """四重判据的纯逻辑：状态白名单 + 保留副本在语料根内且存在。"""
     from mianjing_kb.purge_origin import OK_STATUS
 
-    corpus = Path(r"D:\corpus").resolve()
+    corpus = Path(r"D:\corpus").resolve()  # privacy-scan: allow 合成测试路径
 
     def decide(rows, keep_path, keep_exists=True):
         ok_rows = [r for r in rows if r["status"] in OK_STATUS]

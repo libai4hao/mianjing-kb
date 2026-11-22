@@ -6,8 +6,9 @@
 覆盖边界：只看**当前文件内容**；历史提交里的泄露需另用 gitleaks / trufflehog 扫 git log。
 
 规则（命中即失败）：
-  abs_path      Windows 绝对路径（C:\\ / D:\\），仓库文档只允许 `<CORPUS_ROOT>` 这类占位符
-  home_path     C:\\Users\\<name> / /home/<name>
+  abs_path      任意 Windows 绝对路径（盘符 + 根，如 C:\\Users\\x、D:\\corpus），
+                仓库文档只允许 `<CORPUS_ROOT>` 这类占位符；合成测试数据用行内 allow 豁免
+  home_path     POSIX 家目录 / /home/<name>、/Users/<name>
   personal_mail 非 GitHub noreply 的个人邮箱（QQ/163/126/Gmail/Outlook/Foxmail…）
   cn_mobile     中国大陆手机号
   secret        sk-… / AKIA… / api_key=… 形态的字面量密钥
@@ -34,10 +35,13 @@ TEXT_EXT = {".py", ".md", ".txt", ".toml", ".yaml", ".yml", ".json", ".sql", ".p
             ".cfg", ".ini", ".html", ".js", ".ts", ".css", ".gitignore", ""}
 
 RULES = [
-    # 盘符 + 至少一级目录：不再只认 Users/dev/Project 这类白名单前缀，
-    # 否则 D:\tmp\x、E:\work\out 这种同样泄露本机布局的路径会漏检。
-    ("abs_path", re.compile(r"[A-Za-z]:[\\/][^\s\\/\"'`<>|]+[\\/]")),
-    ("home_path", re.compile(r"(?:[A-Za-z]:[\\/]Users[\\/]|/home/)[^\s\\/]+")),
+    # 任意 Windows 绝对路径：盘符 + 根分隔符，不限定第二级目录名。
+    # 旧规则只认 Users/dev/utools/my-resource/Project/Infra 白名单前缀，
+    # D:\corpus\x、E:\Data\y 这种同样泄露本机布局的路径会漏检。
+    # 负向前瞻挡掉 URL（https:// 的 "s:/" 前一个字符是字母）。
+    ("abs_path", re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")),
+    # POSIX 家目录（Windows 侧已由 abs_path 覆盖）
+    ("home_path", re.compile(r"/(?:home|Users)/[^\s/]+")),
     ("personal_mail", re.compile(r"[\w.+-]+@(?:qq|163|126|gmail|outlook|foxmail|sina|hotmail)\.com",
                                  re.IGNORECASE)),
     ("cn_mobile", re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")),

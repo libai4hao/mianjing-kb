@@ -6,7 +6,7 @@
 面向"下一轮直接照着跑"，每个脚本都给出命令、参数语义、输出解读和排障。
 
 环境：`python`（3.11.4，含 pymupdf / pymupdf4llm / numpy / sklearn / yaml / pytest）。
-Shell：pwsh 7（`C:\Program Files\PowerShell\7\pwsh.exe`）。所有中文路径用 `-LiteralPath`。
+Shell：pwsh 7（系统安装，`pwsh.exe` 在 PATH 即可）。所有中文路径用 `-LiteralPath`。
 
 ---
 

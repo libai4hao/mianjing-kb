@@ -47,7 +47,7 @@ def test_cli_requires_explicit_corpus_root(monkeypatch):
     monkeypatch.delenv("KB_CORPUS_ROOT", raising=False)
     with pytest.raises(SystemExit):
         cv.corpus_root(None)
-    assert cv.corpus_root(r"C:\corpus") == Path(r"C:\corpus")
+    assert cv.corpus_root(r"C:\corpus") == Path(r"C:\corpus")  # privacy-scan: allow 合成测试路径
 
 
 def test_cli_converts_txt_without_corpus_side_tools(tmp_path, monkeypatch):

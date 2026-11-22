@@ -292,7 +292,7 @@ def test_chat_payload_num_ctx_passthrough(monkeypatch):
                      "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
     monkeypatch.setattr(lc, "_post", fake_post)
-    base = {"base": "http://x", "key": "", "model": "m", "timeout": 5, "json_mode": False}
+    base = {"base": "http://127.0.0.1:11434/v1", "key": "", "model": "m", "timeout": 5, "json_mode": False}
     lc.chat({**base, "num_ctx": 8192}, "s", "u", retries=1)
     assert seen[-1]["options"] == {"num_ctx": 8192}
     lc.chat({**base, "num_ctx": None}, "s", "u", retries=1)
@@ -327,7 +327,7 @@ def test_chat_payload_thinking_disabled_passthrough(monkeypatch):
                      "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
     monkeypatch.setattr(lc, "_post", fake_post)
-    base = {"base": "http://x", "key": "", "model": "m", "timeout": 5, "json_mode": False}
+    base = {"base": "http://127.0.0.1:11434/v1", "key": "", "model": "m", "timeout": 5, "json_mode": False}
     lc.chat({**base, "thinking": "disabled"}, "s", "u", retries=1)
     assert seen[-1]["thinking"] == {"type": "disabled"}
     lc.chat({**base, "thinking": None}, "s", "u", retries=1)
@@ -423,3 +423,71 @@ def test_redact_structured_identity_address_passport_and_bank():
     for value in ("张三", "上海市浦东新区", "E12345678", "6222021234567890"):
         assert value not in clean
     assert clean.count("[个人信息]") >= 4
+
+
+# ---------------- 外发边界按实际 endpoint 判定（provider 不再是通行证） ----------------
+
+def test_is_local_endpoint_only_loopback():
+    from mianjing_kb.llm_client import is_local_endpoint as loc
+    for base in ("http://127.0.0.1:11434/v1", "http://localhost:1234/v1",
+                 "http://127.8.9.10/v1", "http://[::1]:8080/v1"):
+        assert loc(base), base
+    for base in ("https://example.com/v1", "http://192.168.1.9:11434/v1",
+                 "https://api.deepseek.com/v1", "http://10.0.0.5/v1"):
+        assert not loc(base), base
+
+
+def test_invalid_base_is_rejected():
+    for bad in ("ftp://127.0.0.1/v1", "http://user:pass@example.com/v1",
+                "http:///v1", "127.0.0.1:11434/v1"):
+        with pytest.raises(ConfigError, match="LLM_BASE"):
+            resolve_config(env={"LLM_BASE": bad, "LLM_PROVIDER": "local"})
+
+
+def test_local_provider_remote_base_without_opt_in_is_blocked(monkeypatch):
+    """P1：local + 远程 LLM_BASE 曾经绕过授权检查，这里必须一个请求都不发。"""
+    from mianjing_kb import llm_client as lc
+    calls = []
+    monkeypatch.setattr(lc, "_post", lambda cfg, payload: calls.append(payload) or (200, {}))
+    cfg = resolve_config(env={"LLM_PROVIDER": "local",
+                              "LLM_BASE": "https://example.com/v1",
+                              "LLM_KEY": "k"})
+    assert cfg["local_endpoint"] is False and cfg["allow_content_upload"] is False
+    with pytest.raises(ConfigError, match="LLM_ALLOW_CONTENT_UPLOAD"):
+        chat(cfg, "system", "question", retries=1)
+    assert calls == []
+
+
+def test_local_provider_remote_base_with_opt_in_redacts(monkeypatch):
+    from mianjing_kb import llm_client as lc
+    calls = []
+    monkeypatch.setattr(lc, "_post", lambda cfg, payload: calls.append(payload) or
+                        (200, {"choices": [{"message": {"content": "ok"}}], "usage": {}}))
+    phone = "138" + "12345678"
+    cfg = resolve_config(env={"LLM_PROVIDER": "local", "LLM_BASE": "https://example.com/v1",
+                              "LLM_KEY": "k", "LLM_ALLOW_CONTENT_UPLOAD": "1"})
+    assert chat(cfg, "联系人：李四", f"姓名：张三；手机号：{phone}", retries=1)["text"] == "ok"
+    wire = "\n".join(m["content"] for m in calls[0]["messages"])
+    for secret in ("李四", "张三", phone):
+        assert secret not in wire
+    assert "[个人信息]" in wire
+
+
+def test_post_refuses_remote_without_opt_in_even_if_chat_skipped():
+    """网络层最后一道闸：直接调 _post 也发不出去，密钥不会随请求泄露。"""
+    from mianjing_kb import llm_client as lc
+    cfg = resolve_config(env={"LLM_PROVIDER": "local", "LLM_BASE": "https://example.com/v1",
+                              "LLM_KEY": "sk-live-abcdef123456"})
+    with pytest.raises(ConfigError, match="LLM_ALLOW_CONTENT_UPLOAD"):
+        lc._post(cfg, {"model": "m", "messages": []})
+
+
+def test_local_loopback_needs_no_opt_in(monkeypatch):
+    from mianjing_kb import llm_client as lc
+    calls = []
+    monkeypatch.setattr(lc, "_post", lambda cfg, payload: calls.append(payload) or
+                        (200, {"choices": [{"message": {"content": "ok"}}], "usage": {}}))
+    cfg = resolve_config(env={})
+    assert cfg["local_endpoint"] is True
+    assert chat(cfg, "s", "u", retries=1)["text"] == "ok"
+    assert len(calls) == 1 and calls[0]["messages"][1]["content"].endswith("/no_think")

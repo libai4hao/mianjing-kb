@@ -8,6 +8,18 @@
 
 ## 2026-11-22
 
+- **外部审查修复（P1 外发授权 + P2 短查询排序 + P3 迁移文档）**：P1——外发边界原先按 `LLM_PROVIDER`
+  判定，`LLM_PROVIDER=local` + 远程 `LLM_BASE` 可绕过 `LLM_ALLOW_CONTENT_UPLOAD` 与脱敏；
+  改为按实际 endpoint 判定（`is_local_endpoint()`：localhost/127.0.0.0/8/::1 之外一律视为外发），
+  `resolve_config` 增加 `local_endpoint`，`chat()` 与网络层 `_post()` 双重拒绝 + 非本地一律脱敏，
+  `LLM_BASE` 校验 http/https、禁 userinfo/空白。P2——短查询走 LIKE 兜底时原按 `qid` 截断，
+  改为“题干完全相等 > 题干包含 > 仅答案包含，题干出现次数多者/更短者优先，最后 qid 稳定平局”。
+  P3——`docs/22` 补 001–017 迁移清单（载体：独立 SQL 仅 001/003/004/005/007/008，其余代码内），
+  并注明“代码存在 ≠ 生产已应用”，生产状态以 `preflight` 实测为准。隐私规则同步收窄到通用盘符
+  （任意 `盘符 + 根`，不再依赖目录白名单），顺带清掉 `docs/04`、`docs/archive/01`、待办清单里 3 处
+  `pwsh.exe` 全路径。四类新增回归用例（local+远程未授权/已授权脱敏/_post 兜底/回环免授权、短查询排序、
+  单级盘符路径）。
+
 - **公开仓库禁写本机绝对路径：规则加宽 + 推送前门禁**：`privacy_scan` 的 `abs_path` 原来只认
   `Users/dev/utools/my-resource/Project/Infra` 这几个白名单前缀，盘符后接别的目录（如 `TMP` 下两级）
   这类同样暴露本机布局的路径直接漏检；改成“盘符 + 至少一级目录”后全仓复扫，捞出 19 处历史遗留：`docs/35` 与

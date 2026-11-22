@@ -13,7 +13,7 @@ def test_safe_join_accepts_nested_rel(tmp_path):
     assert paths.safe_join(root, "a/b.txt") == (root / "a/b.txt").resolve()
 
 
-@pytest.mark.parametrize("rel", ["../outside.txt", "/abs/outside.txt", "C:/abs.txt", "", "a/../b"])
+@pytest.mark.parametrize("rel", ["../outside.txt", "/abs/outside.txt", "C:/abs.txt", "", "a/../b"])  # privacy-scan: allow 合成测试路径
 def test_safe_join_rejects_escape(tmp_path, rel):
     root = tmp_path / "root"
     root.mkdir()

@@ -2,10 +2,11 @@
 """llm_client：OpenAI 兼容 LLM 客户端（docs/15 §3.4——一份代码，两种 provider）。
 
 环境变量路由（key 一配置就可以用，全部可覆盖）：
-    LLM_PROVIDER     local | online（默认 local；决定 base/并发/超时的缺省）
+    LLM_PROVIDER     local | online（默认 local；只决定 base/并发/超时的缺省，不决定是否外发）
     LLM_BASE         local: http://127.0.0.1:11434/v1 | online: https://api.deepseek.com/v1
+                     非回环地址一律按"内容离开本机"处理：需 LLM_ALLOW_CONTENT_UPLOAD=1 且上传前脱敏
     LLM_KEY          online 必填（用户级环境变量，绝不进 git；local 留空）
-    LLM_ALLOW_CONTENT_UPLOAD=1  显式同意把已脱敏题库文本发送到 online provider；默认拒绝
+    LLM_ALLOW_CONTENT_UPLOAD=1  显式同意把已脱敏文本发送到非本地 endpoint；默认拒绝
     LLM_MODEL        local: qwen3:4b | online: deepseek-flash
     LLM_CONCURRENCY  local: 1 | online: 8
     LLM_PRICE        输入价,输出价（¥/百万 token；如 "1,4"）
@@ -25,6 +26,7 @@ batch_label 落 failed.jsonl 不阻塞整批。JSON 解析失败 → 重试时�
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import random
@@ -120,6 +122,45 @@ def _parse_price(raw: str) -> tuple[float, float]:
     return pin, pout
 
 
+def _endpoint_host(base: str) -> str:
+    """校验 LLM_BASE 并取出 host。
+
+    只看真正要连的地址，不看 LLM_PROVIDER：provider 只是缺省值选择器，用户可以
+    把 LLM_BASE 指到任何地方，用 provider 名判断"是否外发"会留后门。
+    """
+    raw = _as_str("LLM_BASE", base).strip()
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        raise ConfigError(f"LLM_BASE 无法解析，当前: {raw!r}") from None
+    if parts.scheme not in ("http", "https"):
+        raise ConfigError(f"LLM_BASE 只允许 http/https，当前: {raw!r}")
+    if "@" in parts.netloc:
+        raise ConfigError("LLM_BASE 不允许带 user:pass@ 形式的凭证，请改用 LLM_KEY")
+    if not parts.hostname:
+        raise ConfigError(f"LLM_BASE 缺少主机名，当前: {raw!r}")
+    if any(c.isspace() for c in raw):
+        raise ConfigError(f"LLM_BASE 不允许包含空白字符，当前: {raw!r}")
+    return parts.hostname
+
+
+_LOOPBACK_NAMES = {"localhost", "localhost."}
+
+
+def is_local_endpoint(base: str) -> bool:
+    """目标地址是否为本机回环（localhost / 127.0.0.0/8 / ::1）。
+
+    判定以实际地址为准：非回环一律按"内容会离开本机"处理，与 provider 叫什么无关。
+    """
+    host = _endpoint_host(base).strip("[]").lower()
+    if host in _LOOPBACK_NAMES:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:              # 域名（api.deepseek.com 等）→ 远程
+        return False
+
+
 def resolve_config(env: dict | None = None) -> dict:
     """环境变量 → 完整配置。online 缺 key 抛 ConfigError（带指引，不静默降级烧本地 GPU）。"""
     e = env if env is not None else os.environ
@@ -157,6 +198,8 @@ def resolve_config(env: dict | None = None) -> dict:
     if cfg["thinking"] not in (None, "enabled", "disabled"):
         raise ConfigError(
             f"LLM_THINKING 只允许 enabled|disabled，当前: {cfg['thinking']!r}")
+    # 外发边界以实际 endpoint 判定：local + 远程 LLM_BASE 同样属于外发。
+    cfg["local_endpoint"] = is_local_endpoint(cfg["base"])
     if provider == "online" and not cfg["key"]:
         raise ConfigError(
             "online provider 需要 API key：请设用户级环境变量 LLM_KEY "
@@ -302,7 +345,14 @@ def _rate_wait(cfg: dict) -> None:
 
 
 def _post(cfg: dict, payload: dict) -> tuple[int, dict]:
-    """POST /chat/completions。返回 (status, resp)；网络层异常归一为 (0, {"error": ...})。"""
+    """POST /chat/completions。返回 (status, resp)；网络层异常归一为 (0, {"error": ...})。
+
+    网络出口处的最后一道闸：非回环地址且没有内容外发授权，直接拒绝，不发一个字节。
+    """
+    if not is_local_endpoint(cfg["base"]) and not cfg.get("allow_content_upload", False):
+        raise ConfigError(
+            f"LLM_BASE 指向非本地地址（{cfg['base']}），上传题库内容需显式授权："
+            "确认风险后设置 LLM_ALLOW_CONTENT_UPLOAD=1，再重新启动命令。")
     req = urllib.request.Request(
         cfg["base"] + "/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -334,15 +384,16 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
     降级链：429/5xx/超时/网络 → 指数退避重试；JSON 模式下解析失败也重试
     （第二次起在 system 末尾强化"只输出严格 JSON，不要任何其他文字"）。
     """
-    online = cfg.get("provider") == "online"
-    if online and not cfg.get("allow_content_upload", False):
+    remote = not is_local_endpoint(cfg["base"])
+    if remote and not cfg.get("allow_content_upload", False):
         raise ConfigError(
-            "在线 LLM 不会默认上传题库内容；确认外发风险后显式设置 "
-            "LLM_ALLOW_CONTENT_UPLOAD=1，再重新启动命令。")
+            f"LLM_BASE 指向非本地地址（{cfg['base']}），题库内容会离开本机；"
+            "确认外发风险后显式设置 LLM_ALLOW_CONTENT_UPLOAD=1，再重新启动命令。"
+            "（只看实际地址，不看 LLM_PROVIDER）")
     # 最终网络边界再次脱敏，避免新增调用方绕过 batch_label 的预处理。
     # 该规则只覆盖可识别格式，不构成自由文本匿名化保证。
-    outbound_system = redact(system)[0] if online else system
-    outbound_user = redact(user)[0] if online else user
+    outbound_system = redact(system)[0] if remote else system
+    outbound_user = redact(user)[0] if remote else user
     sys_prompt = outbound_system
     last_err = ""
     for attempt in range(1, retries + 1):
