@@ -35,6 +35,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mianjing_kb.kb import config, db, hashing, mdmap, products, status, textio, wlock  # noqa: E402
+from mianjing_kb.kb.qtext import clean_question_text  # noqa: E402
 from mianjing_kb.question_freq import close_word, extract, normalize, simhash  # noqa: E402
 from mianjing_kb.chunker import chunk_v2  # noqa: E402
 
@@ -239,14 +240,15 @@ def _rows_from_text(doc_hash: str, text: str) -> list[dict]:
     rows = []
     v2 = chunk_v2(text)
     for it in v2["items"]:
-        qn = normalize(it["q"])
+        raw_q = it["q"]
+        qn = normalize(raw_q)          # F4：身份仍按原串算，避免 q_key 漂移
         if len(qn) < MIN_NORM:
             continue
         q_norm_hash = hashlib.sha256(qn.encode("utf-8")).hexdigest()[:16]
         rows.append({
             "doc_hash": doc_hash,
             "seq": it["seq"],
-            "q_text": it["q"][:2000],
+            "q_text": clean_question_text(raw_q)[:2000],   # 只洗显示文本，a_text 不动
             "a_text": it["a"][:20000],
             "span_start": it["span"][0],
             "span_end": it["span"][1],

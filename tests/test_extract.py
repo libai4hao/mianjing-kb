@@ -382,6 +382,20 @@ def test_extract_heading_numbered_questions(tmp_env):
     assert "UDP" in rows[1]["q_text"]
 
 
+def test_extract_cleans_bold_numbering_but_keeps_identity_and_answers(tmp_env):
+    """F4：题干洗掉 `**` 与题号，q_norm/q_key 仍按原串（身份不漂移），答案一字不动。"""
+    corpus, conn = tmp_env
+    h, p = _seed_doc(conn, corpus, "bold.md",
+                     "**1** 、什么是 **Redis** ?\n\nRedis 是内存数据库，指针 int** p 不该被改。\n"
+                     + "补充说明。" * 20)
+    rows = extract.extract_doc(h, p)
+    assert len(rows) == 1
+    assert rows[0]["q_text"] == "什么是 Redis?"
+    assert "**" not in rows[0]["q_text"]
+    assert "int** p" in rows[0]["a_text"]                  # 代码块/答案不受影响
+    assert rows[0]["q_norm"].startswith("1")                # 身份口径仍是原串（题号保留）
+
+
 def test_full_run_keeps_processed_docs(tmp_env, capsys):
     """processed 不能把文档踢出题池：全量重跑仍要覆盖，且不 purge 已处理的题。"""
     corpus, conn = tmp_env

@@ -260,10 +260,12 @@ def run_audit() -> dict:
         doc_hash = _doc_hash_for(l["rel"], e)
         probe = dict(e)
         probe["doc_hash"] = doc_hash
+        canonical_path = md_path_for(probe)
         p = resolve_md(probe, idx)
-        drift = bool(p and path_key(p) != path_key(md_path_for(probe)))
+        drift = bool(p and path_key(p) != path_key(canonical_path)
+                     and not _is_hash_variant_of(p, canonical_path))
         if p is None:
-            p = md_path_for(probe)
+            p = canonical_path
             rows.append(dict(rel=l["rel"], md=str(p), doc_hash=doc_hash, exists=False,
                              state="fail", reason="产物缺失", drift=False))
             continue
@@ -348,6 +350,18 @@ def _md_has_doc_hash(p: Path, expected: str) -> bool:
     except OSError:
         return False
     return expected in text
+
+
+def _is_hash_variant_of(resolved: Path, canonical: Path) -> bool:
+    """F5：`stem__<hash8>.md` / `stem_<hash8>.md` 是同目录同 stem 的正常产物，不算漂移。
+
+    `resolve_md` 只在 hash8 与本文档 doc_hash 前 8 位一致时才绑定哈希变体；
+    所以走到这里的变体已经证明“指向同一份文档”。真正指向别的文档/别的目录才算 drift。
+    """
+    if path_key(resolved.parent) != path_key(canonical.parent):
+        return False
+    m = HASH_SUFFIX.search(resolved.stem)
+    return bool(m) and resolved.stem[:m.start()] == canonical.stem
 
 
 def resolve_md(e: dict, idx: dict[str, list[str]]) -> Path | None:
