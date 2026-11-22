@@ -405,6 +405,38 @@ def jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
+CJK_CHAR = re.compile(r"[\u4e00-\u9fff]")
+LATIN_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9+#._-]*")
+SHORT_CJK_MAX = 6          # 短题：归一后中文 ≤6 字，2-gram 分母太小，Jaccard 会被单个词抬高
+SHORT_LEN_MAX = 20         # 短题：归一后整串 ≤20 字符；再长就不是"一个实体撑起相似度"的形态了
+
+
+def latin_terms(text: str) -> set[str]:
+    return {t.lower() for t in LATIN_TOKEN.findall(text or "")}
+
+
+def short_latin_conflict(a: str, b: str) -> bool:
+    """F6：短题里的拉丁实体不同 → 不是同一题，不论 Jaccard 多高。
+
+    `什么是springmvc` 与 `什么是spring?` 的 2-gram Jaccard 有 0.727，越过 0.7 契约
+    就被并进同一个 canonical；短题字符少，一个实体词就撑起相似度。这里用拉丁词项
+    集合做闸门：两者都含拉丁词且集合不相等（差集非空）即判冲突。
+    长题不走这条（中文 >6 字的句子里实体差异通常已被足够多的 2-gram 稀释）；
+    整串 >20 字符的也不走——像 "How does HashMap resize work" 这类英文句子里，
+    每个词都是拉丁词，"集合不等"并不代表实体不同，按长度放过避免误拆。
+    """
+    a, b = a or "", b or ""
+    if min(len(a), len(b)) > SHORT_LEN_MAX:
+        return False
+    ca, cb = len(CJK_CHAR.findall(a)), len(CJK_CHAR.findall(b))
+    if min(ca, cb) > SHORT_CJK_MAX:
+        return False
+    ta, tb = latin_terms(a), latin_terms(b)
+    if not ta or not tb or ta == tb:
+        return False
+    return bool(ta ^ tb)
+
+
 class DSU:
     def __init__(self, n: int):
         self.p = list(range(n))
@@ -469,6 +501,8 @@ def cluster(items: list[tuple[str, int]], max_dist: int = 24, min_jac: float = 0
                 if udsu.find(a) == udsu.find(b):
                     continue
                 if jaccard(gsets[a], gsets[b]) < min_jac:
+                    continue
+                if short_latin_conflict(texts[a], texts[b]):   # F6：短题实体不同不并
                     continue
                 udsu.union(a, b)
 

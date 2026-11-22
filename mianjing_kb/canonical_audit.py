@@ -25,6 +25,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mianjing_kb import canonical as cn  # noqa: E402
 from mianjing_kb import report as rp  # noqa: E402
+from mianjing_kb.question_freq import short_latin_conflict  # noqa: E402
 
 MAX_PAIRS_DEFAULT = 80_000_000
 
@@ -79,8 +80,9 @@ def _enumerate_pairs(qs: list[dict], grams: dict, owner: dict,
         for token in cn._prefix_grams(g, jac):
             index[token].append(i)
     checked = compared = 0
-    high = high_same = band_pairs = 0
+    high = high_same = gated = band_pairs = 0
     violators: list[dict] = []
+    gated_samples: list[dict] = []
     seen: set[int] = set()
     for lst in index.values():
         if len(lst) < 2:
@@ -108,6 +110,13 @@ def _enumerate_pairs(qs: list[dict], grams: dict, owner: dict,
                         checked += 1
                         if owner[i] == owner[j]:
                             high_same += 1
+                        elif short_latin_conflict(qs[i]["q_norm"], qs[j]["q_norm"]):
+                            # F6 闸门：短题拉丁实体不同，契约让位于“实体不同不并”
+                            gated += 1
+                            if len(gated_samples) < samples:
+                                gated_samples.append({"jac": round(sim, 3),
+                                                      "a": qs[i]["q_text"][:80],
+                                                      "b": qs[j]["q_text"][:80]})
                         elif len(violators) < samples:
                             violators.append({"jac": round(sim, 3),
                                               "a": qs[i]["q_text"][:80],
@@ -115,7 +124,8 @@ def _enumerate_pairs(qs: list[dict], grams: dict, owner: dict,
                     else:
                         band_pairs += 1
     return {"compared": compared, "high": high, "high_same": high_same,
-            "band": band_pairs, "violators": violators}
+            "gated": gated, "band": band_pairs, "violators": violators,
+            "gated_samples": gated_samples}
 
 
 def audit_questions(qs: list[dict], jac: float = cn.ATTACH_JAC,
@@ -145,7 +155,9 @@ def audit_questions(qs: list[dict], jac: float = cn.ATTACH_JAC,
         "candidate_comparisons": enum["compared"],
         "pairs_jaccard_ge_jac": enum["high"],
         "pairs_ge_jac_same_cluster": enum["high_same"],
-        "pairs_ge_jac_cross_cluster": enum["high"] - enum["high_same"],
+        "pairs_gated_by_short_latin": enum["gated"],
+        "gated_samples": enum["gated_samples"],
+        "pairs_ge_jac_cross_cluster": enum["high"] - enum["high_same"] - enum["gated"],
         "pairs_in_band": enum["band"],
         "rewrite_samples": inside["rewrite_samples"],
         "chain_samples": inside["chain_samples"],
@@ -178,6 +190,8 @@ def render_md(data: dict) -> str:
         f"- 契约召回（jaccard≥阈值 的题对是否同簇）："
         f"**{data['pairs_ge_jac_same_cluster']}/{data['pairs_jaccard_ge_jac']}**"
         f"（跨簇 {data['pairs_ge_jac_cross_cluster']}）→ {'PASS' if ok else 'FAIL'}",
+        f"- 其中被 F6 短题拉丁实体闸门挡下的对：{data.get('pairs_gated_by_short_latin', 0)}"
+        "（实体不同，属于契约的显式例外）",
         f"- 同簇但 jaccard 低于阈值（链式传递）：{data['pairs_within_below_jac']}"
         f"/{data['pairs_within_cluster']}",
         f"- 同簇且归一化文本不同（换说法仍合）：{data['pairs_within_paraphrase']}",
@@ -192,6 +206,11 @@ def render_md(data: dict) -> str:
     if data["chain_samples"]:
         lines += ["## 链式传递样例（同簇但低于阈值）", ""]
         for s in data["chain_samples"]:
+            lines.append(f"- jac={s['jac']}：`{s['a']}` ↔ `{s['b']}`")
+        lines.append("")
+    if data.get("gated_samples"):
+        lines += ["## F6 闸门样例（jaccard 达标但实体不同，故意拆开）", ""]
+        for s in data["gated_samples"]:
             lines.append(f"- jac={s['jac']}：`{s['a']}` ↔ `{s['b']}`")
         lines.append("")
     if data["violators"]:

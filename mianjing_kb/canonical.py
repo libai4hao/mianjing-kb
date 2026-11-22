@@ -49,6 +49,7 @@ if __package__ in (None, ""):
 from mianjing_kb import manifests  # noqa: E402
 from mianjing_kb.kb import config, db, wlock  # noqa: E402
 from mianjing_kb.report import build_clusters, load_questions  # noqa: E402
+from mianjing_kb.question_freq import short_latin_conflict  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 TITLE_MAX = 500
@@ -301,30 +302,34 @@ def _rep_index(reps: list[tuple[str, str]]):
 
     前缀按 FILTER_JAC（0.65）建：它比挂靠阈值 0.7 更低，0.7 的候选必然落在
     0.65 的候选集里；不再保留 SimHash 16bit 分带（会漏掉汉明距离大的同义改写）。
+    `titles` 供 F6 短题拉丁实体闸门比对原文（gram 集合里看不出实体词边界）。
     """
     by_norm: dict[str, str] = {}
     gram_sets: dict[str, frozenset[str]] = {}
+    titles: dict[str, str] = {}
     index: dict[str, list[str]] = defaultdict(list)
     for cid, title in reps:
         key = (title or "")[:TITLE_MAX]
         by_norm.setdefault(key, cid)
         g = _grams(title or "")
         gram_sets[cid] = g
+        titles[cid] = title or ""
         for token in _prefix_grams(g, FILTER_JAC):
             index[token].append(cid)
-    return by_norm, gram_sets, index
+    return by_norm, gram_sets, index, titles
 
 
-def _add_rep(cid: str, title: str, by_norm, gram_sets, index) -> None:
+def _add_rep(cid: str, title: str, by_norm, gram_sets, index, titles) -> None:
     key = (title or "")[:TITLE_MAX]
     by_norm.setdefault(key, cid)
     g = _grams(title or "")
     gram_sets[cid] = g
+    titles[cid] = title or ""
     for token in _prefix_grams(g, FILTER_JAC):
         index[token].append(cid)
 
 
-def _best_existing(norm: str, by_norm, gram_sets, index) -> tuple[str | None, float]:
+def _best_existing(norm: str, by_norm, gram_sets, index, titles=None) -> tuple[str | None, float]:
     key = norm[:TITLE_MAX]
     if key in by_norm:
         return by_norm[key], 1.0
@@ -334,6 +339,8 @@ def _best_existing(norm: str, by_norm, gram_sets, index) -> tuple[str | None, fl
         cands.update(index.get(token, ()))
     best_cid, best_sim = None, 0.0
     for cid in cands:
+        if titles and short_latin_conflict(norm, titles.get(cid, "")):   # F6
+            continue
         s = jaccard(qg, gram_sets.get(cid, frozenset()))
         if s > best_sim:
             best_cid, best_sim = cid, s
@@ -394,7 +401,7 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
         "SELECT q_key FROM question_variants WHERE COALESCE(q_key,'')!=''")}
     reps = [(r[0], r[1]) for r in conn.execute(
         "SELECT canonical_id, title_norm FROM canonical_questions")]
-    by_norm, gram_sets, index = _rep_index(reps)
+    by_norm, gram_sets, index, titles = _rep_index(reps)
     known = set(by_norm.values())
     meta = doc_meta(conn)
     created: list[str] = []
@@ -412,7 +419,7 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
         if qkey in attached_keys:
             continue
         norm = q.get("q_norm") or ""
-        best_cid, best_sim = _best_existing(norm, by_norm, gram_sets, index)
+        best_cid, best_sim = _best_existing(norm, by_norm, gram_sets, index, titles)
         if best_cid and best_sim < attach_jac and best_sim >= candidate_jac:
             sim = round(best_sim, 4)
             prior_row = conn.execute(
@@ -450,7 +457,7 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
             created.append(cid)
             created_set.add(cid)
             known.add(cid)
-            _add_rep(cid, norm, by_norm, gram_sets, index)
+            _add_rep(cid, norm, by_norm, gram_sets, index, titles)
             best_cid, best_sim = cid, 1.0
 
         cid = best_cid
