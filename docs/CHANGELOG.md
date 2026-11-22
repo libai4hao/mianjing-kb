@@ -8,6 +8,11 @@
 
 ## 2026-11-23
 
+- **项目复盘（`docs/47`）**：只出结论不改代码。判定三处过度设计（G6b 金标空转、99 区/`pilot5000` 线、
+  文档与词表治理超前于数据）、一处真实跑偏（36/19,913 标签覆盖 vs 60 篇文档 10 个门禁）、
+  错漏按 P0/P1/P2 分级（P0：26.4% 空答案 + 切块标题题 + 门禁 `STALE` 仍显示 `PASS` 且 G6/G6b 不在
+  `REQUIRED_GATES`）。给出两周收敛路线，并明确"标签到 1,000 条前治理层只修 bug 不加功能"。
+
 - **迁移 018 `answer_state`（答案来源标记）**：`questions` 新增 `answer_state`，由
   `python -m mianjing_kb.answer_state --apply` 按结构回填——`ok`（有答案）/`no_answer_source`
   （该文档过半题无答案，来源只列问题）/`boundary_gap`（同文档多题有答案、此题空，疑似切块错位）/
