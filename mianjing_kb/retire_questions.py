@@ -1,0 +1,138 @@
+# -*- coding: utf-8 -*-
+"""retire_questions：按 doc_hash 退役整篇文档的题目。
+
+背景（P0）：`build_db` 的发布池会按排除表挡掉退役源（`rejected`/`superseded`…）的产物，
+而历史库里的题还在，`refresh` 拷向量时就会撞上「现行库 N 行与影子库不匹配」而 ABORT。
+本命令把同一批 doc_hash 的题从 kb.sqlite 与线上检索库一起删干净，让两边题集重新一致，
+refresh 从而可以走 copy-vec（不必 `--reembed`）。
+
+删除范围：`questions`、`questions_fts`（有则删该行）、`vec_questions`（有则删该 rowid）、
+`canonical_dependents`/`question_variants`（按 doc_hash），并把因此变空的 `canonical_questions` 清掉。
+`label_facts` 按 q_norm_hash 记账、可能被别的文档共用，**不动**，只在输出里报告命中数。
+
+用法：
+    python -m mianjing_kb.retire_questions --db <kb.sqlite> --doc-hash <h1> --doc-hash <h2>          # 预览
+    python -m mianjing_kb.retire_questions --db <kb.sqlite> --doc-hash <h1> --doc-hash <h2> --apply  # 执行
+
+默认 dry-run；`--apply` 才写。写库走与 intake/extract 共用的写锁（kb.sqlite 用 `kb`，检索库用 `online`）。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from mianjing_kb.kb import config, wlock  # noqa: E402
+
+_MAX_PRINT = 10
+
+
+def _tables(conn: sqlite3.Connection) -> set[str]:
+    return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+
+
+def _ph(n: int) -> str:
+    return ",".join("?" * n)
+
+
+def plan(conn: sqlite3.Connection, doc_hashes: list[str]) -> dict:
+    """只读统计：返回各表将删除的行数与 qid 列表。"""
+    tables = _tables(conn)
+    hs = list(doc_hashes)
+    qids = [r[0] for r in conn.execute(
+        f"SELECT qid FROM questions WHERE doc_hash IN ({_ph(len(hs))})", hs)]
+    out: dict = {"doc_hashes": hs, "qids": qids, "questions": len(qids), "tables": {}}
+    if "questions_fts" in tables:
+        out["tables"]["questions_fts"] = conn.execute(
+            f"SELECT COUNT(*) FROM questions_fts WHERE rowid IN ({_ph(len(qids))})", qids).fetchone()[0] if qids else 0
+    if "vec_questions" in tables:
+        try:
+            out["tables"]["vec_questions"] = conn.execute(
+                f"SELECT COUNT(*) FROM vec_questions WHERE rowid IN ({_ph(len(qids))})", qids).fetchone()[0] if qids else 0
+        except sqlite3.OperationalError:
+            out["tables"]["vec_questions"] = None      # 未加载 sqlite-vec，按 rowid 删除仍会执行
+    for t in ("canonical_dependents", "question_variants"):
+        if t in tables:
+            out["tables"][t] = conn.execute(
+                f"SELECT COUNT(*) FROM {t} WHERE doc_hash IN ({_ph(len(hs))})", hs).fetchone()[0]
+    if "label_facts" in tables and qids:
+        names = {r[1] for r in conn.execute("PRAGMA table_info(label_facts)")}
+        if "q_norm_hash" in names:
+            hashes = [r[0] for r in conn.execute(
+                f"SELECT q_norm_hash FROM questions WHERE qid IN ({_ph(len(qids))})", qids) if r[0]]
+            out["label_facts_touched"] = conn.execute(
+                f"SELECT COUNT(*) FROM label_facts WHERE q_norm_hash IN ({_ph(len(hashes))})", hashes
+            ).fetchone()[0] if hashes else 0
+    return out
+
+
+def retire(conn: sqlite3.Connection, doc_hashes: list[str], apply: bool = False) -> dict:
+    """按 doc_hash 退役题目；apply=False 只统计。调用方负责事务与写锁。"""
+    res = plan(conn, doc_hashes)
+    res["applied"] = False
+    if not apply or not res["questions"]:
+        res["applied"] = bool(apply and not res["questions"])
+        return res
+    tables = _tables(conn)
+    hs, qids = res["doc_hashes"], res["qids"]
+    before_cq = conn.execute("SELECT canonical_id FROM canonical_questions").fetchall() \
+        if "canonical_questions" in tables else []
+    if "questions_fts" in tables:
+        conn.execute(f"DELETE FROM questions_fts WHERE rowid IN ({_ph(len(qids))})", qids)
+    if "vec_questions" in tables:
+        try:
+            conn.execute(f"DELETE FROM vec_questions WHERE rowid IN ({_ph(len(qids))})", qids)
+        except sqlite3.OperationalError:
+            pass                                    # 虚表模块没加载：refresh 会整表重建向量
+    for t in ("canonical_dependents", "question_variants"):
+        if t in tables:
+            conn.execute(f"DELETE FROM {t} WHERE doc_hash IN ({_ph(len(hs))})", hs)
+    conn.execute(f"DELETE FROM questions WHERE doc_hash IN ({_ph(len(hs))})", hs)
+    if "canonical_questions" in tables and before_cq:
+        conn.execute("DELETE FROM canonical_questions WHERE canonical_id NOT IN "
+                     "(SELECT DISTINCT canonical_id FROM canonical_dependents)")
+        res["canonical_questions_removed"] = len(before_cq) - conn.execute(
+            "SELECT COUNT(*) FROM canonical_questions").fetchone()[0]
+    res["applied"] = True
+    return res
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="按 doc_hash 退役题目（questions/FTS/向量/canonical 依赖）")
+    ap.add_argument("--db", required=True, help="目标库（kb.sqlite 或 面经库.db）")
+    ap.add_argument("--doc-hash", action="append", required=True, help="要退役的 doc_hash，可给多次")
+    ap.add_argument("--apply", action="store_true", help="真正写库（默认 dry-run）")
+    args = ap.parse_args(argv)
+
+    path = Path(args.db)
+    if not path.exists():
+        print(json.dumps({"error": f"数据库不存在：{path}"}, ensure_ascii=False))
+        return 2
+    lock_name = "kb" if path.resolve() == Path(config.DB_PATH).resolve() else "online"
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    try:
+        if args.apply:
+            with wlock.write_lock(lock_name, tool="retire_questions", build_dir=config.BUILD_DIR,
+                                  wait_sec=30.0, target=path):
+                with conn:
+                    res = retire(conn, args.doc_hash, apply=True)
+        else:
+            res = retire(conn, args.doc_hash, apply=False)
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex)}, ensure_ascii=False, indent=1))
+        return 2
+    finally:
+        conn.close()
+    if len(res.get("qids", [])) > _MAX_PRINT:
+        res["qids"] = res["qids"][:_MAX_PRINT] + ["…"]
+    print(json.dumps(res, ensure_ascii=False, indent=1))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

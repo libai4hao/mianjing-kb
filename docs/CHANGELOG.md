@@ -56,6 +56,15 @@
   STALE，按 F3 顺序补跑 `_stamp_verify_report` 后 `status` **PASS**（`at=2026-11-22T20:34:32`，G1–G5/G8 全 PASS，15.4 s）。
   详见 docs/41 §14。
 
+- **P0 退役两篇 rejected 学习路线源的 94 题（生产 refresh 恢复可用）**：排查 `refresh` ABORT 的真因——线上多出的
+  94 题来自两篇 `rejected` 源 PDF（`Java 后端学习路线（4w+字，超全面）.pdf` / `黑夜模式-…pdf`，都属“非内容”），
+  `extract._orphan_owned_by_retired_source` 已按 stem 正确挡掉它们的 md，是线上库留着这批题。新增
+  `mianjing_kb/retire_questions.py`（按 doc_hash 删 questions/FTS/向量/canonical 依赖并清空簇，默认 dry-run，
+  写锁按库自动选 kb/online）+ 3 条用例。生产执行：kb.sqlite 删 94 题/94 dependents/94 variants/43 空簇；
+  检索库删 94 题+94 FTS 行并清 94 条孤立向量；两篇 md 登记 `meta/skip_log.json` 的 `no_question`（G2 ③ 要求）；
+  `refresh` 走 copy-vec 一次通过 → **19916 题 / 19916 向量**，G1–G5/G8 全 PASS（16.2 s 门禁、总 370.7 s，
+  快照 `面经库-20261122-210830.db`），`status` PASS `at=2026-11-22T21:08:49`，待打标 334→240。详见 docs/41 §15。
+
 - **原始文档小规模测试与再修 3 项**：用 5 篇 raw_docs 实跑 `chunk_v2` + 异常检测，从 100+ 异常中筛出 3 个可安全修复的真 bug（答案行以方法调用 `start()` 结尾被误判选择题空括号、`答：…` 回答行成题、`聊了聊项目；` 分号叙述行成题），TDD 修复：`_is_qline` 空括号规则排除方法调用 + 结论排除前缀补 `答：/回答：/解析：/解答：`、F5c 叙述行门补 `；/;`；028 异常 2→0、074 异常 4→3；新增 3 条回归 fixture。报告见 `docs/原始文档小规模测试报告-2026-11-22.md`。chunker 套件 141 passed，全量 pytest 728 passed / 7 skipped / 1 failed（基线无关）。
 - **切题逻辑金标驱动修复（F1–F7，7 提交 `2a9a58d..21dc1d5`）**：依据人工金标 100 条样本中
   5 篇文档 20 条的复核，修复 8 类结构性错误中的 8 条（TOC 条目被当题、目录幽灵答案与真身
