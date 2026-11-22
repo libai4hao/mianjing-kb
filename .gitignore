@@ -19,3 +19,6 @@ build/
 
 # 个人数据：本机语料清单（skip_log）含来源片段/收件路径；永不入库，模板见 meta/skip_log.example.json
 meta/skip_log.json
+
+# Claude Code 配置与本地覆盖（个人环境相关，不提交）
+.claude/
