@@ -316,6 +316,15 @@ def _local_outline_mask(lines: List[str], blocked: set[int]) -> set[int]:
     PDF 转 Markdown 常在章节开头插入局部大纲（无“目录”字样、无页码）。
     只对层级/双层编号（4.1.13 / 42.3.）启用；要求同一规范化题干在后文再次出现，
     且首现到下一道题之间没有实质答案正文，避免误删真正的无答案问题。
+
+    三层“目录/大纲”掩码分工（同一文档三者判定口径不同，缺一会有幽灵题）：
+      - _toc_mask：文首“目录”区，靠点线/页码/短大纲条目 + H12 前瞻密度；
+      - _local_outline_mask（本函数）：正文中部、无“目录”字样的局部大纲，
+        靠层级题号“首现 + 后文重复 + 中间无答案”；
+      - answer_label / answer_subpoint_restart：答案区内重启的小节标签
+        （“## 1. 共同点”“知识点/详解”），靠 qid<=last_qid 且无问句语义。
+    075 实测：三者须各自覆盖；仅靠任一层都会漏（如行 273 的 H12 大纲项
+    两层都不盖，行 851 的 5.2.x 条目只有本层盖住）。
     """
     occurrences: Dict[str, List[int]] = {}
     for i, line in enumerate(lines):
