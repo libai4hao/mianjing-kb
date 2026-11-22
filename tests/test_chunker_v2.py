@@ -161,6 +161,31 @@ def test_v2_han_qid_21_and_long_span():
     assert "甲" in long_v2["items"][0]["a"]
 
 
+def test_v2_han_numbering_no_loss_beyond_twenty():
+    """汉字题号 ≥二十、无行首问词的题干不再整题丢失（qid 错位曾令 new_q 落空）。"""
+    md = """十八、ConcurrentHashMap 的分段锁
+
+把整桶分成 16 段，每段独立加锁。
+
+十九、HashMap 的扩容机制
+
+负载因子超过 0.75 时扩容两倍。
+
+二十、HashMap 的实现原理
+
+数组加链表，JDK8 后引入红黑树。
+
+二十一、HashMap 线程安全吗
+
+不安全，并发下会数据覆盖。
+"""
+    items = chunker.chunk_v2(md)["items"]
+    assert [it["q"] for it in items] == [
+        "ConcurrentHashMap 的分段锁", "HashMap 的扩容机制",
+        "HashMap 的实现原理", "HashMap 线程安全吗",
+    ]
+
+
 def test_v2_qtype():
     q = lambda t: chunker.classify_qtype(t)
     assert q("请做一下自我介绍？") == "HR"

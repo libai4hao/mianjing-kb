@@ -100,6 +100,29 @@ def test_chunker_fixture(txt):
             f"qid {b['qid']} 未在原文 span 出现"
 
 
+def test_han_numbering_qid_beyond_twenty():
+    """汉字题号 ≥二十 的 _HAN 映射正确（曾因十位 index+2 错位：二十→30）。"""
+    md = """十八、ConcurrentHashMap 的分段锁
+
+把整桶分成 16 段，每段独立加锁。
+
+十九、HashMap 的扩容机制
+
+负载因子超过 0.75 时扩容两倍。
+
+二十、HashMap 的实现原理
+
+数组加链表，JDK8 后引入红黑树。
+
+二十一、HashMap 线程安全吗
+
+不安全，并发下会数据覆盖。
+"""
+    blocks = chunker.chunk(md)["blocks"]
+    assert [b["qid"] for b in blocks] == [18, 19, 20, 21], \
+        [b["qid"] for b in blocks]
+
+
 def test_chunker_is_pure_and_safe():
     """纯函数：同输入同输出；空串/纯页码不崩。"""
     assert chunker.chunk("") == {"blocks": [], "leftovers": []}
