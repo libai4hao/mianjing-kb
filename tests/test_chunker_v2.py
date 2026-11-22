@@ -186,6 +186,47 @@ def test_v2_han_numbering_no_loss_beyond_twenty():
     ]
 
 
+def test_v2_unrecognized_question_line_alarms_in_coverage():
+    """未识别正文中的题号行必须让自检看见：coverage 扣回 + note 报「疑似漏题」（评审 #3）。
+
+    跳号无问号的题干按规则不成题（防答案列表误切），但丢题不得对 coverage 不可见。
+    尾部丢行会并入末块 span（不产生 leftover），故补一道带问号的题使其落在两块之间。
+    """
+    md = """十八、ConcurrentHashMap 的分段锁
+
+把整桶分成 16 段，每段独立加锁。
+
+三十、HashMap 的实现原理
+
+数组加链表。
+
+二十一、Redis 的持久化机制吗
+
+RDB 与 AOF 两种方式。
+
+"""
+    v2 = chunker.chunk_v2(md)
+    assert v2["coverage"] < 1.0, v2["note"]
+    assert "疑似漏题" in v2["note"], v2["note"]
+
+
+def test_v2_benign_gap_not_flagged_as_missed():
+    """守卫：无题号特征的块间内容不触发疑似漏题（修复前后都必须成立）。"""
+    md = """十八、ConcurrentHashMap 的分段锁
+
+把整桶分成 16 段，每段独立加锁。
+
+下面继续看后续章节的内容。
+
+十九、HashMap 的扩容机制
+
+负载因子超过 0.75 时扩容两倍。
+"""
+    v2 = chunker.chunk_v2(md)
+    assert v2["coverage"] == 1.0, v2["note"]
+    assert "疑似漏题" not in v2["note"], v2["note"]
+
+
 def test_v2_qtype():
     q = lambda t: chunker.classify_qtype(t)
     assert q("请做一下自我介绍？") == "HR"

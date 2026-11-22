@@ -11,6 +11,7 @@
      "icons": ["![alt](path)", ...]}         # 块内图片引用（占位图归属前一块）
   ],
   "leftovers": [{"span": [s, e], "why": str}]  # 未识别/剔除区域，原文一字不丢
+  "dropped_qnos": [[s, e], ...]  # 疑似漏题：空行前置+题号前跳+无问句语义、未成题的行
 }
 
 规则（tests/fixtures 8 组与之对应）
@@ -60,7 +61,10 @@ R2' 答案内部的列举编号与句中问词不判新题：只切"空行前置
        "coverage":float, "note":"扣除明细"}
   - qtype ∈ 八股|算法|项目|场景|HR（关键词启发式）
   - conf：high(题号/问句) / low(标题/考点) / none
-  - coverage = (items 覆盖 − span 内噪声) / (全长 − 可扣除)，扣除=目录/代码/表格/页码/引用/水印/致谢
+  - coverage = (items 覆盖 − span 内噪声 − 疑似漏题) / (全长 − 可扣除)，
+    扣除=目录/代码/表格/页码/引用/水印/致谢；疑似漏题=未成题的题号行
+    （未识别正文含题号行，或跳号无问号被诊断的 dropped_qnos——从净覆盖扣回
+    并在 note 报警，未成题也不得对自检不可见）
     （同一噪声不能既算覆盖又从分母扣，否则会 >1.0）
   - items 为空时 probe 必须非空（1–3 个候选区块）
 render(md_text)：两步输出（第一步纯文本清单 ≤12 字/行，第二步 JSON）。
@@ -973,6 +977,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
 
     # ---- 第二遍：题块起点 ----
     bounds: List[dict] = []
+    dropped: List = []          # 疑似漏题诊断（评审 #3）：跳号无问号未成题的行 span
     hier_section_lines: set = set()   # F3b：层级节标题硬边界行（组装时收紧 end_line）
     last_qid: Optional[int] = None
     prev_blank = True
@@ -1346,6 +1351,11 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             parts.append((cur_qid, qtext[seg_start:].rstrip()))
             bounds.append({"line": i, "parts": parts, "style": "题号"})
             last_qid = parts[-1][0]
+        elif qid is not None and prev_blank and qid > last_qid:
+            # 疑似漏题（评审 #3）：空行前置 + 题号向前跳 + 无问句语义，且未被
+            # 列表/新题机制吸收——跳号无问号的题干按现有规则不成题，会并入
+            # 上一题答案区（bleed）。不改变切分行为，仅记录供 chunk_v2 自检报警。
+            dropped.append([starts[i], starts[i + 1]])
         prev_blank = False
         last_problem_mark = False
 
@@ -1488,7 +1498,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
     if not split_long:
         # v2 用完整块：R8 续块一旦在 v2 合并回去，a_text 与 a_segs 行映射会错位；
         # 长答案按原块落一条题，span 仍精确覆盖原文。
-        return {"blocks": blocks, "leftovers": leftovers}
+        return {"blocks": blocks, "leftovers": leftovers, "dropped_qnos": dropped}
 
     # ---- R8 超长块续切 ----
     out: List[dict] = []
@@ -1520,7 +1530,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                 nb["style"] = b["style"] + "/续"
                 nb["source_span"] = list(span)
             out.append(nb)
-    return {"blocks": out, "leftovers": leftovers}
+    return {"blocks": out, "leftovers": leftovers, "dropped_qnos": dropped}
 
 
 def head_len_of(md_text: str, start: int) -> int:
@@ -1710,10 +1720,7 @@ def chunk_v2(md_text: str) -> Dict:
                       "qtype": classify_qtype(q), "conf": _conf_of(style, q)})
 
     for b in res["blocks"]:
-        if b["style"].endswith("/续") and items:          # 续块并回上一题
-            items[-1]["a"] = (items[-1]["a"] + "\n" + b["a_text"]).strip("\n")
-            items[-1]["span"][1] = b["source_span"][1]
-            continue
+        # 注：R8 续块（style 端 "/续"）仅 split_long=True 时产生，v2 恒 False，无并回分支。
         a_rest, extra = _split_answers(b["a_text"], b["source_span"][0], b.get("a_segs"))
         end = extra[0]["span"][0] if extra else b["source_span"][1]
         add(b["q_text"], a_rest, [b["source_span"][0], end], b["style"])
@@ -1741,11 +1748,13 @@ def chunk_v2(md_text: str) -> Dict:
     # 空答案 / 极短答案被更完整答案替换；两条都有实质答案时都保留，
     # 避免不同章节下的同题异答被吞掉。
     dedup: Dict[str, dict] = {}
+    dedup_pos: Dict[str, int] = {}   # key → items_after 中的位置（替代 O(n²) 的 .index）
     items_after: List[dict] = []
     for it in items:
         key = re.sub(r'\s+', '', it["q"]).lower()
         if key not in dedup:
             dedup[key] = it
+            dedup_pos[key] = len(items_after)
             items_after.append(it)
             continue
         old = dedup[key]
@@ -1754,12 +1763,12 @@ def chunk_v2(md_text: str) -> Dict:
         old_ghost = _toc_ghost_answer(old["a"])
         new_ghost = _toc_ghost_answer(it["a"])
         if old_ghost and not new_ghost:
-            items_after[items_after.index(old)] = it
+            items_after[dedup_pos[key]] = it
             dedup[key] = it
         elif new_ghost and not old_ghost:
             continue
         elif not old["a"].strip() and it["a"].strip():
-            items_after[items_after.index(old)] = it
+            items_after[dedup_pos[key]] = it
             dedup[key] = it
         elif old["a"].strip() and not it["a"].strip():
             continue
@@ -1770,7 +1779,7 @@ def chunk_v2(md_text: str) -> Dict:
             new_n = re.sub(r'\s+', '', it["a"]).lower()
             if old_n and new_n and (old_n in new_n or new_n in old_n):
                 if len(new_n) > len(old_n):
-                    items_after[items_after.index(old)] = it
+                    items_after[dedup_pos[key]] = it
                     dedup[key] = it
             else:
                 items_after.append(it)
@@ -1828,12 +1837,24 @@ def chunk_v2(md_text: str) -> Dict:
         deduct_detail[l["why"]] = deduct_detail.get(l["why"], 0) + (e - s)
     covered = _span_len(item_iv)
     noise_in_items = _overlap_len(item_iv, deduct_iv)
+    # 疑似漏题（评审 #3）：两类「未成题」的题号行——①未识别正文里含题号特征的行；
+    # ②chunk() 诊断的跳号无问号未成题行（dropped_qnos，bleed 进上一题答案区，
+    # 不产生 leftover）。与 item span 重叠的部分从净覆盖中扣回，note 单列报警；
+    # 无题号特征的内容不受影响。
+    missed_iv = [(l["span"][0], l["span"][1]) for l in res["leftovers"]
+                 if l["why"] == "未识别正文"
+                 and any(_match_question(ln)
+                         for ln in md_text[l["span"][0]:l["span"][1]].splitlines())]
+    missed_iv += [tuple(sp) for sp in res.get("dropped_qnos", [])]
+    missed = _overlap_len(item_iv, missed_iv)
     deduct = _span_len(deduct_iv)
-    net = covered - noise_in_items
+    net = covered - noise_in_items - missed
     denom = max(1, total - deduct)
     coverage = round(min(1.0, max(0.0, net / denom)), 4) if total else 1.0
     note = "扣除:" + (", ".join(f"{k} {v}" for k, v in sorted(deduct_detail.items())) or "无") \
            + f"; 总长 {total}, 覆盖 {covered}(其中噪声 {noise_in_items}), 净覆盖 {net}, 扣除 {deduct}"
+    if missed_iv:
+        note += f"; 疑似漏题 {len(missed_iv)} 处 {missed} 字"
     for it in items:                       # 兜底：续块/碎片合并与去重也可能拼回噪声
         it["a"] = _clean_answer_text(it["a"])
     return {"items": items, "probe": probe, "coverage": coverage, "note": note}

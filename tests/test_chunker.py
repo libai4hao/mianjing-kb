@@ -125,7 +125,7 @@ def test_han_numbering_qid_beyond_twenty():
 
 def test_chunker_is_pure_and_safe():
     """纯函数：同输入同输出；空串/纯页码不崩。"""
-    assert chunker.chunk("") == {"blocks": [], "leftovers": []}
+    assert chunker.chunk("") == {"blocks": [], "leftovers": [], "dropped_qnos": []}
     r1 = chunker.chunk("## 1. A？\n\n答案\n")
     r2 = chunker.chunk("## 1. A？\n\n答案\n")
     assert r1 == r2
