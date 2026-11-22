@@ -6,6 +6,21 @@
 > 一律以 `docs/29-数据基线与统计口径-2026-11-19.md` 为准。历史里程碑按日期倒序。
 > 2026-11-16 之前的记录见 `docs/archive/` 与 git 历史，本表从外部 review 落地开始。
 
+## 2026-11-23
+
+- **新增 `mianjing_kb.qsalvage`（空答案确定性回收）**：把 `…？答：…` 挤在同一行的题答拆回
+  `q_text` / `a_text`（54 条候选、已拆 52 条，2 条同文档已有同题跳过），按 `extract` 同口径重算
+  `q_norm/q_norm_hash/simhash/q_key` 并同步 `canonical_dependents`/`question_variants`；同时把
+  `a_text='\n\n'` 这类纯空白归一到 `''`（SQLite `trim()` 不去换行，两个统计口径此前差 20 条）。
+  纯函数 + dry-run 默认，产物 `split.csv`/`retire.csv`/`answer_missing.jsonl`/`runs_review.json`。
+  生产效果：空答案 5,320 → 5,268（26.46%），canonical 11,046 → 11,002，variant 仍 19,913；
+  `refresh --reembed`（410 s）与随后的 copy-vec refresh（80 s）均 PASS。记录见 `docs/44`。
+- **补答可行性 pilot（不入库）**：本地 qwen3-8b 对 24 条空答案题生成答案，均值 7.4 s/题、p95 10.7 s，
+  4 条正确拒答（含 2 条噪声行），2 条事实错误（8:1:1 归因、HashMap 初始容量），约 58% 可直接背。
+  全量 5,216 条单并发约 10.7 h；是否入库仍待决策。
+- **反例记录**：用当前 `chunk_v2` 对 659 个含空答案文档重切，得到 36,515 题 / 6,750 空，比生产更差
+  （章节标题被切成题）——重跑 `extract` 前必须先修 chunker 的"标题题"，否则是负优化。
+
 ## 2026-11-22
 
 - **生产题目质量随机抽检（55 题）**：固定种子分层抽 40 普通 + 15 迁移改写题通读判定，严格准确率
