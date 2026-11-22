@@ -51,6 +51,21 @@ python -m pytest tests -q                # 全量测试（含 e2e demo、聚类�
 | `<BUILD_DIR>` | `KB_BUILD_DIR` | 台账 / 库 / 日志目录 |
 | `<REPO_ROOT>` / `<PYTHON_HOME>` | — | 仓库根 / 解释器（叙述用） |
 
+## 隐私与路径约定
+
+公开仓库**不写本机绝对路径**和任何个人信息：命令示例里的盘符路径一律换成本表占位符
+（`<REPO_ROOT>`、`<CORPUS_ROOT>`、`<BUILD_DIR>`、`<PILOT_ROOT>`、`<PYTHON_HOME>` 等）。
+私有分支也尽量用占位符，只在必须描述真实布局时才写具体目录。
+
+门禁两条：CI 每次跑 `python -m mianjing_kb.privacy_scan`（已跟踪文件全扫）；本机可装推送前钩子：
+
+```powershell
+pwsh -File scripts/hooks/install.ps1 -Python <PYTHON_HOME>\python.exe
+```
+
+钩子命中即阻断推送（`exit 1`），确需临时跳过用 `git push --no-verify`。合成测试数据确有需要时，
+可在该行末尾标 `privacy-scan: allow` 逐行豁免，不要整文件放行。
+
 ## 文档
 
 **先看 `docs/README.md`（文档索引：哪份现行、哪份历史、每个数字属于哪个时点）。** 常用入口：
