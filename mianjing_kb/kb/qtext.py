@@ -57,6 +57,18 @@ def _unwrap_bold(text: str) -> str:
     return text
 
 
+def _strip_leading_marker(text: str) -> str:
+    """去掉行首孤立的 `**`：PDF 断行常把加粗开标记切成单独一段。
+
+    `**请问执行此段代码的输出是什么？`、`**81、JDBC 中如何进行事务处理？` 都属于
+    整篇只剩一个 `**`（奇数），`BOLD_PAIR` 匹配不到，于是原样落库。只剥行首这一处，
+    行尾/中间的孤立 `**` 不动——指针、代码片段的语义留给人看，不在这里猜。
+    """
+    if text.startswith("**") and text.count("**") % 2 == 1:
+        return text[2:].lstrip()
+    return text
+
+
 def clean_question_text(text: str) -> str:
     """清洗题干显示文本；代码/指针类题干原样返回（仅 strip）。
 
@@ -68,7 +80,7 @@ def clean_question_text(text: str) -> str:
     text = text.strip()          # chunker 的 q 常带行尾换行，先去掉再判“是否多行代码”
     if _looks_like_code(text):
         return text
-    out = _strip_leading_number(_unwrap_bold(text))
+    out = _strip_leading_number(_unwrap_bold(_strip_leading_marker(text)))
     if out == text:
         return text
     out = SPACES.sub(" ", out)

@@ -30,6 +30,14 @@ def test_pointer_and_code_questions_untouched():
     assert clean_question_text(code) == code
 
 
+def test_leading_lone_marker_is_stripped():
+    """PDF 断行留下的行首孤立 `**`：不成对，只剥这一处，不猜行中/行尾。"""
+    assert clean_question_text("**请问执行此段代码的输出是什么？") == "请问执行此段代码的输出是什么？"
+    assert clean_question_text("**81、JDBC 中如何进行事务处理？") == "JDBC 中如何进行事务处理？"
+    # 行尾孤立 `**` 不动
+    assert clean_question_text("这个怎么实现**") == "这个怎么实现**"
+
+
 def test_dunder_names_and_plain_text_untouched():
     assert clean_question_text("__init__ 是什么") == "__init__ 是什么"
     assert clean_question_text("什么是 JVM？") == "什么是 JVM？"
