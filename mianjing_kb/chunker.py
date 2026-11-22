@@ -121,7 +121,8 @@ RE_TOC_HEADER = re.compile(r'^\s*(?:目\s*录|contents|table\s+of\s+contents)\s*
 RE_MD_NUM_HEADING = re.compile(r'^\s*#{1,6}\s+\d{1,3}(?:\s*[.、．]|\s*[)）])')
 RE_MD_H12 = re.compile(r'^\s*#{1,2}\s+\S')
 RE_LIST_LEAD = re.compile(
-    r'(?:如下|以下|下列|包括|包含|分为|分成|分别是|基本要素|几个方面|哪几种|哪些|几种|四种|三种|步骤|建议|要点)')
+    r'(?:如下|以下|下列|包括|包含|分为|分成|分别是|基本要素|几个方面|哪几种|哪些|几种|四种|三种'
+    r'|步骤(?=\s*[：:])|建议(?=\s*[：:])|要点(?=\s*[：:]))')
 # F5c：面经叙述行（“1、上来照例还是问了问项目：”）有题号但整行是
 # 叙事，不是题；成题会偷走后面的叙述内容。
 RE_NARRATIVE_LEAD = re.compile(r"(?:问了问|聊了聊|问了下|然后他就说|他就说|又问了|接着问)")
@@ -548,10 +549,31 @@ def _is_strong_qline(s: str) -> bool:
     return bool(RE_QEND.search(s) and RE_STRONG_QSTART.match(s))
 
 
+RE_EXPLANATION_TAIL = re.compile(r'(?:下图便是|如下图所示|我建议|我们来看|具体实现如下)')
+
+
+def _strip_explanation_tail(s: str) -> str:
+    """任务型题干（无问号）后粘连的说明句截断，只切说明连接词、不碰问号。
+
+    PDF 常把节标题与首句粘在同一行（金标 S0537 型“说⼀下Java对象的创建
+    过程下图便是 Java 对象的创建过程…”）。题号行的 qtext 可能是多行题干
+    的首行（D1 回接前），故此处不能做问号截断，否则误伤续行题干。
+    """
+    s = s.strip()
+    if "?" not in s and "？" not in s:
+        cut = RE_EXPLANATION_TAIL.search(s)
+        if cut and cut.start() >= 4:
+            return s[:cut.start()].rstrip()
+    return s
+
+
 def _trim_question_text(s: str) -> str:
     """一行里“问句 + 紧跟的答案说明”只保留问句部分。"""
-    m = re.match(r'^(.{1,120}?[?？])\s*(.{4,})$', s.strip())
-    return m.group(1) if m else s.strip()
+    s = s.strip()
+    m = re.match(r'^(.{1,120}?[?？])\s*(.{4,})$', s)
+    if m:
+        return m.group(1)
+    return _strip_explanation_tail(s)
 
 
 # D1 题干续行回接（docs/37 line_wrap_split）：题干以连接词/介词悬空结尾，
@@ -1122,6 +1144,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         qid, qtext, style = q
         qtext = re.sub(r'^\d{1,3}\s*[，,]\s*', '', qtext)
         qtext = qtext.replace("**", "").strip().lstrip("、，,。；;：:")
+        qtext = _strip_explanation_tail(qtext)
         # F5c（金标 028 S0348）：叙述行“1、上来照例还是问了问项目：”
         # 有题号但整行是面经叙事，不是题；成题会偷走后面的叙述内容。
         if (style == "题号" and RE_NARRATIVE_LEAD.search(qtext)

@@ -61,6 +61,11 @@ def test_glued_hier_linestart_bleed():
     a = permgen_q[0]["a"]
     assert "2.4.2" not in a, "行首粘连的层级节号不应混入答案"
     assert "类加载检查" not in a, "下一节内容不应混入答案"
+    # 真题"说一下Java对象的创建过程"应被捞回，但题干不能粘着说明尾巴。
+    obj_q = [it for it in items if "对象的创建过程" in it["q"]]
+    assert obj_q, "2.4.2 真题应被捞回而不是整节丢弃"
+    assert "下图便是" not in obj_q[0]["q"], "说明句不应混进题干"
+    assert "我建议" not in obj_q[0]["q"], "说明句不应混进题干"
 
 
 def test_hier_question_still_binds():
