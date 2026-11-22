@@ -58,14 +58,19 @@ def _unwrap_bold(text: str) -> str:
 
 
 def clean_question_text(text: str) -> str:
-    """清洗题干显示文本；代码/指针类题干原样返回（仅 strip）。"""
+    """清洗题干显示文本；代码/指针类题干原样返回（仅 strip）。
+
+    只有真的解掉了 `**` 或剥掉了题号才做空格整理：否则 TOC 点线、
+    乱码行这类文本会被顺带改动，清洗范围就超出 F4 了。
+    """
     if not text:
         return text
     text = text.strip()          # chunker 的 q 常带行尾换行，先去掉再判“是否多行代码”
     if _looks_like_code(text):
         return text
-    out = _unwrap_bold(text)
-    out = _strip_leading_number(out)
+    out = _strip_leading_number(_unwrap_bold(text))
+    if out == text:
+        return text
     out = SPACES.sub(" ", out)
     out = SPACE_BEFORE_PUNCT.sub("", out)
     return out.strip()

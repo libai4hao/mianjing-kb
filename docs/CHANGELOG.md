@@ -43,6 +43,19 @@
   `__/_<hash8>` 产物不再记 drift；本轮测试环境 `gate --audit` 的 drift 11→0，真正指向别的目录仍报 drift。
   新增 5 条 qtext 用例 + 2 条 gate 用例；存量 md 命名统一（997/28/409 三套）未迁移，单列。详见 docs/41 §13。
 
+- **F4/F5 生产落地（线上生效）**：全量 `extract` 被实测否决——生产 25 篇抽样重切后 16 篇题集不同（合计 227→835 题），
+  等于全库重切 + 重建标签/canonical/向量。改为新增 `mianjing_kb/clean_qtext.py`：只对存量 `questions.q_text`
+  过 `clean_question_text`，`q_norm`/`q_norm_hash`/`q_key`/`a_text` 一律不动（默认 dry-run，`--apply` 才写，走 kb 写锁），
+  并加 3 条用例。清洗规则同步收窄：空格整理只在真的解掉 `**`/剥掉题号时做，生产 dry-run 由 1552 条降到 760 条
+  （排除 TOC 点线与乱码行的顺带改写）。生产执行：`kb.sqlite` 与 `面经库.db` 先备份到
+  `build\backup-2026-11-22-f4\`；`clean_qtext --apply` 改 760 条后按 qid 定点同步线上库的 `questions.q_text`
+  + 该行 `questions_fts`。结果：题 20010 / 向量 20010 不变、`q_text` 含 `**` 434→28（残留均为单边 `**`，
+  属成对才解的预期保护）、FTS 20010 行且 `MATCH 'redis'` 正常。`refresh` 无法用于生产重建：`build_db` 的排除表
+  会把 38 篇退役源对应的 94 条历史题挡在发布池外，导致向量对齐 ABORT，故本轮不重建、只定点洗显示。
+  F5 生产 `gate --audit` drift **0**（collisions 14、missing 24 为既有）；audit 会写 `gate_results` 使 status 短暂
+  STALE，按 F3 顺序补跑 `_stamp_verify_report` 后 `status` **PASS**（`at=2026-11-22T20:34:32`，G1–G5/G8 全 PASS，15.4 s）。
+  详见 docs/41 §14。
+
 - **原始文档小规模测试与再修 3 项**：用 5 篇 raw_docs 实跑 `chunk_v2` + 异常检测，从 100+ 异常中筛出 3 个可安全修复的真 bug（答案行以方法调用 `start()` 结尾被误判选择题空括号、`答：…` 回答行成题、`聊了聊项目；` 分号叙述行成题），TDD 修复：`_is_qline` 空括号规则排除方法调用 + 结论排除前缀补 `答：/回答：/解析：/解答：`、F5c 叙述行门补 `；/;`；028 异常 2→0、074 异常 4→3；新增 3 条回归 fixture。报告见 `docs/原始文档小规模测试报告-2026-11-22.md`。chunker 套件 141 passed，全量 pytest 728 passed / 7 skipped / 1 failed（基线无关）。
 - **切题逻辑金标驱动修复（F1–F7，7 提交 `2a9a58d..21dc1d5`）**：依据人工金标 100 条样本中
   5 篇文档 20 条的复核，修复 8 类结构性错误中的 8 条（TOC 条目被当题、目录幽灵答案与真身
