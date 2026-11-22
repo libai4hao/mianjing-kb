@@ -309,3 +309,70 @@ def test_narrative_lead_not_question():
     enc = [it for it in items if "字符集和编码" in it["q"]]
     assert enc, "后面的真问句应成题"
     assert "符号的集合" in enc[0]["a"]
+
+
+# --------------------------------------------------- 原始文档小规模测试 / R1-R3
+# 2026-11-22 用 5 篇 raw_docs 实跑发现（见 .review_mianjing/原始文档小规模测试报告.md）：
+# 答案正文行/回答行/叙述行被独立问句通道误当成题。
+
+DOC_METHOD_CALL_ANSWER = """# Java题
+
+43. 线程的 run() 和 start() 有什么区别？
+
+start() 方法用于启动线程，run() 方法用于执行线程的运行时代码。run() 可以重复调用，而 start()
+
+只能调用一次。
+
+44. 创建线程池有哪几种方式？
+
+线程池创建有七种方式。
+"""
+
+DOC_ANSWER_LINE = """# 面经
+
+1、上来照例还是问了问项目：
+
+答：我介绍了自己的项目背景，项目的整个流程，由于是一个多人合作的项目，还介绍了自己负责项目的哪个模块。
+
+2、项目亮点
+
+我介绍了项目的亮点。
+
+4、字符集和编码的区别？
+
+字符集是符号的集合。
+"""
+
+DOC_NARRATIVE_SEMICOLON = """# 面经
+
+三面
+
+1、三面也是上来聊了聊项目以及项目亮点；
+
+2、然后就出了一道场景图，就是对于一个上线的系统，它会周期性地出现卡顿，这是怎么回事，让我分析原因.
+"""
+
+
+def test_method_call_answer_not_question():
+    items = chunker.chunk_v2(DOC_METHOD_CALL_ANSWER)["items"]
+    run_start = [it for it in items if "run() 和 start()" in it["q"]]
+    assert run_start, "真问题应成题"
+    assert "只能调用一次" in run_start[0]["a"], \
+        "答案正文（以方法调用 start() 结尾）应挂到该题，不能被当成独立题"
+    assert not any(it["q"].startswith("start() 方法用于启动线程") for it in items), \
+        "以方法调用结尾的答案行不是选择题空括号，不应成题"
+
+
+def test_answer_line_not_question():
+    items = chunker.chunk_v2(DOC_ANSWER_LINE)["items"]
+    assert not any(it["q"].startswith("答：") for it in items), \
+        "“答：…”回答行不应被当成独立问句题"
+    enc = [it for it in items if "字符集和编码" in it["q"]]
+    assert enc, "后面的真问句仍应成题"
+    assert "符号的集合" in enc[0]["a"]
+
+
+def test_narrative_semicolon_not_question():
+    items = chunker.chunk_v2(DOC_NARRATIVE_SEMICOLON)["items"]
+    assert not any("聊了聊项目" in it["q"] for it in items), \
+        "“聊了聊项目；”叙述行（；结尾）不应成题，与 S0348（：结尾）同口径"

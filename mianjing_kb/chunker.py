@@ -521,11 +521,15 @@ def _is_qline(s: str) -> bool:
     if RE_QEND.search(s):
         return True
     # 选择题常以空括号收尾：`瀑布模型开发流程（）`
-    if re.search(r'[（(]\s*[)）]\s*$', s):
+    # 但 `start()` / `run()` 这类方法调用结尾是答案正文，不是选择题空括号。
+    if (re.search(r'[（(]\s*[)）]\s*$', s)
+            and not re.search(r'[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*$',
+                              unicodedata.normalize("NFKC", s))):
         return True
     # 结论/过渡/说明句里的问词不是题干。
     if re.match(r'^(?:这就是|所以|因此|也就是说|综上|总之|那么|可见|于是|'
-                r'至于|先解释|首先|其次|再次|然后|最后|先说|再说|接着|需要)', s):
+                r'至于|先解释|首先|其次|再次|然后|最后|先说|再说|接着|需要|'
+                r'答[：:]|回答[：:]|解析[：:]|解答[：:])', s):
         return False
     if re.match(r'^(?:的|了|是|在|和|与|及|并|而|但|就|也|都|其|此|该)\s', s):
         return False
@@ -1147,8 +1151,9 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         qtext = _strip_explanation_tail(qtext)
         # F5c（金标 028 S0348）：叙述行“1、上来照例还是问了问项目：”
         # 有题号但整行是面经叙事，不是题；成题会偷走后面的叙述内容。
+        # 结尾标点是面经叙述的常见收束（：/；），两者都按叙述行拦。
         if (style == "题号" and RE_NARRATIVE_LEAD.search(qtext)
-                and qtext.rstrip().endswith(("：", ":"))
+                and qtext.rstrip().endswith(("：", ":", "；", ";"))
                 and not re.search(r"[?？]", qtext)):
             kinds[i] = "section"
             last_qid = None
