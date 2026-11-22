@@ -492,6 +492,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     exec_script(conn, SCHEMA_FILE.read_text(encoding="utf-8"))
 
 
+def _ensure_answer_state(conn: sqlite3.Connection) -> None:
+    """018：空答案成因标记 —— questions.answer_state。
+
+    值域（由 `python -m mianjing_kb.answer_state --apply` 回填）：
+    - `ok`              原文有答案；
+    - `no_answer_source` 源文档本身只列问题（面经回忆/题库清单），不是切块缺陷；
+    - `boundary_gap`    同文档多数题有答案、此题却空 —— 疑似切块错位/答案被邻题吃掉；
+    - `toc_noise`       目录区/清单区整段推入的伪题（连续空答案且标题式）。
+    抽检统计必须按本列分层：`no_answer_source` 不进"答案缺失"缺陷率。
+    """
+    if not _column_exists(conn, "questions", "answer_state"):
+        conn.execute("ALTER TABLE questions ADD COLUMN answer_state TEXT")
+
+
 MIGRATIONS = [
     ("001_init", _init_schema),
     ("002_parent_dir", _ensure_parent_dir),
@@ -510,6 +524,7 @@ MIGRATIONS = [
     ("015_document_products", _ensure_document_products),
     ("016_stable_question_keys", _ensure_stable_question_keys),
     ("017_label_facts_hardening", _ensure_label_facts_hardening),
+    ("018_answer_state", _ensure_answer_state),
 ]
 
 

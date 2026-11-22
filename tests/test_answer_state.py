@@ -1,0 +1,58 @@
+# -*- coding: utf-8 -*-
+"""answer_state：源文档缺答案 / 切块缺口 / 目录噪声 的判定口径。"""
+import sqlite3
+
+from mianjing_kb.answer_state import GAP, NO_SOURCE, OK, TOC, summary, classify
+
+
+def _db(rows):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("create table questions (qid integer primary key, doc_hash text, seq integer,"
+                 " q_text text, a_text text)")
+    conn.executemany("insert into questions (qid,doc_hash,seq,q_text,a_text) values (?,?,?,?,?)",
+                     rows)
+    conn.execute("create table questionsx (x integer)")  # 占位，避免空库误判
+    return conn
+
+
+class TestClassify:
+    def test_answerless_doc_is_source_missing(self):
+        # 5 题里只有 1 题有答案 → 覆盖率 0.2，属于"问题清单"文档
+        conn = _db([(1, "d1", 1, "什么是 A？", ""), (2, "d1", 2, "什么是 B？", ""),
+                    (3, "d1", 3, "什么是 C？", ""), (4, "d1", 4, "什么是 D？", ""),
+                    (5, "d1", 5, "什么是 E？", "有答案")])
+        res = classify(conn)
+        assert res["state"][1] == NO_SOURCE and res["state"][5] == OK
+
+    def test_single_gap_in_good_doc(self):
+        # 6 题里 5 题有答案（覆盖率 0.83）→ 那条空的算切块缺口
+        rows = [(i, "d2", i, f"问题{i}？", "答案") for i in range(1, 6)]
+        rows.append((6, "d2", 6, "问题6？", ""))
+        res = classify(_db(rows))
+        assert res["state"][6] == GAP
+        assert res["counts"].get(GAP) == 1
+
+    def test_toc_run_marks_noise(self):
+        # 10 条连续空答案、标题式（无问词、短）→ toc_noise
+        titles = ["基础语法", "数据类型", "运算符", "关键字", "变量与方法",
+                  "面向对象", "集合", "异常", "IO 流", "反射"]
+        rows = [(i, "d3", i, t, "") for i, t in enumerate(titles, 1)]
+        rows += [(11, "d3", 11, "什么是 JVM 内存模型？", "答案")]
+        res = classify(_db(rows))
+        assert res["counts"].get(TOC, 0) >= 9
+
+    def test_threshold_configurable(self):
+        rows = [(i, "d4", i, f"问题{i}？", "" if i > 3 else "答案") for i in range(1, 7)]
+        strict = classify(_db(rows), doc_coverage_min=0.9)   # 覆盖率 0.5 ≤ 0.9 → 全算源文档缺答案
+        loose = classify(_db(rows), doc_coverage_min=0.3)    # 覆盖率 0.5 > 0.3 → 算切块缺口
+        assert strict["counts"].get(NO_SOURCE, 0) == 3
+        assert loose["counts"].get(GAP, 0) == 3
+
+
+class TestSummary:
+    def test_summary_counts(self):
+        conn = _db([(1, "d", 1, "q", "a")])
+        conn.execute("alter table questions add column answer_state text")
+        conn.execute("update questions set answer_state='ok'")
+        assert summary(conn)["counts"] == {"ok": 1}

@@ -51,6 +51,11 @@ def _table_exists(con, name: str) -> bool:
     ).fetchone()[0] > 0
 
 
+def _column_exists(con, table: str, column: str) -> bool:
+    """老库可能还没跑 018 迁移：列不存在时不要拿 answer_state 去查。"""
+    return any(r[1] == column for r in con.execute(f"PRAGMA table_info({table})"))
+
+
 def _scalar(con, sql: str, default: int | None = 0) -> int | None:
     try:
         row = con.execute(sql).fetchone()
@@ -135,6 +140,11 @@ def _kb_summary(con) -> dict:
             "with_q_key": _scalar(
                 con, "SELECT COUNT(*) FROM questions WHERE COALESCE(q_key,'') != ''"),
         }
+        if _column_exists(con, "questions", "answer_state"):
+            out["questions"]["by_answer_state"] = {
+                r[0] or "unmarked": r[1] for r in con.execute(
+                    "SELECT answer_state, COUNT(*) FROM questions GROUP BY 1 ORDER BY 2 DESC")
+            }
     else:
         out["questions"] = {"present": False}
 
@@ -362,6 +372,11 @@ def render_text(data: dict) -> str:
         "[门禁]",
         f"  {gates.get('state')}  verdict={gates.get('verdict')}  at={gates.get('at')}",
     ]
+    astate = qs.get("by_answer_state") or {}
+    if astate:
+        i = next(i for i, x in enumerate(lines) if x == "[打标]")
+        lines.insert(i - 1 if lines[i - 1] == "" else i,
+                     "  答案来源 " + "  ".join(f"{k} {_fmt(v)}" for k, v in astate.items()))
     if gates.get("stale_reasons"):
         lines.append("  过期原因：" + "；".join(gates["stale_reasons"]))
     if gates.get("gates"):

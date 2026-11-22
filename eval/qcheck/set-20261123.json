@@ -1,0 +1,2296 @@
+{
+ "seed": 20261123,
+ "n": 253,
+ "quotas_requested": {
+  "ok": 120,
+  "boundary_gap": 40,
+  "no_answer_source": 30,
+  "toc_noise": 10
+ },
+ "pool_sizes": {
+  "ok": 14645,
+  "boundary_gap": 2526,
+  "no_answer_source": 2654,
+  "toc_noise": 88
+ },
+ "items": [
+  {
+   "qid": 195808,
+   "doc_hash": "0c1ac13d9a7a7e2a",
+   "qtype": "八股",
+   "doc": "Linux面试专题.md",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 195990,
+   "doc_hash": "0faf6edb4299ffe2",
+   "qtype": "八股",
+   "doc": "Java集合面试题 52道.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 196401,
+   "doc_hash": "12c414093136e2c1",
+   "qtype": "八股",
+   "doc": "面向字节_Java语法基础.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 197187,
+   "doc_hash": "225ae19a1ac1760d",
+   "qtype": "算法",
+   "doc": "（技术类）面经.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 198622,
+   "doc_hash": "2fa4a2b974573638",
+   "qtype": "八股",
+   "doc": "唯品会技术岗面试经验1.docx",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 199105,
+   "doc_hash": "33f1329453ff968e",
+   "qtype": "八股",
+   "doc": "阿里巴巴 Java 面试参考指南（泰山版）.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 200206,
+   "doc_hash": "3882c9d68e439b81",
+   "qtype": "场景",
+   "doc": "百度篇.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 202699,
+   "doc_hash": "541e8a8a2bcd0318",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心讲.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 202957,
+   "doc_hash": "541e8a8a2bcd0318",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心讲.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 203213,
+   "doc_hash": "541e8a8a2bcd0318",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心讲.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 203230,
+   "doc_hash": "541e8a8a2bcd0318",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心讲.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 203292,
+   "doc_hash": "541e8a8a2bcd0318",
+   "qtype": "HR",
+   "doc": "1685页 Java面试突击核心讲.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 203362,
+   "doc_hash": "541e8a8a2bcd0318",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心讲.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 203375,
+   "doc_hash": "541e8a8a2bcd0318",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心讲.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 203819,
+   "doc_hash": "5cdfdf2e81f68a55",
+   "qtype": "八股",
+   "doc": "高频面试题.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 203887,
+   "doc_hash": "5d3edeb5a580d25d",
+   "qtype": "八股",
+   "doc": "“java高分面试指南”-25分类227页1000+题50w+字解析.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204475,
+   "doc_hash": "65c8c775b1c6f540",
+   "qtype": "八股",
+   "doc": "JavaGuide面试突击版5.0.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204539,
+   "doc_hash": "65c8c775b1c6f540",
+   "qtype": "八股",
+   "doc": "JavaGuide面试突击版5.0.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204762,
+   "doc_hash": "68be6e50307c6986",
+   "qtype": "八股",
+   "doc": "最新大厂Java面试题（上）.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 205006,
+   "doc_hash": "6b792a269ba00796",
+   "qtype": "八股",
+   "doc": "Java 面经手册·小傅哥(公众号：bugstack虫洞栈).pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 205689,
+   "doc_hash": "7495cda1516b8880",
+   "qtype": "八股",
+   "doc": "开源电子书：Netty 手册.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 205823,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 205841,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206052,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206172,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206185,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206197,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206201,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206309,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206995,
+   "doc_hash": "7c067e4f592a36a6",
+   "qtype": "八股",
+   "doc": "1_Java面试宝典完整版最最最新.pdf",
+   "answer_state": "boundary_gap",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 207302,
+   "doc_hash": "826a5fb1207e4556",
+   "qtype": "八股",
+   "doc": "v3.0-JavaGuide面试突击版夜间模式.md",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207719,
+   "doc_hash": "86b3c1f5ed09baa5",
+   "qtype": "八股",
+   "doc": "v3.0-JavaGuide面试突击版夜间模式.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207721,
+   "doc_hash": "86b3c1f5ed09baa5",
+   "qtype": "八股",
+   "doc": "v3.0-JavaGuide面试突击版夜间模式.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207811,
+   "doc_hash": "86b3c1f5ed09baa5",
+   "qtype": "八股",
+   "doc": "v3.0-JavaGuide面试突击版夜间模式.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207918,
+   "doc_hash": "87e8e690abd166d4",
+   "qtype": "八股",
+   "doc": "21年最新面试题.pdf",
+   "answer_state": "boundary_gap",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 208829,
+   "doc_hash": "979d2eb4c14681b5",
+   "qtype": "八股",
+   "doc": "28道ZooKeeper面试题-已转档.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 210321,
+   "doc_hash": "b0886bbb689dc162",
+   "qtype": "项目",
+   "doc": "阿里巴巴2015 暑期实习 运营专员.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211296,
+   "doc_hash": "beb1e85b036eb053",
+   "qtype": "算法",
+   "doc": "BATJ面试题汇总及详解(进大厂必看)(65页).pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211929,
+   "doc_hash": "ca0ec9a7c5572909",
+   "qtype": "八股",
+   "doc": "电商运营.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212685,
+   "doc_hash": "d72e8c6288060f51",
+   "qtype": "八股",
+   "doc": "大厂真题之OPPO-Java高级.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212988,
+   "doc_hash": "d988baeb83b33f71",
+   "qtype": "八股",
+   "doc": "大厂真题之银盛支付-Java中级.pdf",
+   "answer_state": "boundary_gap",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 213625,
+   "doc_hash": "e6641f3375360b9f",
+   "qtype": "八股",
+   "doc": "迅雷产品.docx",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 214785,
+   "doc_hash": "f87456413fac797d",
+   "qtype": "八股",
+   "doc": "Redis面试题  42道.pdf",
+   "answer_state": "boundary_gap",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 215706,
+   "doc_hash": "ffb5d631ecbee8b6",
+   "qtype": "算法",
+   "doc": "2024年Java程序员找工作最新面试场景攻略.pdf",
+   "answer_state": "boundary_gap",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 195683,
+   "doc_hash": "0b32aca19680fc0f",
+   "qtype": "八股",
+   "doc": "杭研面经.pdf",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 196792,
+   "doc_hash": "195244cfa1b243c2",
+   "qtype": "八股",
+   "doc": "非技术岗面试3.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 197377,
+   "doc_hash": "24f7b4fed2ae92a6",
+   "qtype": "八股",
+   "doc": "一线互联网企业面试题.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 197901,
+   "doc_hash": "29b258a109951b1a",
+   "qtype": "八股",
+   "doc": "唯品会技术岗笔试2.docx",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 198243,
+   "doc_hash": "2d0a05966f6ab922",
+   "qtype": "八股",
+   "doc": "【图灵学院VIP内部书籍】一线互联网公司Java面试核心知识点.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 198332,
+   "doc_hash": "2d0a05966f6ab922",
+   "qtype": "八股",
+   "doc": "【图灵学院VIP内部书籍】一线互联网公司Java面试核心知识点.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 198483,
+   "doc_hash": "2d0a05966f6ab922",
+   "qtype": "八股",
+   "doc": "【图灵学院VIP内部书籍】一线互联网公司Java面试核心知识点.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 198564,
+   "doc_hash": "2d0a05966f6ab922",
+   "qtype": "八股",
+   "doc": "【图灵学院VIP内部书籍】一线互联网公司Java面试核心知识点.pdf",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 200148,
+   "doc_hash": "370e2b93fa7d7d8f",
+   "qtype": "八股",
+   "doc": "非技术岗笔试题.docx",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 200742,
+   "doc_hash": "3d64bca0da204bf1",
+   "qtype": "算法",
+   "doc": "一线互联网企业面试题.md",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 200743,
+   "doc_hash": "3d64bca0da204bf1",
+   "qtype": "算法",
+   "doc": "一线互联网企业面试题.md",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 200744,
+   "doc_hash": "3d64bca0da204bf1",
+   "qtype": "算法",
+   "doc": "一线互联网企业面试题.md",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 201019,
+   "doc_hash": "3eaba1220f3098e1",
+   "qtype": "八股",
+   "doc": "提前批后台开发.pdf",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 201225,
+   "doc_hash": "42d89634de3c6dd0",
+   "qtype": "HR",
+   "doc": "应聘百度公司面试经验.docx",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204366,
+   "doc_hash": "6424203667c5310d",
+   "qtype": "HR",
+   "doc": "唯品会面试非技术2.docx",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 207235,
+   "doc_hash": "8138f174dbe0398d",
+   "qtype": "八股",
+   "doc": "头条java面试题.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207286,
+   "doc_hash": "82194c015634a906",
+   "qtype": "八股",
+   "doc": "",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207547,
+   "doc_hash": "83fbda4d2c822d0b",
+   "qtype": "HR",
+   "doc": "字节跳动面经.md",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207559,
+   "doc_hash": "849ae4931ee21c3a",
+   "qtype": "八股",
+   "doc": "数据开发.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 208035,
+   "doc_hash": "889e90b46f9272f0",
+   "qtype": "HR",
+   "doc": "财务类.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 208465,
+   "doc_hash": "9093efc09e87f287",
+   "qtype": "八股",
+   "doc": "SpringMVC面试专题.md",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 208699,
+   "doc_hash": "937de6ca1143f338",
+   "qtype": "八股",
+   "doc": "工程师笔试15题.docx",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 208955,
+   "doc_hash": "9a265ef8a6d54fe4",
+   "qtype": "八股",
+   "doc": "架构师面试题系列之Spring Boot面试专题及答案（33题）.docx",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 209419,
+   "doc_hash": "9fd33f193fa21dc4",
+   "qtype": "八股",
+   "doc": "_Java面试常见问题总结（2023最新版）.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 209449,
+   "doc_hash": "9fd33f193fa21dc4",
+   "qtype": "八股",
+   "doc": "_Java面试常见问题总结（2023最新版）.pdf",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 209553,
+   "doc_hash": "9fd33f193fa21dc4",
+   "qtype": "八股",
+   "doc": "_Java面试常见问题总结（2023最新版）.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 209919,
+   "doc_hash": "a64ee7beb144093f",
+   "qtype": "八股",
+   "doc": "阿里云Java研发三面技术+HR面.docx",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 209934,
+   "doc_hash": "a6ab080ae308f063",
+   "qtype": "算法",
+   "doc": "JAVA核心面试知识整理.md",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 210327,
+   "doc_hash": "b1042ebe5e2885c0",
+   "qtype": "八股",
+   "doc": "考试重点修正版.pdf",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 210420,
+   "doc_hash": "b3bb4499e1a55987",
+   "qtype": "八股",
+   "doc": "面试真题目录.docx",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211403,
+   "doc_hash": "bf5ecfd85b2609d8",
+   "qtype": "八股",
+   "doc": "测开四面.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211419,
+   "doc_hash": "bf5ecfd85b2609d8",
+   "qtype": "八股",
+   "doc": "测开四面.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211425,
+   "doc_hash": "bf6e851d29a711d7",
+   "qtype": "八股",
+   "doc": "面试数据库知识必须要知道的sql语法和SQL语句.docx",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211800,
+   "doc_hash": "c4984e336f48fc86",
+   "qtype": "八股",
+   "doc": "字节、阿里、用友、美团、荣耀面经整理.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212317,
+   "doc_hash": "d27fd83c8cc23ca0",
+   "qtype": "八股",
+   "doc": "前端.docx",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212323,
+   "doc_hash": "d27fd83c8cc23ca0",
+   "qtype": "八股",
+   "doc": "前端.docx",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212599,
+   "doc_hash": "d695212dfb7f9de9",
+   "qtype": "八股",
+   "doc": "非技术岗面试.docx",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 213052,
+   "doc_hash": "db95c93317cf4487",
+   "qtype": "算法",
+   "doc": "Java.docx",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 213436,
+   "doc_hash": "e294ff57fb8930ea",
+   "qtype": "八股",
+   "doc": "美团.2021最新面经.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 213437,
+   "doc_hash": "e294ff57fb8930ea",
+   "qtype": "八股",
+   "doc": "美团.2021最新面经.pdf",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 213480,
+   "doc_hash": "e36b52853eb61858",
+   "qtype": "HR",
+   "doc": "唯品会面试非技术岗3.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 214738,
+   "doc_hash": "f834cb945d3fc7d4",
+   "qtype": "算法",
+   "doc": "大厂面试03.pdf",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 214776,
+   "doc_hash": "f83a91614a26b77b",
+   "qtype": "八股",
+   "doc": "后台面经.pdf",
+   "answer_state": "no_answer_source",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 215280,
+   "doc_hash": "fd6a465916fc9c89",
+   "qtype": "算法",
+   "doc": "Android转后台.pdf",
+   "answer_state": "no_answer_source",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 195393,
+   "doc_hash": "04319db78ad89c76",
+   "qtype": "八股",
+   "doc": "前端一面.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 195695,
+   "doc_hash": "0b32aca19680fc0f",
+   "qtype": "八股",
+   "doc": "杭研面经.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 195788,
+   "doc_hash": "0b80d8b6ba0441dd",
+   "qtype": "八股",
+   "doc": "历年百度笔试题面试题集总.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 196044,
+   "doc_hash": "107b2a94c50c8660",
+   "qtype": "八股",
+   "doc": "（非技术类）面经1.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 196090,
+   "doc_hash": "11194231b739bc9a",
+   "qtype": "八股",
+   "doc": "",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 196172,
+   "doc_hash": "1239c157c5f26cf6",
+   "qtype": "八股",
+   "doc": "暗黑风格-图解计算机网络.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 196219,
+   "doc_hash": "1239c157c5f26cf6",
+   "qtype": "八股",
+   "doc": "暗黑风格-图解计算机网络.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 196267,
+   "doc_hash": "1239c157c5f26cf6",
+   "qtype": "八股",
+   "doc": "暗黑风格-图解计算机网络.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 196314,
+   "doc_hash": "1239c157c5f26cf6",
+   "qtype": "八股",
+   "doc": "暗黑风格-图解计算机网络.pdf",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 196356,
+   "doc_hash": "1239c157c5f26cf6",
+   "qtype": "八股",
+   "doc": "暗黑风格-图解计算机网络.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 196627,
+   "doc_hash": "1627c049071a5186",
+   "qtype": "八股",
+   "doc": "BATJ面试题1000道.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 196922,
+   "doc_hash": "1d02fc7ecc2cd61c",
+   "qtype": "八股",
+   "doc": "06-Java最新2022版面试题及解答-阿里内部资料(266页).pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 197169,
+   "doc_hash": "21a6a3f6574c8693",
+   "qtype": "八股",
+   "doc": "面向字节_数据库.pdf",
+   "answer_state": "ok",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 197248,
+   "doc_hash": "23cca4c1af9dac47",
+   "qtype": "项目",
+   "doc": "游戏项目管理.pdf",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 197395,
+   "doc_hash": "24fbef570a05973f",
+   "qtype": "八股",
+   "doc": "阿里巴巴笔试题.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 197594,
+   "doc_hash": "26a37758676a1a4d",
+   "qtype": "八股",
+   "doc": "Java常见200+面试题汇总（2020版）.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 197649,
+   "doc_hash": "26a37758676a1a4d",
+   "qtype": "八股",
+   "doc": "Java常见200+面试题汇总（2020版）.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 197796,
+   "doc_hash": "28ab4225c1cf92a9",
+   "qtype": "八股",
+   "doc": "面向字节_SQL优化.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 197868,
+   "doc_hash": "299bf82c2465cd36",
+   "qtype": "八股",
+   "doc": "【合并版】MyBatis面试题合集.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 197873,
+   "doc_hash": "299bf82c2465cd36",
+   "qtype": "八股",
+   "doc": "【合并版】MyBatis面试题合集.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 198787,
+   "doc_hash": "300d3507826ca834",
+   "qtype": "八股",
+   "doc": "亮白风格-图解计算机网络.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 199015,
+   "doc_hash": "32e087486abd7f6c",
+   "qtype": "八股",
+   "doc": "校招运营.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 199060,
+   "doc_hash": "33f1329453ff968e",
+   "qtype": "八股",
+   "doc": "阿里巴巴 Java 面试参考指南（泰山版）.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 199347,
+   "doc_hash": "34cf2454aebfe34d",
+   "qtype": "八股",
+   "doc": "咕泡教育80万字大厂面试真题深度解析.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 199373,
+   "doc_hash": "34cf2454aebfe34d",
+   "qtype": "八股",
+   "doc": "咕泡教育80万字大厂面试真题深度解析.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 199424,
+   "doc_hash": "34cf2454aebfe34d",
+   "qtype": "八股",
+   "doc": "咕泡教育80万字大厂面试真题深度解析.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 199540,
+   "doc_hash": "34cf2454aebfe34d",
+   "qtype": "八股",
+   "doc": "咕泡教育80万字大厂面试真题深度解析.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 199811,
+   "doc_hash": "34cf2454aebfe34d",
+   "qtype": "八股",
+   "doc": "咕泡教育80万字大厂面试真题深度解析.pdf",
+   "answer_state": "ok",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 200049,
+   "doc_hash": "3693c7c18b0ec4b7",
+   "qtype": "八股",
+   "doc": "1000道 互联网Java工程师面试题 485页_PDF密码解除.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 200118,
+   "doc_hash": "3693c7c18b0ec4b7",
+   "qtype": "八股",
+   "doc": "1000道 互联网Java工程师面试题 485页_PDF密码解除.pdf",
+   "answer_state": "ok",
+   "label": "partial",
+   "reason": ""
+  },
+  {
+   "qid": 200351,
+   "doc_hash": "39c46a6756d4decb",
+   "qtype": "八股",
+   "doc": "v3.0-JavaGuide面试突击版.md",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 200836,
+   "doc_hash": "3da09be76d8cb124",
+   "qtype": "八股",
+   "doc": "Java开发手册灵魂17问.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 200901,
+   "doc_hash": "3da09be76d8cb124",
+   "qtype": "八股",
+   "doc": "Java开发手册灵魂17问.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 200983,
+   "doc_hash": "3e161fcfdbead47f",
+   "qtype": "算法",
+   "doc": "Redis面试题（含答案）.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 201107,
+   "doc_hash": "3fcee868b2f6f528",
+   "qtype": "八股",
+   "doc": "阿里内部Java进阶手册.md",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 201118,
+   "doc_hash": "3fedd5ffb0100574",
+   "qtype": "八股",
+   "doc": "架构师面试题系列之Dubbo面试专题及答案（29题）.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 201382,
+   "doc_hash": "4851220dda9d5f23",
+   "qtype": "八股",
+   "doc": "（技术类）面经.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 201757,
+   "doc_hash": "496d8f48fc88c61a",
+   "qtype": "八股",
+   "doc": "[原创]咕泡教育35万字大厂面试真题深度解析.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 201786,
+   "doc_hash": "496d8f48fc88c61a",
+   "qtype": "八股",
+   "doc": "[原创]咕泡教育35万字大厂面试真题深度解析.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 201954,
+   "doc_hash": "49dd5e22cc523346",
+   "qtype": "八股",
+   "doc": "Leetcode-Go.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 202219,
+   "doc_hash": "4d6a3d8cea4b8c42",
+   "qtype": "八股",
+   "doc": "产品类面试真题.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 202337,
+   "doc_hash": "4fc5b4b5f63ec3fe",
+   "qtype": "八股",
+   "doc": "【合并版】Nginx面试题合集.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 202381,
+   "doc_hash": "50b98c0d13b966cd",
+   "qtype": "八股",
+   "doc": "大厂真题之阿里云-Java实习生.pdf",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 202421,
+   "doc_hash": "519e09213e8d6be5",
+   "qtype": "八股",
+   "doc": "微软面经.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 202486,
+   "doc_hash": "541e8a8a2bcd0318",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心讲.pdf",
+   "answer_state": "ok",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 202725,
+   "doc_hash": "541e8a8a2bcd0318",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心讲.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 202739,
+   "doc_hash": "541e8a8a2bcd0318",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心讲.pdf",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 203045,
+   "doc_hash": "541e8a8a2bcd0318",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心讲.pdf",
+   "answer_state": "ok",
+   "label": "partial",
+   "reason": ""
+  },
+  {
+   "qid": 203475,
+   "doc_hash": "54da2fd58d5598a7",
+   "qtype": "八股",
+   "doc": "07-ICD呼叫中心试题.pdf",
+   "answer_state": "ok",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 203582,
+   "doc_hash": "57c30ec34e76faa3",
+   "qtype": "八股",
+   "doc": "阿里巴巴2015系统工程师研发笔试题.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 203774,
+   "doc_hash": "5c12c59d4c1c1ff7",
+   "qtype": "八股",
+   "doc": "JAVA核心面试知识整理_2.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204020,
+   "doc_hash": "5f97801529d6416f",
+   "qtype": "八股",
+   "doc": "v3.0-JavaGuide面试突击版.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204121,
+   "doc_hash": "5f97801529d6416f",
+   "qtype": "八股",
+   "doc": "v3.0-JavaGuide面试突击版.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204151,
+   "doc_hash": "603e959260a8cb0c",
+   "qtype": "HR",
+   "doc": "产品经理.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204304,
+   "doc_hash": "634b0acf83059821",
+   "qtype": "八股",
+   "doc": "后台开发核心技术与应用实践高清PDF.pdf",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 204336,
+   "doc_hash": "634b0acf83059821",
+   "qtype": "八股",
+   "doc": "后台开发核心技术与应用实践高清PDF.pdf",
+   "answer_state": "ok",
+   "label": "partial",
+   "reason": ""
+  },
+  {
+   "qid": 204377,
+   "doc_hash": "654ff1775e858dd8",
+   "qtype": "八股",
+   "doc": "腾讯.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204430,
+   "doc_hash": "657b8f9b27a4a54e",
+   "qtype": "八股",
+   "doc": "腾讯面试真题.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204493,
+   "doc_hash": "65c8c775b1c6f540",
+   "qtype": "八股",
+   "doc": "JavaGuide面试突击版5.0.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204673,
+   "doc_hash": "670d0d3d7e3d4168",
+   "qtype": "八股",
+   "doc": "网易笔试题.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204745,
+   "doc_hash": "68be6e50307c6986",
+   "qtype": "八股",
+   "doc": "最新大厂Java面试题（上）.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204797,
+   "doc_hash": "6a249e67cddcfa6a",
+   "qtype": "算法",
+   "doc": "【技术岗】京东2015校园招聘笔试题.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204863,
+   "doc_hash": "6a60ad5360249b6a",
+   "qtype": "八股",
+   "doc": "[www.java1234.com]115个Java面试题和答案——终极（下）_尚硅谷_宋红康.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204883,
+   "doc_hash": "6b2a5c11431195d9",
+   "qtype": "八股",
+   "doc": "12万字java面经总结.pdf",
+   "answer_state": "ok",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 205037,
+   "doc_hash": "6c1b5c05ff877f59",
+   "qtype": "八股",
+   "doc": "美团篇.pdf",
+   "answer_state": "ok",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 205197,
+   "doc_hash": "6e9b5468d2e1c5d5",
+   "qtype": "八股",
+   "doc": "阿里巴巴2022年Java架构师面试题(第三方整理·原文件名2023).pdf",
+   "answer_state": "ok",
+   "label": "partial",
+   "reason": ""
+  },
+  {
+   "qid": 205315,
+   "doc_hash": "7086dcca46b82eed",
+   "qtype": "八股",
+   "doc": "去哪儿2014 产品岗.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 205611,
+   "doc_hash": "72bdd31a06bbf032",
+   "qtype": "八股",
+   "doc": "2020面试题总结Redis篇.pdf",
+   "answer_state": "ok",
+   "label": "partial",
+   "reason": ""
+  },
+  {
+   "qid": 205669,
+   "doc_hash": "740a84ec8652d2e4",
+   "qtype": "八股",
+   "doc": "面向字节_Zookeeper.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 205705,
+   "doc_hash": "7495cda1516b8880",
+   "qtype": "八股",
+   "doc": "开源电子书：Netty 手册.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 205769,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 205775,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "算法",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 205950,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206393,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "算法",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206405,
+   "doc_hash": "74976f50a5f7b858",
+   "qtype": "八股",
+   "doc": "1685页 Java面试突击核心手册.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206746,
+   "doc_hash": "752928eb00bcbe78",
+   "qtype": "八股",
+   "doc": "Spring面试题（含答案）.md",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206994,
+   "doc_hash": "7c067e4f592a36a6",
+   "qtype": "八股",
+   "doc": "1_Java面试宝典完整版最最最新.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207131,
+   "doc_hash": "7e866c81491fb1dd",
+   "qtype": "八股",
+   "doc": "腾讯研发工程师A笔试卷.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207140,
+   "doc_hash": "7f48f706c52b7110",
+   "qtype": "八股",
+   "doc": "Kafka面试题.md",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207264,
+   "doc_hash": "819cf3fd9c60cc74",
+   "qtype": "八股",
+   "doc": "产品运营.pdf",
+   "answer_state": "ok",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 207415,
+   "doc_hash": "826a5fb1207e4556",
+   "qtype": "八股",
+   "doc": "v3.0-JavaGuide面试突击版夜间模式.md",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207622,
+   "doc_hash": "85ceb5b7047bcac1",
+   "qtype": "八股",
+   "doc": "最新大厂Java面试题（中）.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207720,
+   "doc_hash": "86b3c1f5ed09baa5",
+   "qtype": "八股",
+   "doc": "v3.0-JavaGuide面试突击版夜间模式.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207840,
+   "doc_hash": "86b3c1f5ed09baa5",
+   "qtype": "八股",
+   "doc": "v3.0-JavaGuide面试突击版夜间模式.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 207962,
+   "doc_hash": "87e8e690abd166d4",
+   "qtype": "八股",
+   "doc": "21年最新面试题.pdf",
+   "answer_state": "ok",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 208206,
+   "doc_hash": "8df3e5ea9dad9e29",
+   "qtype": "八股",
+   "doc": "京东2015校园招聘笔试题.pdf",
+   "answer_state": "ok",
+   "label": "partial",
+   "reason": ""
+  },
+  {
+   "qid": 208236,
+   "doc_hash": "8e98304471c0b24e",
+   "qtype": "八股",
+   "doc": "v1.0-JavaGuide面试突击版.md",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 208256,
+   "doc_hash": "8e98304471c0b24e",
+   "qtype": "八股",
+   "doc": "v1.0-JavaGuide面试突击版.md",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 208388,
+   "doc_hash": "907f8aeab55dd3be",
+   "qtype": "八股",
+   "doc": "图解操作系统-亮白风格.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 208586,
+   "doc_hash": "917d5bcb0f36ab7d",
+   "qtype": "八股",
+   "doc": "腾讯求职干货.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 208732,
+   "doc_hash": "93f27facd61ba023",
+   "qtype": "八股",
+   "doc": "第一版全PDF版答案：分布式+微服务+MYSQL+Redis+JVM+Spring等等.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 208739,
+   "doc_hash": "93f27facd61ba023",
+   "qtype": "场景",
+   "doc": "第一版全PDF版答案：分布式+微服务+MYSQL+Redis+JVM+Spring等等.pdf",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 208808,
+   "doc_hash": "9658b0af94f76401",
+   "qtype": "八股",
+   "doc": "MySQL面试题（含答案）.md",
+   "answer_state": "ok",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 208878,
+   "doc_hash": "9842dc86cfbe137c",
+   "qtype": "八股",
+   "doc": "面经.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 209224,
+   "doc_hash": "9e88ddb62a704242",
+   "qtype": "八股",
+   "doc": "阿里内部Java面试题独家整理.md",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 209234,
+   "doc_hash": "9e88ddb62a704242",
+   "qtype": "八股",
+   "doc": "阿里内部Java面试题独家整理.md",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 209241,
+   "doc_hash": "9e88ddb62a704242",
+   "qtype": "八股",
+   "doc": "阿里内部Java面试题独家整理.md",
+   "answer_state": "ok",
+   "label": "partial",
+   "reason": ""
+  },
+  {
+   "qid": 209262,
+   "doc_hash": "9e88ddb62a704242",
+   "qtype": "八股",
+   "doc": "阿里内部Java面试题独家整理.md",
+   "answer_state": "ok",
+   "label": "partial",
+   "reason": ""
+  },
+  {
+   "qid": 209841,
+   "doc_hash": "a46cdaf7e029bc7a",
+   "qtype": "八股",
+   "doc": "1000道+互联网大厂Java工程师面试题.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 209901,
+   "doc_hash": "a5ad2888b2b561fa",
+   "qtype": "八股",
+   "doc": "《Java面试手册》.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 209996,
+   "doc_hash": "a89205fdcf8f9455",
+   "qtype": "八股",
+   "doc": "网易面经.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 210038,
+   "doc_hash": "a8d9d7108412f959",
+   "qtype": "八股",
+   "doc": "技术岗面试合集.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 210083,
+   "doc_hash": "aae836433bcfa7e1",
+   "qtype": "八股",
+   "doc": "SpringBoot面试专题.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 210547,
+   "doc_hash": "b4675258d1e5683b",
+   "qtype": "八股",
+   "doc": "阿里面试.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 210561,
+   "doc_hash": "b4675258d1e5683b",
+   "qtype": "八股",
+   "doc": "阿里面试.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 210601,
+   "doc_hash": "b4675258d1e5683b",
+   "qtype": "八股",
+   "doc": "阿里面试.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 210611,
+   "doc_hash": "b50d7cd65f6f6e8e",
+   "qtype": "八股",
+   "doc": "产品经理.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 210649,
+   "doc_hash": "b633df16fc7cada9",
+   "qtype": "八股",
+   "doc": "腾讯.pdf",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 210659,
+   "doc_hash": "b633df16fc7cada9",
+   "qtype": "八股",
+   "doc": "腾讯.pdf",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 210714,
+   "doc_hash": "b647870c29627b29",
+   "qtype": "八股",
+   "doc": "12万字 java 面经总结.pdf",
+   "answer_state": "ok",
+   "label": "partial",
+   "reason": ""
+  },
+  {
+   "qid": 210726,
+   "doc_hash": "b647870c29627b29",
+   "qtype": "八股",
+   "doc": "12万字 java 面经总结.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 210808,
+   "doc_hash": "b688a11a4c415091",
+   "qtype": "八股",
+   "doc": "RabbitMQ消息中间件面试专题.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 210975,
+   "doc_hash": "b7d8545812315895",
+   "qtype": "八股",
+   "doc": "华为校招面经.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211004,
+   "doc_hash": "b9321649db2d06fd",
+   "qtype": "八股",
+   "doc": "2020最新BAT java经典必考面试题.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211005,
+   "doc_hash": "b9321649db2d06fd",
+   "qtype": "八股",
+   "doc": "2020最新BAT java经典必考面试题.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211019,
+   "doc_hash": "b9495725bbf987a5",
+   "qtype": "八股",
+   "doc": "腾讯.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211094,
+   "doc_hash": "ba5e1b4afe07a517",
+   "qtype": "八股",
+   "doc": "JAVA核心面试知识整理.pdf",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 211137,
+   "doc_hash": "baf4ec777f6b9242",
+   "qtype": "八股",
+   "doc": "面向字节_Redis（上）.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211492,
+   "doc_hash": "c18e3fce808b2377",
+   "qtype": "八股",
+   "doc": "Java虚拟机（JVM）面试题 51道.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211619,
+   "doc_hash": "c1f8bc5bb98abace",
+   "qtype": "八股",
+   "doc": "java面试综合整理版（大全）.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211673,
+   "doc_hash": "c2af85bae21ddce8",
+   "qtype": "八股",
+   "doc": "【合并版】SpringMVC面试题合集.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 211837,
+   "doc_hash": "c77e0fcd5fd4c7b5",
+   "qtype": "八股",
+   "doc": "多线程面试59题（含答案）.md",
+   "answer_state": "ok",
+   "label": "partial",
+   "reason": ""
+  },
+  {
+   "qid": 211880,
+   "doc_hash": "c8f35d7c615ef1c3",
+   "qtype": "八股",
+   "doc": "架构师面试题系列之Spring面试专题及答案（41题）.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212292,
+   "doc_hash": "d1d0d47635d82920",
+   "qtype": "八股",
+   "doc": "面向字节_人事问题.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212304,
+   "doc_hash": "d24cc052a2e708da",
+   "qtype": "八股",
+   "doc": "互联网产品经理 一面.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212359,
+   "doc_hash": "d2c4bffa24b086a5",
+   "qtype": "八股",
+   "doc": "测开四面.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212414,
+   "doc_hash": "d4595c326d945481",
+   "qtype": "HR",
+   "doc": "产品经理.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212504,
+   "doc_hash": "d4729188a310f72b",
+   "qtype": "八股",
+   "doc": "【合并版】Tomcat面试题合集.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212550,
+   "doc_hash": "d62e4445febb0a84",
+   "qtype": "八股",
+   "doc": "并发编程面试题.md",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 212562,
+   "doc_hash": "d62e4445febb0a84",
+   "qtype": "八股",
+   "doc": "并发编程面试题.md",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212612,
+   "doc_hash": "d69b294bc6c385f0",
+   "qtype": "八股",
+   "doc": "MySQL面试专题（上）.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 212679,
+   "doc_hash": "d72e8c6288060f51",
+   "qtype": "八股",
+   "doc": "大厂真题之OPPO-Java高级.pdf",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 212740,
+   "doc_hash": "d85bda695f8470f7",
+   "qtype": "八股",
+   "doc": "大厂Java面试流程与题目汇编.pdf",
+   "answer_state": "ok",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 212979,
+   "doc_hash": "d8f6f1490d24b32e",
+   "qtype": "HR",
+   "doc": "两周拿到字节offer.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 213019,
+   "doc_hash": "da770d4644f38cf5",
+   "qtype": "八股",
+   "doc": "2024 Java offer 收割指南.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 213042,
+   "doc_hash": "db513abfdc470500",
+   "qtype": "八股",
+   "doc": "市场营销.docx",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 213188,
+   "doc_hash": "de4eb2fd57ebaadf",
+   "qtype": "八股",
+   "doc": "阿里巴巴2015研发工程师B笔试卷.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 213809,
+   "doc_hash": "e8977dd244d38ad1",
+   "qtype": "八股",
+   "doc": "RabbitMQ消息中间件面试专题.md",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 213823,
+   "doc_hash": "e8977dd244d38ad1",
+   "qtype": "八股",
+   "doc": "RabbitMQ消息中间件面试专题.md",
+   "answer_state": "ok",
+   "label": "pass",
+   "reason": ""
+  },
+  {
+   "qid": 214012,
+   "doc_hash": "eded65e05ef99c5d",
+   "qtype": "八股",
+   "doc": "【合并版】MySQL面试题合集.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 214023,
+   "doc_hash": "eded65e05ef99c5d",
+   "qtype": "八股",
+   "doc": "【合并版】MySQL面试题合集.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 214119,
+   "doc_hash": "ef64d57a0500695b",
+   "qtype": "八股",
+   "doc": "【合并版】Redis面试题合集.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 214351,
+   "doc_hash": "f0be707a233fb254",
+   "qtype": "八股",
+   "doc": "并发编程面试专题.md",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 214353,
+   "doc_hash": "f16d933263033874",
+   "qtype": "八股",
+   "doc": "网易游戏2013研发工程师笔试卷.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 214559,
+   "doc_hash": "f3cecafdfbb5c13b",
+   "qtype": "八股",
+   "doc": "百度2015安全研发笔试卷.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 214562,
+   "doc_hash": "f3df962714ae3440",
+   "qtype": "八股",
+   "doc": "深入了解性能优化.md",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 214725,
+   "doc_hash": "f7cd16b237f864bb",
+   "qtype": "八股",
+   "doc": "京东管培-技术方向.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 214735,
+   "doc_hash": "f82099464a9fb3d2",
+   "qtype": "八股",
+   "doc": "Tomcat面试专题.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 215266,
+   "doc_hash": "fd59875ef7106bcc",
+   "qtype": "八股",
+   "doc": "其他岗位.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 215485,
+   "doc_hash": "ffb5d631ecbee8b6",
+   "qtype": "八股",
+   "doc": "2024年Java程序员找工作最新面试场景攻略.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 215659,
+   "doc_hash": "ffb5d631ecbee8b6",
+   "qtype": "八股",
+   "doc": "2024年Java程序员找工作最新面试场景攻略.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 215709,
+   "doc_hash": "ffb5d631ecbee8b6",
+   "qtype": "算法",
+   "doc": "2024年Java程序员找工作最新面试场景攻略.pdf",
+   "answer_state": "ok",
+   "label": "fail",
+   "reason": ""
+  },
+  {
+   "qid": 215815,
+   "doc_hash": "ffb5d631ecbee8b6",
+   "qtype": "八股",
+   "doc": "2024年Java程序员找工作最新面试场景攻略.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 215916,
+   "doc_hash": "ffb5d631ecbee8b6",
+   "qtype": "八股",
+   "doc": "2024年Java程序员找工作最新面试场景攻略.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 216047,
+   "doc_hash": "ffb5d631ecbee8b6",
+   "qtype": "八股",
+   "doc": "2024年Java程序员找工作最新面试场景攻略.pdf",
+   "answer_state": "ok",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 196761,
+   "doc_hash": "18d7763a36a7083b",
+   "qtype": "八股",
+   "doc": "数据开发岗一面.docx",
+   "answer_state": "toc_noise",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 196765,
+   "doc_hash": "18d7763a36a7083b",
+   "qtype": "八股",
+   "doc": "数据开发岗一面.docx",
+   "answer_state": "toc_noise",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 197142,
+   "doc_hash": "217f011526bef412",
+   "qtype": "八股",
+   "doc": "产品策划2.pdf",
+   "answer_state": "toc_noise",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204780,
+   "doc_hash": "69c2f4f12dc99293",
+   "qtype": "八股",
+   "doc": "网易2015 产品岗.pdf",
+   "answer_state": "toc_noise",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 204783,
+   "doc_hash": "69c2f4f12dc99293",
+   "qtype": "八股",
+   "doc": "网易2015 产品岗.pdf",
+   "answer_state": "toc_noise",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206850,
+   "doc_hash": "77f3fc3c243b0c71",
+   "qtype": "八股",
+   "doc": "校园招聘.docx",
+   "answer_state": "toc_noise",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206853,
+   "doc_hash": "77f3fc3c243b0c71",
+   "qtype": "八股",
+   "doc": "校园招聘.docx",
+   "answer_state": "toc_noise",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 206855,
+   "doc_hash": "77f3fc3c243b0c71",
+   "qtype": "八股",
+   "doc": "校园招聘.docx",
+   "answer_state": "toc_noise",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 213911,
+   "doc_hash": "ea88f8e59c86222e",
+   "qtype": "八股",
+   "doc": "网易2015 产品岗.docx",
+   "answer_state": "toc_noise",
+   "label": null,
+   "reason": ""
+  },
+  {
+   "qid": 213941,
+   "doc_hash": "eb26b6c7a608c191",
+   "qtype": "八股",
+   "doc": "产品策划2.docx",
+   "answer_state": "toc_noise",
+   "label": null,
+   "reason": ""
+  }
+ ],
+ "carried": 53
+}

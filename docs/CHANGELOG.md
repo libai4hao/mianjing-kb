@@ -8,6 +8,25 @@
 
 ## 2026-11-23
 
+- **迁移 018 `answer_state`（答案来源标记）**：`questions` 新增 `answer_state`，由
+  `python -m mianjing_kb.answer_state --apply` 按结构回填——`ok`（有答案）/`no_answer_source`
+  （该文档过半题无答案，来源只列问题）/`boundary_gap`（同文档多题有答案、此题空，疑似切块错位）/
+  `toc_noise`（连续 ≥8 块空答案且标题式）。当前 14,645 / 2,654 / 2,526 / 88。`status` 增加
+  「答案来源」行，老库无该列时自动省略。抽检不再把"素材缺答案"算成切块缺陷。
+- **新增 `mianjing_kb.qcheck`（固定抽样校验集）**：`make`（按 answer_state 分层 + `--carry` 继承
+  旧判定）/`render`（导出可通读 md）/`stats`（三档 + 严格/可用率 + "有答案口径"）。首版样本
+  `eval/qcheck/set-20261123.json`：253 题（200 新 + 53 沿用），已有 53 条标签给出全样本 26.4%/45.3%，
+  有答案口径 35.9%/61.5%。
+- **标签管线跑通并首次落库**：本地 qwen3-8b 打标 60 题（55 产出、5 条代码碎片跳过，296 s），
+  G6 门禁第一次因 `pending_review=6` + `other_topic_rate=34.55%>25%` 拦下；19 条 `其他` 全为产品/运营/
+  HR 场景题，词表（10 一级 / 83 二级，纯技术向）覆盖不到。按人工终审 `drop` 出 staging 后
+  `--merge` 成功 36 条、gate PASS，`status` 变为「有标签 36 / 有难度 36」。词表补「产品与运营」为下一步。
+- **G4 门禁的一次真实拦截**：标签 merge 后直接 `refresh` 被 G4 判 `vec_metadata_mismatch 36 rows`
+  并阻止切换（线上库未动），`--reembed` 后恢复 PASS——向量 metadata 里带 topic/position/tags 快照，
+  改标签必须重嵌入。
+
+## 2026-11-23（更早）
+
 - **新增 `mianjing_kb.qsalvage`（空答案确定性回收）**：把 `…？答：…` 挤在同一行的题答拆回
   `q_text` / `a_text`（54 条候选、已拆 52 条，2 条同文档已有同题跳过），按 `extract` 同口径重算
   `q_norm/q_norm_hash/simhash/q_key` 并同步 `canonical_dependents`/`question_variants`；同时把
