@@ -145,6 +145,12 @@ def _kb_summary(con) -> dict:
                 r[0] or "unmarked": r[1] for r in con.execute(
                     "SELECT answer_state, COUNT(*) FROM questions GROUP BY 1 ORDER BY 2 DESC")
             }
+        if _column_exists(con, "questions", "answer_source"):
+            # 019：补答留痕；llm 答案与原文答案分开数，避免"空答案治理"看起来凭空好转
+            out["questions"]["by_answer_source"] = {
+                r[0] or "原文": r[1] for r in con.execute(
+                    "SELECT answer_source, COUNT(*) FROM questions GROUP BY 1 ORDER BY 2 DESC")
+            }
     else:
         out["questions"] = {"present": False}
 
@@ -387,8 +393,15 @@ def render_text(data: dict) -> str:
     astate = qs.get("by_answer_state") or {}
     if astate:
         i = next(i for i, x in enumerate(lines) if x == "[打标]")
-        lines.insert(i - 1 if lines[i - 1] == "" else i,
+        anchor = i - 1 if lines[i - 1] == "" else i
+        lines.insert(anchor,
                      "  答案来源 " + "  ".join(f"{k} {_fmt(v)}" for k, v in astate.items()))
+    aux = qs.get("by_answer_source") or {}
+    if aux:
+        i = next(i for i, x in enumerate(lines) if x.startswith("  答案来源 ")
+                 or x == "[打标]")
+        lines.insert(i + 1, f"  补答 llm {_fmt(aux.get('llm', 0))}  "
+                            f"拒答 {_fmt(aux.get('llm_refused', 0))}")
     if gates.get("stale_reasons"):
         lines.append("  过期原因：" + "；".join(gates["stale_reasons"]))
     if gates.get("gates"):

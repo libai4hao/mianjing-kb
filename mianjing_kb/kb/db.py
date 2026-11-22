@@ -506,6 +506,20 @@ def _ensure_answer_state(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE questions ADD COLUMN answer_state TEXT")
 
 
+def _ensure_answer_source(conn: sqlite3.Connection) -> None:
+    """019：补答溯源 —— questions.answer_source / answer_model / answered_at。
+
+    `answer_source` 取值：`''`（原文赛道，从未改过）、`llm`（本地模型补答）。
+    补答必须留痕：`a_text` 里混入模型生成内容后，抽检与回滚都要能一次筛出来。
+    """
+    if not _column_exists(conn, "questions", "answer_source"):
+        conn.execute("ALTER TABLE questions ADD COLUMN answer_source TEXT DEFAULT ''")
+    if not _column_exists(conn, "questions", "answer_model"):
+        conn.execute("ALTER TABLE questions ADD COLUMN answer_model TEXT")
+    if not _column_exists(conn, "questions", "answered_at"):
+        conn.execute("ALTER TABLE questions ADD COLUMN answered_at TEXT")
+
+
 MIGRATIONS = [
     ("001_init", _init_schema),
     ("002_parent_dir", _ensure_parent_dir),
@@ -525,6 +539,7 @@ MIGRATIONS = [
     ("016_stable_question_keys", _ensure_stable_question_keys),
     ("017_label_facts_hardening", _ensure_label_facts_hardening),
     ("018_answer_state", _ensure_answer_state),
+    ("019_answer_source", _ensure_answer_source),
 ]
 
 

@@ -8,6 +8,9 @@
 
 ## 2026-11-23
 
+- **迁移 019 `answer_source` + 空答案批量补答（`docs/49`）**：`questions` 加 `answer_source`/`answer_model`/
+  `answered_at`，本地 qwen3-8b 逐题补答空答案（排除 `toc_noise`、题干 <6 字），`llm_refused`/`llm_error`
+  只留痕不写正文；每 50 条提交、可断点续跑。`kb status` 增加「补答 llm / 拒答」行；回滚一条 SQL。
 - **打标 60 条探针（`docs/48` §7）**：新词表 + 新 prompt 下随机 60 条待打标题，`other_topic_rate` 16.7%
   （10/60，`docs/45` 同口径为 34.55%）；卡合并的只剩 `pending_review=8`，全部是越界上位词，成为 P1-3 的样本。
 - **补答 pilot（`docs/48` §6）**：30 `boundary_gap` + 20 `no_answer_source`，qwen3-8b，50 题 37.5 s、
