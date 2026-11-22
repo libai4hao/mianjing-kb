@@ -300,3 +300,75 @@ def test_rag_context_rejects_negative_budget(tmp_path):
         rag_contexts(con, "Java 集合", 1, max_context_chars=-1)
     con.close()
 
+
+@pytest.fixture()
+def entity_db(tmp_path):
+    """两个英文实体各一条：整句“X 是什么”在原文里不存在，只能靠实体词命中。"""
+    con = sqlite3.connect(str(tmp_path / "entity.db"))
+    con.row_factory = sqlite3.Row
+    con.executescript("""
+CREATE TABLE documents(doc_hash TEXT PRIMARY KEY, file_name TEXT);
+CREATE TABLE doc_contents(doc_id INTEGER PRIMARY KEY, md_rel TEXT, doc_hash TEXT, mirror_hash TEXT, content TEXT);
+CREATE TABLE questions(qid INTEGER PRIMARY KEY, doc_hash TEXT, q_text TEXT, a_text TEXT,
+                       qtype TEXT, topic TEXT, category TEXT, difficulty INTEGER,
+                       tags_json TEXT, position TEXT, quality TEXT, q_key TEXT);
+CREATE TABLE question_tags(qid INTEGER, tag TEXT, tag_norm TEXT);
+CREATE VIRTUAL TABLE questions_fts USING fts5(q_text, a_text, tokenize='trigram');
+INSERT INTO documents VALUES('h1', 'Java面试题.pdf');
+INSERT INTO questions(qid, doc_hash, q_text, a_text, qtype, topic, category, difficulty, tags_json, position, quality, q_key) VALUES
+(1, 'h1', 'Kafka 是什么？', '分布式消息队列。', '八股', 'Kafka', '题库', 2, NULL, NULL, NULL, 'h1:q1'),
+(2, 'h1', '什么是 ThreadLocal?', '线程本地变量。', '八股', '并发编程', '题库', 3, NULL, NULL, NULL, 'h1:q2');
+INSERT INTO questions_fts(rowid, q_text, a_text) VALUES(1, 'Kafka 是什么？', '分布式消息队列。');
+INSERT INTO questions_fts(rowid, q_text, a_text) VALUES(2, '什么是 ThreadLocal?', '线程本地变量。');
+""")
+    yield con
+    con.close()
+
+
+def test_latin_terms_extracts_entities():
+    """F1：查询里的拉丁实体词单独抽出来（≥3 字符，按出现顺序去重）。"""
+    assert S.latin_terms("ThreadLocal 是什么") == ["ThreadLocal"]
+    assert S.latin_terms("HashMap 和 ConcurrentHashMap 有什么区别") == [
+        "HashMap", "ConcurrentHashMap"]
+    assert S.latin_terms("Redis 持久化 redis 方式") == ["Redis"]      # 大小写去重
+    assert S.latin_terms("B树与红黑树") == []                          # 单字母/中文不抽
+
+
+def test_entity_route_terms_only_single_entity_short_query():
+    """F1 闸门：只对"单实体 + 少量中文"启用词项路由/实体聚焦。"""
+    assert S.entity_route_terms("ThreadLocal 是什么") == ["ThreadLocal"]
+    assert S.entity_route_terms("Redis 持久化") == ["Redis"]
+    assert S.entity_route_terms("JVM 内存区域划分") == ["JVM"]
+    assert S.entity_route_terms("Spring Boot 好在哪里") == []            # 双实体
+    assert S.entity_route_terms("GET POST 区别和 HTTP 状态码") == []       # 三实体
+    assert S.entity_route_terms("什么是 Spring 框架，它有哪些主要模块") == []  # 长中文
+
+
+def test_keyword_entity_phrase_falls_back_to_term_route(entity_db):
+    """F1 核心：整句“ThreadLocal 是什么”匹配不到原文，必须回退到实体词命中。"""
+    hits = keyword_search(entity_db, "ThreadLocal 是什么", 10)
+    assert [h["qid"] for h in hits] == [2]
+    hits = keyword_search(entity_db, "Kafka 是什么", 10)
+    assert [h["qid"] for h in hits] == [1]
+
+
+def test_keyword_entity_term_route_handles_space_variant(mini_db):
+    """'Redis 持久化'（带空格）与原文 'Redis持久化…' 不同串，整句 LIKE 也救不了。"""
+    assert keyword_search(mini_db, "Redis 持久化", 10)[0]["qid"] == 3
+
+
+def test_keyword_entity_route_does_not_flood_long_queries(entity_db):
+    """长问句不启用词项路由：否则 'Spring' 这类泛实体会用 30 条噪声行淹掉向量结果。"""
+    assert keyword_search(entity_db, "什么是 Spring 框架，它有哪些主要模块", 10) == []
+
+
+def test_entity_tiebreak_only_breaks_ties():
+    """F1 并列破除：同分时命中实体词的题优先；分差存在时顺序不动。"""
+    by_qid = {1: {"qid": 1, "q_text": "Kafka 是什么？", "a_text": ""},
+              2: {"qid": 2, "q_text": "什么是 ThreadLocal?", "a_text": ""}}
+    assert [q for q, _ in S.entity_tiebreak([(1, 0.01), (2, 0.01)], by_qid,
+                                            ["ThreadLocal"])] == [2, 1]
+    assert [q for q, _ in S.entity_tiebreak([(1, 0.02), (2, 0.01)], by_qid,
+                                            ["ThreadLocal"])] == [1, 2]
+    assert S.entity_tiebreak([(1, 0.01)], by_qid, []) == [(1, 0.01)]
+

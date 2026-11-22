@@ -8,6 +8,16 @@
 
 ## 2026-11-22
 
+- **原始 PDF/DOCX 全链路小规模测试 + 检索层 F1 修复**：11 件原始文件（8 pdf + 3 docx，55 页）在独立测试库
+  （`build/test-run-2026-11-22/`）从头跑 intake→classify→convert→gate→extract→canonical→build_db→embed→verify→refresh：
+  11/11 转换、219 题零空答案、G1–G5/G8 全 PASS，生产库指纹前后一致。报告 `docs/41-原始PDF-DOCX全链路小规模测试-2026-11-22.md`
+  记录 5 项发现；其中 F1（`bge-small-zh` 把 ThreadLocal/Kafka/JVM/Redis 全映射成 `[UNK]`，余弦 1.0，
+  叠加整句短语匹配失效导致 `X 是什么` 首位错）当日修复：`search.py` 新增 `latin_terms` / `entity_route_terms`
+  （仅单实体且中文 ≤6 字的短问）、`keyword_search(allow_entity_route=)` 词项回退、单实体短问的向量候选聚焦、
+  `_row_has_term` 去空白归一、并列破除 `entity_tiebreak`。50 条金标 recall@5 0.6932→0.7159、MRR 0.6508→0.6521；
+  期间否决了两版会回退的方案（+0.0041 加权 ≈15 个 rank 槽、无闸门词项 OR 灌噪声）。新增 6 条用例，全量 pytest 740 collected 全绿。
+  未修：F2（`source_path` 恒空）、F3（`refresh` 不落 `verify_report` → `status` 恒 STALE）、F4/F5（题干 Markdown 残留、md 命名两套并存）。
+
 - **原始文档小规模测试与再修 3 项**：用 5 篇 raw_docs 实跑 `chunk_v2` + 异常检测，从 100+ 异常中筛出 3 个可安全修复的真 bug（答案行以方法调用 `start()` 结尾被误判选择题空括号、`答：…` 回答行成题、`聊了聊项目；` 分号叙述行成题），TDD 修复：`_is_qline` 空括号规则排除方法调用 + 结论排除前缀补 `答：/回答：/解析：/解答：`、F5c 叙述行门补 `；/;`；028 异常 2→0、074 异常 4→3；新增 3 条回归 fixture。报告见 `docs/原始文档小规模测试报告-2026-11-22.md`。chunker 套件 141 passed，全量 pytest 728 passed / 7 skipped / 1 failed（基线无关）。
 - **切题逻辑金标驱动修复（F1–F7，7 提交 `2a9a58d..21dc1d5`）**：依据人工金标 100 条样本中
   5 篇文档 20 条的复核，修复 8 类结构性错误中的 8 条（TOC 条目被当题、目录幽灵答案与真身

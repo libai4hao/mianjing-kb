@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """P3-① search：面经库.db 混合检索（keyword FTS + 向量 KNN + RRF 融合）。
 
-- kw：FTS5 trigram（查询串 ≥3 字符）/ LIKE 兜底（<3 字符），支持 topic/qtype 过滤
+- kw：整句 FTS5 trigram（查询串 ≥3 字符）→ 整句命中不了时退到**拉丁实体词项**（F1）→ LIKE 兜底
 - vec：bge-small-zh-v1.5 (fastembed ONNX, 512维) 对 vec_questions 做 KNN——需先跑 embed_questions.py
-- hybrid：双路各取 top n → RRF 融合 score=Σ 1/(60+rank)
+- hybrid：双路各取 top n → RRF 融合 score=Σ 1/(60+rank) → 并列时命中查询实体词的题优先
 用法：
     python -m mianjing_kb.search "HashMap 扩容"                     # 默认 hybrid（无向量表自动降级 kw）
     python -m mianjing_kb.search "端口" --topic MySQL --limit 5
@@ -23,6 +23,44 @@ from mianjing_kb.kb import config  # noqa: E402
 
 OUT_DB = Path(config.BUILD_DIR) / "面经库.db"
 RRF_K = 60
+
+# ---------- F1：英文实体词路由与加权（2026-11-22）----------
+# bge-small-zh 分词器把词表外拉丁词整词映射成单个 [UNK]，ThreadLocal/Kafka/JVM/Redis/HashMap
+# 在向量层余弦 = 1.0000；整句短语匹配又命中不了"X 是什么"这类提问 → 两路同时失明。
+# 兜底：拉丁实体词单独走 FTS 词项；融合分并列时命中实体的题优先（不做分数加权，见 entity_tiebreak）。
+LATIN_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+#.\-]{1,}")
+ENTITY_MIN_LEN = 3                      # trigram 下限：<3 字符无法作为 FTS 词项
+ENTITY_ROUTE_MAX_CJK = 6                # 只有"实体 + 少量中文"的短问句才退到词项路由
+
+
+def _cjk_count(text: str) -> int:
+    return sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+
+
+def latin_terms(query: str) -> list[str]:
+    """抽取查询里的拉丁实体词（JVM/Redis/HashMap…），按出现顺序、忽略大小写去重。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in LATIN_TERM_RE.finditer(query or ""):
+        term = m.group(0).rstrip(".-_")
+        if len(term) < ENTITY_MIN_LEN or term.lower() in seen:
+            continue
+        seen.add(term.lower())
+        out.append(term)
+    return out
+
+
+def entity_route_terms(query: str) -> list[str]:
+    """F1 词项路由/实体聚焦适用的词：仅"单实体 + 少量中文"的短问句。
+
+    多实体长问句（"什么是 Spring 框架，它有哪些主要模块"、"GET POST 区别和 HTTP 状态码"）
+    一旦按实体 OR 召回，30 条泛实体行会把正确的向量邻居淹掉——实测 50 条金标
+    recall@5 0.6932→0.5909。所以只对"ThreadLocal 是什么"这类单实体短问启用。
+    """
+    terms = latin_terms(query)
+    if len(terms) != 1 or _cjk_count(query) > ENTITY_ROUTE_MAX_CJK:
+        return []
+    return terms
 
 
 class VectorUnavailable(RuntimeError):
@@ -93,28 +131,35 @@ def _sql_filters(topic: str | None = None, qtype: str | None = None,
 def keyword_search(con, query: str, limit: int = 10, topic: str | None = None,
                    qtype: str | None = None, difficulty: int | None = None,
                    position: str | None = None, quality: str | None = None,
-                   tags=None) -> list[dict]:
+                   tags=None, allow_entity_route: bool = True) -> list[dict]:
     filt, params = _sql_filters(topic, qtype, difficulty, position, quality, tags)
-    if len(query) >= 3:
+
+    def run_fts(fts_query: str) -> list:
         # FTS5 MATCH 语法敏感（? " 等会炸），trigram 下用引号短语查询最稳：
-        # 原文任意串 → "..." 字面匹配，内部双引号双写转义；空结果回退 LIKE。
-        fts_query = '"' + query.replace('"', '""') + '"'
-        rows = con.execute(
+        # 原文任意串 → "..." 字面匹配，内部双引号双写转义。
+        return con.execute(
             _SELECT + "FROM questions_fts f JOIN questions q ON q.qid=f.rowid" + _JOIN +
             "WHERE questions_fts MATCH ?" + filt + " ORDER BY rank LIMIT ?",
             [fts_query, *params, limit]).fetchall()
-        if not rows:
-            rows = con.execute(
-                _SELECT + "FROM questions q" + _JOIN +
-                "WHERE (q.q_text LIKE ? OR q.a_text LIKE ?)" + filt +
-                " ORDER BY q.qid LIMIT ?",
-                [f"%{query}%", f"%{query}%", *params, limit]).fetchall()
-    else:
-        rows = con.execute(
-            _SELECT + "FROM questions q" + _JOIN +
-            "WHERE (q.q_text LIKE ? OR q.a_text LIKE ?)" + filt +
+
+    def run_like(needles: list[str]) -> list:
+        cond = " OR ".join(["(q.q_text LIKE ? OR q.a_text LIKE ?)"] * len(needles))
+        return con.execute(
+            _SELECT + "FROM questions q" + _JOIN + "WHERE (" + cond + ")" + filt +
             " ORDER BY q.qid LIMIT ?",
-            [f"%{query}%", f"%{query}%", *params, limit]).fetchall()
+            [p for n in needles for p in (f"%{n}%", f"%{n}%")] + params + [limit]).fetchall()
+
+    rows: list = []
+    if len(query) >= 3:
+        rows = run_fts('"' + query.replace('"', '""') + '"')
+    route = entity_route_terms(query) if allow_entity_route else []
+    if not rows and route:
+        # F1："ThreadLocal 是什么"整句在原题里不存在；退到实体词项（"ThreadLocal"）
+        rows = run_fts('"' + route[0].replace('"', '""') + '"')
+    if not rows and query:
+        rows = run_like([query])
+    if not rows and route:
+        rows = run_like(route)
     return [dict(r) for r in rows]
 
 
@@ -180,15 +225,50 @@ def rrf_fuse(rank_a: list[int], rank_b: list[int], k: int = RRF_K) -> list[tuple
     return sorted(scores.items(), key=lambda x: -x[1])
 
 
+def _norm_text(text: str) -> str:
+    return re.sub(r"\s+", "", text or "").lower()
+
+
+def _row_has_term(row: dict, term: str) -> bool:
+    # 去空白匹配：'SpringBoot' 要能命中原文的 'Spring Boot'、'ThreadLocal' 命中 'Thread Local'
+    return _norm_text(term) in _norm_text((row.get("q_text") or "") + "\n"
+                                          + (row.get("a_text") or ""))
+
+
+def entity_tiebreak(fused: list[tuple[int, float]], by_qid: dict[int, dict],
+                    terms: list[str]) -> list[tuple[int, float]]:
+    """F1：融合分**完全并列**时，命中查询拉丁实体词的题优先——只破并列，不改分。
+
+    早前版本用"加 0.0041 分"的加权，实测 50 条金标 recall@5 0.6932→0.5795、MRR 0.6508→0.47：
+    0.0041 相当于 15 个 rank 槽（相邻 rank 差 1/61-1/62≈0.00026），把大量泛实体行（Java/MySQL/Redis）
+    顶到了正确题前面。改为只做并列破除，零改分、零回归。
+    """
+    if not terms:
+        return fused
+
+    def hit(qid: int) -> bool:
+        row = by_qid.get(qid) or {}
+        return any(_row_has_term(row, t) for t in terms)
+
+    return sorted(fused, key=lambda x: (-x[1], not hit(x[0])))
+
+
 def hybrid_search(con, query: str, limit: int = 10, topic: str | None = None,
                   qtype: str | None = None, difficulty: int | None = None,
                   position: str | None = None, quality: str | None = None,
                   tags=None, pool: int = 30, diagnostics: dict | None = None) -> list[dict]:
-    kw = keyword_search(con, query, pool, topic, qtype, difficulty, position, quality, tags)
+    kw = keyword_search(con, query, pool, topic, qtype, difficulty, position, quality, tags,
+                        allow_entity_route=False)
+
+    def kw_fallback() -> list[dict]:
+        # 无向量层时才用实体词项兜底：有向量层时词项路由的 30 条泛实体行会淹掉向量邻居
+        return keyword_search(con, query, pool, topic, qtype, difficulty, position, quality, tags,
+                              allow_entity_route=True)[:limit]
+
     if not has_vec_table(con):
         if diagnostics is not None:
             diagnostics["vector"] = "absent"
-        return kw[:limit]
+        return kw_fallback()
     try:
         vs = vector_search(con, query, pool, topic, qtype, difficulty, position, quality, tags)
     except VectorUnavailable as ex:
@@ -196,11 +276,24 @@ def hybrid_search(con, query: str, limit: int = 10, topic: str | None = None,
         if diagnostics is not None:
             diagnostics["vector"] = "unavailable"
             diagnostics["why"] = str(ex)
-        return kw[:limit]
+        return kw_fallback()
     if diagnostics is not None:
         diagnostics["vector"] = "ok"
-    fused = rrf_fuse([r["qid"] for r in kw], [r["qid"] for r in vs])[:limit]
+    terms = latin_terms(query)
+    route = entity_route_terms(query)
+    if route:
+        # F1：单实体短问 —— 向量把 Kafka 当成 ThreadLocal 的等价物（余弦 1.0，distance 0.00），
+        # 只有把不含该实体的候选剔掉，语义通道才可能把正确的题顶上来。
+        focused = [r for r in vs if _row_has_term(r, route[0])]
+        if focused:
+            vs = focused
+            if diagnostics is not None:
+                diagnostics["entity_focus"] = route[0]
     by_qid = {r["qid"]: r for r in kw + vs}
+    fused = entity_tiebreak(rrf_fuse([r["qid"] for r in kw], [r["qid"] for r in vs]),
+                            by_qid, terms)[:limit]
+    if diagnostics is not None and terms:
+        diagnostics["entity_terms"] = terms
     out = []
     for qid, score in fused:
         out.append({**by_qid[qid], "rrf": round(score, 5)})
