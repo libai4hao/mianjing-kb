@@ -20,6 +20,9 @@
   从 tags 剔除，`tags.max_items` 8→4，prompt 明示不重复其它字段。实测：平均标签 7.44→3.77、
   维度重复率 37.8%→0%，吞吐反升到 20–22 条/分钟。存量行用 `scripts/clean_staging_tags.py`
   在 merge 前统一清洗（dry-run 4,500 行：剔维度词 7,147、截断 10,072）。
+- **词表 P1 扩充（`docs/50` §9）**：二级标签 100→131（31 个来自 ≥5 次的高频自由标签）、
+  别名 44→83、合法 topic 45→48（PHP / Android / 正则表达式）；`prompt_lines` 预算 110→170，
+  防新词表被截断。运行时事实源 `label_taxonomy` 已同步补齐（added 31、别名更新 20 行）。
 - **pending 留因（`labelspec` + `write_staging`）**：词表外主题写成
   `topic_out_of_vocab:<模型原话>`，`labels_staging.review_note` 落盘；此前 pending 行
   只留一个"其他"，人工终审无从判断该归哪个桶。补 `test_staging_keeps_review_note_for_pending`。

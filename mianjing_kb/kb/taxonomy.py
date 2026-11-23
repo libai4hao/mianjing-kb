@@ -162,10 +162,10 @@ def export_yaml(conn, path: Path) -> Path:
     return path
 
 
-def prompt_lines(tax: dict | None = None, max_groups: int = 14, max_tags: int = 110) -> str:
+def prompt_lines(tax: dict | None = None, max_groups: int = 14, max_tags: int = 170) -> str:
     """prompt 用的一二级分组摘要：`Java（JVM、集合…）；数据库（索引…）`。
 
-    预算按当前词表规模（12 组 / 100 项）留余量；新增分组后不要回落到截断。
+    预算按当前词表规模（12 组 / 131 项，2026-11-23 P1 升格后）留余量；新增分组后不要回落到截断。
     """
     tax = tax or _yaml_snapshot()
     parts = []
