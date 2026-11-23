@@ -6,6 +6,7 @@ import json
 import pytest
 from mianjing_kb import batch_label as bl
 from mianjing_kb.kb import db, taxonomy
+from mianjing_kb.kb.vocab import topic_aliases, topic_vocab
 
 
 @pytest.fixture()
@@ -54,6 +55,30 @@ def test_seed_persists_without_caller_commit(tmp_path):
     rows = c2.execute("SELECT COUNT(*) FROM label_taxonomy").fetchone()[0]
     c2.close()
     assert rows == expected
+
+
+def test_every_taxonomy_group_is_a_legal_topic(conn):
+    """一级组名必须能落到合法 topic（同名或经 topic_aliases 归一）。
+
+    2026-11-23 实测：数据库 组名不在词表 → 54/500 条数据库题被判"其他"+pending，G6 拦 merge。
+    """
+    tax = taxonomy.load(conn)
+    vocab = set(topic_vocab())
+    aliases = topic_aliases()
+    assert vocab, "topic_vocab 降级为空，本断言失效"
+    missing = [g["level1"] for g in tax["groups"]
+               if g["level1"] not in vocab and aliases.get(g["level1"]) not in vocab]
+    assert not missing, f"taxonomy 一级组既不在 topic 词表也无别名: {missing}"
+
+
+def test_topic_alias_normalized_not_to_other(conn):
+    """组名走别名归一：`算法与数据结构` 应落 `算法`，而不是词表外的"其他"+pending。"""
+    spec = bl.labelspec.validate_label(
+        {"topic": "算法与数据结构", "qtype": "算法", "difficulty": 3,
+         "canonical_q": "手写快排", "tags": []},
+        topic_vocab(), q_text="手写快排", topic_aliases=topic_aliases())
+    assert spec["topic"] == "算法"
+    assert spec["review_state"] is None
 
 
 def test_prompt_uses_taxonomy_groups(conn):

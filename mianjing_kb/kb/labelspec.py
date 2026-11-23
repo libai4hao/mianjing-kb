@@ -156,16 +156,21 @@ def normalize_tags(raw, *, max_items: int | None = None, max_len: int | None = N
 
 
 def validate_label(obj: dict, vocab: tuple[str, ...] = (), q_text: str = "", *,
-                   synonyms: dict[str, str] | None = None) -> dict:
+                   synonyms: dict[str, str] | None = None,
+                   topic_aliases: dict[str, str] | None = None) -> dict:
     """LLM 输出 → 规范化字段 + issues + review_state。
 
     非法枚举（qtype / difficulty）直接抛 ValueError，让调用方落 failed 队列重试；
     topic 词表外、position/quality 越界属"可降级"——改写/丢弃并标 review_state=pending。
+    `topic_aliases`（一级组名→合法 topic）在校验前先归一，归一命中不算词表外。
     """
     from .vocab import OTHER_TOPIC
 
     out: dict = {"issues": [], "review_state": None}
     topic = str(obj.get("topic") or "").strip()[: int(field("topic").get("max_len") or 40)]
+    if topic_aliases and topic in topic_aliases:
+        topic = topic_aliases[topic]
+        out["issues"].append("topic_alias_normalized")
     if vocab and topic not in vocab:
         topic = OTHER_TOPIC
         out["issues"].append("topic_out_of_vocab")

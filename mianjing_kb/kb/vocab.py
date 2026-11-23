@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """封闭词表（批次三 R2）：打标 topic 的合法取值集合。
 
-来源 meta/topic_rules.yaml 三段（rules / title_only_rules / folder_topics）的
-topic 值并集，剔除"未分类"（那是待复核标记不是主题），补"其他"兜底。
+来源 meta/topic_rules.yaml 四段（rules / title_only_rules / folder_topics / label_topics）
+的 topic 值并集，剔除"未分类"（那是待复核标记不是主题），补"其他"兜底。
+`topic_aliases` 段提供"一级组名 → 合法 topic"的归一表（组名不同名时先归一，别整批判词表外）。
 yaml 缺失 / PyYAML 不可用 / 内容损坏 → 空元组宽松降级（G6 与 label_one
 走旧口径，不因可选依赖崩）。结果 lru_cache——每次打标调用零开销。
 """
@@ -33,8 +34,32 @@ def topic_vocab() -> tuple[str, ...]:
         for t in (data.get("folder_topics") or {}).values():
             if t:
                 topics.add(str(t))
+        # 打标专用补充（taxonomy 一级组名等，不参与分类阶段规则）
+        for t in data.get("label_topics") or []:
+            if str(t).strip():
+                topics.add(str(t).strip())
     except Exception:  # noqa: BLE001 —— 缺失/损坏（含结构错误）一律降级，不阻断打标
         return ()
     topics.discard(LEGACY_MARKER)
     topics.add(OTHER_TOPIC)
     return tuple(sorted(topics))
+
+
+@lru_cache(maxsize=1)
+def topic_aliases() -> dict[str, str]:
+    """topic 别名表（如 `算法与数据结构`→`算法`）：校验前先归一，避免组名被判词表外。
+
+    只保留目标在合法词表内的映射；yaml 缺失/损坏返回空 dict（宽松降级）。
+    """
+    try:
+        import yaml
+        path = Path(config.TOPIC_RULES_FILE)
+        if not path.exists():
+            return {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        raw = data.get("topic_aliases") or {}
+        vocab = set(topic_vocab())
+        return {str(k).strip(): str(v).strip() for k, v in raw.items()
+                if str(k).strip() and str(v).strip() in vocab}
+    except Exception:  # noqa: BLE001
+        return {}

@@ -34,6 +34,25 @@ rules:
   - {re: "分布式",                       topic: 分布式}   # 兜底位：置于具体组件词（Zookeeper/Kafka/SpringCloud微服务等）之后，防抢命中
   - {re: "docker|Docker",               topic: Docker}
 
+# 打标专用主题（只进 topic_vocab，不参与分类/文件名规则）。
+# 约束：taxonomy 的一级组名必须出现在打标词表里，否则 prompt 让人选组名、
+# 校验却判"词表外"→ 强制改写"其他"+pending，G6 直接拦 merge。
+# 2026-11-23：500 条批次里 54 条数据库题就是这么被卡住的（数据库 组名不在词表）。
+label_topics:
+  - 数据库
+  - 缓存与中间件
+  - AI与大模型
+  - 项目与行为
+  - 工程与质量
+
+# 一级组名 → 合法 topic 的别名（组名和主题名不同名时，先归一再校验，
+# 不要把"算法与数据结构"整批改写成"其他"）。
+topic_aliases:
+  Java: Java基础
+  产品与运营: 产品运营
+  求职与行为: HR与求职
+  算法与数据结构: 算法
+
 # 只作用在【文件名】上的岗位/技术栈词（不进 _is_topic_like：否则 "阿里笔试非技术岗" 这类
 # 来源目录会被当成主题词剔掉，collection 退化到上一级）。命中仍记 topic_source=l1_title。
 title_only_rules:

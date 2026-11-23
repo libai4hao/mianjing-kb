@@ -40,7 +40,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mianjing_kb.kb import config, db, labelspec, taxonomy, wlock  # noqa: E402
-from mianjing_kb.kb.vocab import OTHER_TOPIC, topic_vocab  # noqa: E402
+from mianjing_kb.kb.vocab import OTHER_TOPIC, topic_aliases, topic_vocab  # noqa: E402
 from mianjing_kb.chunker import is_code_fragment  # noqa: E402
 from mianjing_kb.quality_rules import (  # noqa: E402
     code_fragment_reason,
@@ -167,7 +167,8 @@ def label_one(cfg: dict, q: dict, tax: dict | None = None) -> dict:
     if obj is None:
         raise RuntimeError("JSON 解析失败")
     spec = labelspec.validate_label(obj, vocab, q_text=q.get("q_text") or "",
-                                    synonyms=tax["aliases"])
+                                    synonyms=tax["aliases"],
+                                    topic_aliases=topic_aliases())
     return {"qid": q["qid"], "q_norm_hash": q.get("q_norm_hash"),
             "topic": spec["topic"],
             "qtype": spec["qtype"], "difficulty": spec["difficulty"],
@@ -565,7 +566,8 @@ def manual_import(conn, path: Path, annotator: str = "human", dry_run: bool = Fa
                 continue
             try:
                 spec = labelspec.validate_label(obj, vocab, q_text=q["q_text"] or "",
-                                                synonyms=tax["aliases"])
+                                                synonyms=tax["aliases"],
+                                                topic_aliases=topic_aliases())
             except ValueError as ex:
                 errs.append(f"第{i}行: {ex}")
                 continue
