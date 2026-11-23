@@ -183,6 +183,9 @@ def label_one(cfg: dict, q: dict, tax: dict | None = None) -> dict:
             "prompt_tokens": r.get("prompt_tokens"),
             "completion_tokens": r.get("completion_tokens"),
             "review_state": spec["review_state"],
+            # pending 行留"为什么 pending"（含模型原话 topic），人工终审才有依据
+            "review_note": (json.dumps({"issues": spec["issues"]}, ensure_ascii=False)
+                            if spec.get("issues") else None),
             "labeled_at": datetime.now().strftime(NOW_FMT),
             # 诊断用：原始返回和校验 issues 进 sidecar，不落 staging（区分 prompt/解析/状态机）
             "_raw_response": (r.get("text") or "")[:4000],
@@ -269,12 +272,13 @@ def write_staging(conn, rows: list[dict]) -> int:
         "INSERT OR REPLACE INTO labels_staging "
         "(qid, q_norm_hash, topic, qtype, difficulty, tags, position, quality, canonical_q, "
         "tag_norm_hits, provider, model, redacted, latency_ms, tokens, prompt_tokens, "
-        "completion_tokens, labeled_at, review_state) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "completion_tokens, labeled_at, review_state, review_note) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [[r.get(k) for k in ("qid", "q_norm_hash", "topic", "qtype", "difficulty", "tags",
                              "position", "quality", "canonical_q", "tag_norm_hits",
                              "provider", "model", "redacted", "latency_ms", "tokens",
-                             "prompt_tokens", "completion_tokens", "labeled_at", "review_state")]
+                             "prompt_tokens", "completion_tokens", "labeled_at", "review_state",
+                             "review_note")]
          for r in rows])
     conn.commit()
     return len(rows)

@@ -172,8 +172,10 @@ def validate_label(obj: dict, vocab: tuple[str, ...] = (), q_text: str = "", *,
         topic = topic_aliases[topic]
         out["issues"].append("topic_alias_normalized")
     if vocab and topic not in vocab:
+        raw_topic = topic
         topic = OTHER_TOPIC
-        out["issues"].append("topic_out_of_vocab")
+        # 带上模型原话，人工终审才知道该归哪个桶（否则 pending 行只剩一个"其他"）
+        out["issues"].append(f"topic_out_of_vocab:{raw_topic}")
         out["review_state"] = "pending"
     out["topic"] = topic
 

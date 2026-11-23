@@ -16,6 +16,9 @@
   `refresh --reembed` 后 G1-G5+G8 PASS（topic 改动会让向量元数据过期，必须重嵌）。
   第二批 200 条：`other_topic_rate` 11.5%，落库 195 条；两批合计 690 条，
   有标签 36→726，待打标 239→159。
+- **pending 留因（`labelspec` + `write_staging`）**：词表外主题写成
+  `topic_out_of_vocab:<模型原话>`，`labels_staging.review_note` 落盘；此前 pending 行
+  只留一个"其他"，人工终审无从判断该归哪个桶。补 `test_staging_keeps_review_note_for_pending`。
 - **迁移 019 `answer_source` + 空答案批量补答（`docs/49`）**：`questions` 加 `answer_source`/`answer_model`/
   `answered_at`，本地 qwen3-8b 逐题补答空答案（排除 `toc_noise`、题干 <6 字），`llm_refused`/`llm_error`
   只留痕不写正文；每 50 条提交、可断点续跑。`kb status` 增加「补答 llm / 拒答」行；回滚一条 SQL。

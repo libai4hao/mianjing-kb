@@ -46,6 +46,8 @@ def test_validate_drops_bad_multi_and_flags_pending():
     assert spec["topic"] == "其他" and spec["review_state"] == "pending"
     assert spec["position"] == ["后端"] and spec["quality"] == ["重复"]
     assert "position_invalid" in spec["issues"]
+    # 词表外必须记住模型原话，人工终审才知道该归哪个桶
+    assert "topic_out_of_vocab:玄学" in spec["issues"]
     assert spec["canonical_q"] == "什么是 HashMap？"          # 空 → 回退题干
 
 

@@ -103,6 +103,21 @@ def test_run_batch_writes_staging_and_resume(mini_db, monkeypatch, tmp_path):
     assert out2["todo"] == 0 and out2["labeled"] == 0
 
 
+def test_staging_keeps_review_note_for_pending(mini_db, monkeypatch, tmp_path):
+    """pending 行必须留"为什么 pending"（含模型原话 topic），否则人工终审只能看到"其他"。"""
+    def fake(cfg, q):
+        row = _fake_label()(cfg, q)
+        row["review_state"] = "pending"
+        row["review_note"] = json.dumps({"issues": ["topic_out_of_vocab:PHP"]},
+                                        ensure_ascii=False)
+        return row
+
+    monkeypatch.setattr(bl, "label_one", fake)
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    note = mini_db.execute("SELECT review_note FROM labels_staging WHERE qid=1").fetchone()[0]
+    assert "PHP" in note and "topic_out_of_vocab" in note
+
+
 def test_run_batch_failed_not_blocking(mini_db, monkeypatch, tmp_path):
     monkeypatch.setattr(bl, "label_one", _fake_label(fail_qids={2}))
     fp = tmp_path / "f.jsonl"
