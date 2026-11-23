@@ -40,7 +40,12 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mianjing_kb.kb import config, db, labelspec, taxonomy, wlock  # noqa: E402
-from mianjing_kb.kb.vocab import OTHER_TOPIC, topic_aliases, topic_vocab  # noqa: E402
+from mianjing_kb.kb.vocab import (  # noqa: E402
+    OTHER_TOPIC,
+    tag_stopwords,
+    topic_aliases,
+    topic_vocab,
+)
 from mianjing_kb.chunker import is_code_fragment  # noqa: E402
 from mianjing_kb.quality_rules import (  # noqa: E402
     code_fragment_reason,
@@ -90,7 +95,8 @@ def build_system_prompt(vocab: tuple[str, ...] = (), tax: dict | None = None) ->
         f'"position": <岗位，多选，从 {pos} 中选 0~2 个>, '
         f'"quality": <数据质量标记，多选，从 {quality} 中选 0~3 个；没问题给 []>, '
         f'"canonical_q": <标准化问句，≤{labelspec.canonical_max_len()} 字，去口语/去公司名>, '
-        f'"tags": <{tag_max} 个以内关键词，每个≤{tag_len} 字，优先二级标签：{rec}>'
+        f'"tags": <{tag_max} 个以内细粒度关键词，每个≤{tag_len} 字；'
+        f'不要重复 topic/题型/岗位这些已有字段，不要近义堆砌；优先二级标签：{rec}>'
         "}"
     )
 
@@ -168,7 +174,8 @@ def label_one(cfg: dict, q: dict, tax: dict | None = None) -> dict:
         raise RuntimeError("JSON 解析失败")
     spec = labelspec.validate_label(obj, vocab, q_text=q.get("q_text") or "",
                                     synonyms=tax["aliases"],
-                                    topic_aliases=topic_aliases())
+                                    topic_aliases=topic_aliases(),
+                                    tag_stopwords=tag_stopwords())
     return {"qid": q["qid"], "q_norm_hash": q.get("q_norm_hash"),
             "topic": spec["topic"],
             "qtype": spec["qtype"], "difficulty": spec["difficulty"],
@@ -571,7 +578,8 @@ def manual_import(conn, path: Path, annotator: str = "human", dry_run: bool = Fa
             try:
                 spec = labelspec.validate_label(obj, vocab, q_text=q["q_text"] or "",
                                                 synonyms=tax["aliases"],
-                                                topic_aliases=topic_aliases())
+                                                topic_aliases=topic_aliases(),
+                                                tag_stopwords=tag_stopwords())
             except ValueError as ex:
                 errs.append(f"第{i}行: {ex}")
                 continue

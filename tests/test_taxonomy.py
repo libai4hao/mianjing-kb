@@ -123,7 +123,7 @@ def test_manual_template_and_import(conn, tmp_path):
                           "FROM labels_staging WHERE qid=?", (int(rows[0]["qid"]),)).fetchone()
     assert staged["topic"] == "JVM" and staged["provider"] == "manual"
     assert json.loads(staged["position"]) == ["后端"]
-    assert json.loads(staged["tags"]) == ["JVM", "类加载"]     # JVM GC → JVM
+    assert json.loads(staged["tags"]) == ["类加载"]      # JVM GC → JVM，JVM 是 topic 被剔除
     assert staged["tag_norm_hits"] == 1 and staged["review_state"] is None
 
 

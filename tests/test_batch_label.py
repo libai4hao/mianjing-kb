@@ -487,7 +487,7 @@ def test_label_one_new_dims_and_tag_normalization(monkeypatch):
     assert json.loads(row["position"]) == ["后端"]          # 火星 被丢弃
     assert json.loads(row["quality"]) == ["重复"]
     assert row["review_state"] == "pending"                # 有非法值 → 待复核
-    assert json.loads(row["tags"]) == ["JVM", "哈希表"]    # JVM GC → JVM
+    assert json.loads(row["tags"]) == ["哈希表"]           # JVM GC→JVM，但 JVM 是 topic 被剔除
     assert row["tag_norm_hits"] == 1
     assert row["canonical_q"] == "什么是 JVM 的类加载？"    # 空 → 回退题干
 

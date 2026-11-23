@@ -16,6 +16,10 @@
   `refresh --reembed` 后 G1-G5+G8 PASS（topic 改动会让向量元数据过期，必须重嵌）。
   第二批 200 条：`other_topic_rate` 11.5%，落库 195 条；两批合计 690 条，
   有标签 36→726，待打标 239→159。
+- **标签维度 P0（`docs/50` §8）**：`kb.vocab.tag_stopwords()`（topic/组名/qtype/岗位）
+  从 tags 剔除，`tags.max_items` 8→4，prompt 明示不重复其它字段。实测：平均标签 7.44→3.77、
+  维度重复率 37.8%→0%，吞吐反升到 20–22 条/分钟。存量行用 `scripts/clean_staging_tags.py`
+  在 merge 前统一清洗（dry-run 4,500 行：剔维度词 7,147、截断 10,072）。
 - **pending 留因（`labelspec` + `write_staging`）**：词表外主题写成
   `topic_out_of_vocab:<模型原话>`，`labels_staging.review_note` 落盘；此前 pending 行
   只留一个"其他"，人工终审无从判断该归哪个桶。补 `test_staging_keeps_review_note_for_pending`。

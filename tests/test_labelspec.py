@@ -26,7 +26,7 @@ def test_schema_from_repo_yaml():
     assert ls.quality_flags() == ("重复", "残缺", "过时", "广告", "无答案")
     assert ls.qtypes() == ("八股", "算法", "HR", "场景", "项目")
     assert ls.canonical_max_len() == 60
-    assert ls.tag_limits() == (8, 24)
+    assert ls.tag_limits() == (4, 24)
     assert "JVM" in ls.recommended_tags()
 
 
@@ -62,7 +62,18 @@ def test_validate_tags_synonym_dedupe_and_cap():
     many = [f"t{i}" for i in range(12)]
     spec2 = ls.validate_label({"topic": "JVM", "qtype": "八股", "difficulty": 2, "tags": many},
                               vocab=("JVM",))
-    assert len(spec2["tags"]) == 8
+    assert len(spec2["tags"]) == 4
+
+
+def test_tag_stopwords_drop_dimension_duplicates():
+    """tags 里重复 topic/qtype/岗位没有检索价值：传 stopwords 时必须剔除并留计数。"""
+    spec = ls.validate_label({"topic": "JVM", "qtype": "八股", "difficulty": 2,
+                              "position": ["后端"],
+                              "tags": ["JVM", "八股", "后端", "垃圾回收", "类加载"]},
+                             vocab=("JVM",), tag_stopwords=frozenset({"JVM", "八股", "后端"}))
+    assert spec["tags"] == ["垃圾回收", "类加载"]
+    assert spec["tag_dim_dropped"] == 3
+    assert "tag_dimension_dropped:3" in spec["issues"]
 
 
 def test_validate_rejects_bad_qtype_and_difficulty():

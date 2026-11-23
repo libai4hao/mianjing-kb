@@ -34,6 +34,6 @@ fields:
     required: true
   tags:
     kind: open_tags
-    min_items: 0               # prompt 要求 3~8，G6 不因少于 3 判不合格
-    max_items: 8
+    min_items: 0               # prompt 要求 2~4，G6 不因少于 2 判不合格
+    max_items: 4               # 2026-11-23 由 8 收到 4：实测 7.44 个/题全是近义词堆砌
     max_len: 24

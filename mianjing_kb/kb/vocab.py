@@ -63,3 +63,18 @@ def topic_aliases() -> dict[str, str]:
                 if str(k).strip() and str(v).strip() in vocab}
     except Exception:  # noqa: BLE001
         return {}
+
+
+@lru_cache(maxsize=1)
+def tag_stopwords() -> frozenset[str]:
+    """标签维度停用词：topic / 一级组名 / qtype / position。
+
+    这些是**结构化字段的取值**，不该再出现在 tags 里（否则 tags 37.8% 是维度重复，
+    既挤占细粒度关键词，又让检索同义膨胀）。实测 726 题 5,403 次标签里 2,044 次属此类。
+    """
+    from . import taxonomy
+    from .labelspec import positions, qtypes
+
+    topics = set(topic_vocab())
+    groups = {g["level1"] for g in taxonomy.load()["groups"]}
+    return frozenset(topics | groups | set(qtypes()) | set(positions()) | {LEGACY_MARKER})

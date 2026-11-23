@@ -119,11 +119,17 @@ def recommended_tags() -> tuple[str, ...]:
 
 
 def normalize_tags(raw, *, max_items: int | None = None, max_len: int | None = None,
-                   synonyms: dict[str, str] | None = None) -> tuple[list[str], int]:
-    """标签归一：去空白/同义词映射/去重/截断。返回 (规范标签列表, 命中同义词的个数)。
+                   synonyms: dict[str, str] | None = None,
+                   stopwords: frozenset[str] | set[str] | None = None
+                   ) -> tuple[list[str], int, int]:
+    """标签归一：去空白/同义词映射/去重/去维度词/截断。
+
+    返回 (规范标签列表, 命中同义词的个数, 被当维度词剔除的个数)。
 
     `synonyms` 可由调用方传入（batch_label 用数据库配置表的 aliases）；
     不传则回退 `meta/tag_synonyms.yaml`。归一目标是"合并同义写法"，不是"只允许词表内标签"。
+    `stopwords` 是结构化字段取值（topic/组名/qtype/position），tags 里出现即剔除——
+    实测这类重复占 37.8% 的标签出现量，留着只挤占细粒度关键词。
     """
     cap_items, cap_len = tag_limits()
     cap_items = max_items or cap_items
@@ -131,10 +137,12 @@ def normalize_tags(raw, *, max_items: int | None = None, max_len: int | None = N
     if isinstance(raw, str):
         raw = [raw]
     if not isinstance(raw, (list, tuple)):
-        return [], 0
+        return [], 0, 0
     syn = tag_synonyms() if synonyms is None else synonyms
+    stop = set(stopwords or ())
     out: list[str] = []
     hits = 0
+    dropped = 0
     seen: set[str] = set()
     for item in raw:
         tag = str(item or "").strip()
@@ -145,6 +153,9 @@ def normalize_tags(raw, *, max_items: int | None = None, max_len: int | None = N
             hits += 1
             tag = canonical
         tag = tag[:cap_len]
+        if tag in stop:
+            dropped += 1
+            continue
         key = tag.lower()
         if key in seen:
             continue
@@ -152,12 +163,13 @@ def normalize_tags(raw, *, max_items: int | None = None, max_len: int | None = N
         out.append(tag)
         if len(out) >= cap_items:
             break
-    return out, hits
+    return out, hits, dropped
 
 
 def validate_label(obj: dict, vocab: tuple[str, ...] = (), q_text: str = "", *,
                    synonyms: dict[str, str] | None = None,
-                   topic_aliases: dict[str, str] | None = None) -> dict:
+                   topic_aliases: dict[str, str] | None = None,
+                   tag_stopwords: frozenset[str] | set[str] | None = None) -> dict:
     """LLM 输出 → 规范化字段 + issues + review_state。
 
     非法枚举（qtype / difficulty）直接抛 ValueError，让调用方落 failed 队列重试；
@@ -219,9 +231,13 @@ def validate_label(obj: dict, vocab: tuple[str, ...] = (), q_text: str = "", *,
         canonical = (q_text or "").strip().replace("\n", " ")[: canonical_max_len()]
     out["canonical_q"] = canonical
 
-    tags, hits = normalize_tags(obj.get("tags") or [], synonyms=synonyms)
+    tags, hits, dropped = normalize_tags(obj.get("tags") or [], synonyms=synonyms,
+                                         stopwords=tag_stopwords)
     out["tags"] = tags
     out["tag_norm_hits"] = hits
+    out["tag_dim_dropped"] = dropped
+    if dropped:
+        out["issues"].append(f"tag_dimension_dropped:{dropped}")
     return out
 
 
