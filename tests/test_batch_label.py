@@ -238,6 +238,39 @@ def test_merge_hash_consistency_does_not_overwrite_by_default(mini_db):
     assert mini_db.execute("SELECT topic FROM questions WHERE qid=2").fetchone()[0] == "Java基础"
 
 
+@pytest.mark.parametrize("order", [
+    ["changed-hash", "steady-hash"],
+    ["steady-hash", "changed-hash"],
+])
+def test_hash_propagation_only_updates_facts_for_changed_hash(mini_db, order):
+    mini_db.execute(
+        "UPDATE questions SET q_norm_hash='changed-hash', topic=CASE qid "
+        "WHEN 1 THEN '' ELSE 'Java基础' END WHERE qid IN (1,2)")
+    mini_db.execute(
+        "UPDATE questions SET q_norm_hash='steady-hash', topic='MySQL' WHERE qid IN (3,4)")
+    mini_db.execute(
+        "INSERT INTO label_facts (q_norm_hash, topic, merged_at) VALUES ('steady-hash','旧事实','now')")
+    mini_db.commit()
+
+    out = bl._propagate_by_hash(mini_db, order)
+
+    assert out["topic_filled"] == 1
+    assert mini_db.execute(
+        "SELECT topic FROM questions WHERE qid=1").fetchone()[0] == "Java基础"
+    assert mini_db.execute(
+        "SELECT topic FROM label_facts WHERE q_norm_hash='steady-hash'").fetchone()[0] == "旧事实"
+
+
+def test_hash_propagation_without_changes_keeps_facts(mini_db):
+    mini_db.execute("UPDATE questions SET q_norm_hash='steady-hash' WHERE qid IN (1,2)")
+    mini_db.execute(
+        "INSERT INTO label_facts (q_norm_hash, topic, merged_at) VALUES ('steady-hash','旧事实','now')")
+    mini_db.commit()
+    bl._propagate_by_hash(mini_db, ["steady-hash"])
+    assert mini_db.execute(
+        "SELECT topic FROM label_facts WHERE q_norm_hash='steady-hash'").fetchone()[0] == "旧事实"
+
+
 def test_merge_blocked_on_bad_schema(mini_db):
     """schema 不合格（qtype 越枚举）→ G6 FAIL → merge 拒绝，staging 保留。"""
     mini_db.execute("INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, provider, "
@@ -686,6 +719,69 @@ def test_merge_coalesce_guards_difficulty_tags(mini_db, monkeypatch, tmp_path):
     assert bl.merge(mini_db)["ok"]
     r = mini_db.execute("SELECT difficulty, tags FROM questions WHERE qid=1").fetchone()
     assert r[0] == 3 and json.loads(r[1]) == ["旧"]   # difficulty 正常覆盖；tags 保留旧值
+
+
+def test_merge_change_counts_are_measured_before_update(mini_db, monkeypatch, tmp_path):
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    mini_db.execute(
+        "UPDATE questions SET topic='Java基础', qtype='八股', difficulty=3, "
+        "tags='[\"HashMap\"]', position='[\"后端\"]', canonical_q=q_text WHERE qid=1")
+    mini_db.execute(
+        "UPDATE labels_staging SET canonical_q=(SELECT q_text FROM questions WHERE qid=1) "
+        "WHERE qid=1")
+    mini_db.commit()
+
+    out = bl.merge(mini_db)
+
+    assert out["ok"] and out["merged"] == 3
+    assert out["merged_changed"] == 2 and out["merged_kept_existing"] == 1
+
+
+@pytest.mark.parametrize("field,before,staged,changed", [
+    ("topic", None, "", 0),
+    ("topic", "Java基础", "Java基础", 0),
+    ("topic", "Java基础", "Redis", 1),
+    ("qtype", "八股", "算法", 1),
+    ("difficulty", None, None, 0),
+    ("difficulty", 3, 3, 0),
+    ("difficulty", 3, 4, 1),
+    ("tags", None, "[]", 0),
+    ("tags", '["旧"]', '["旧"]', 0),
+    ("tags", '["旧"]', '["新"]', 1),
+    ("position", None, None, 0),
+    ("position", '["后端"]', '["后端"]', 0),
+    ("position", '["后端"]', '["算法"]', 1),
+    ("quality", None, None, 0),
+    ("quality", '["残缺"]', '["重复"]', 1),
+    ("canonical_q", None, "", 0),
+    ("canonical_q", "旧问句", "新问句", 1),
+])
+def test_merge_change_count_matches_update_expression(mini_db, monkeypatch, field, before,
+                                                       staged, changed):
+    from mianjing_kb import label_quality, verify_ledger
+
+    monkeypatch.setattr(verify_ledger, "g6_label", lambda conn: {"state": "PASS", "fails": []})
+    monkeypatch.setattr(verify_ledger, "g6b_golden", lambda conn: {"state": "PASS", "detail": {}})
+    monkeypatch.setattr(label_quality, "assess",
+                        lambda conn: {"ok": True, "state": "PASS", "detail": {}})
+    mini_db.execute(f"UPDATE questions SET {field}=? WHERE qid=1", (before,))
+    values = {"topic": "", "qtype": "八股", "difficulty": None, "tags": "[]",
+              "position": None, "quality": None, "canonical_q": ""}
+    values[field] = staged
+    mini_db.execute(
+        "INSERT INTO labels_staging (qid, q_norm_hash, topic, qtype, difficulty, tags, "
+        "position, quality, canonical_q, provider, model, labeled_at) "
+        "VALUES (1,'hash1',?,?,?,?,?,?,?,'p','m','now')",
+        (values["topic"], values["qtype"], values["difficulty"], values["tags"],
+         values["position"], values["quality"], values["canonical_q"]))
+    mini_db.commit()
+
+    out = bl.merge(mini_db)
+
+    assert out["ok"], out
+    assert out["merged_changed"] == changed
+    assert out["merged_kept_existing"] == 1 - changed
 
 
 def test_todo_predicate_single_source(mini_db, monkeypatch):

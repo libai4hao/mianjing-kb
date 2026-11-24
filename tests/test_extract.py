@@ -344,46 +344,36 @@ def test_doc_list_processes_only_listed_docs(tmp_env, tmp_path, capsys):
     assert per.get(h1) == 2 and per.get(h2) == 2
 
 
-def test_doc_list_skips_doc_with_llm_answers_by_default(tmp_env, tmp_path, capsys):
-    """P0（2026-11-25 review）：store() 删了重插，补答正文与 answer_* 溯源会一起没——默认拒切。
-
-    docs/53 记录生产有 4,233 条模型补答；旧实现重切时不提示、不留存，定向补切一跑就永久丢失。
-    """
+def test_doc_list_preserves_llm_answers_by_hash(tmp_env, tmp_path, capsys):
     corpus, conn = tmp_env
-    h1, _ = _seed_doc(conn, corpus, "a.md", MD_A)
+    h1, p1 = _seed_doc(conn, corpus, "a.md", MD_A)
     h2, _ = _seed_doc(conn, corpus, "b.md", MD_B)
     assert extract.main(["--db", str(config.DB_PATH)]) == 0
     conn.execute("UPDATE questions SET a_text='模型补答正文', answer_source='llm', answer_model='m', "
                  "answered_at='t' WHERE doc_hash=? AND seq=2", (h1,))
+    p1.write_text(MD_A.replace("纯内存操作加 IO 多路复用，单线程模型避免了锁竞争，减少了上下文切换开销。", ""),
+                  encoding="utf-8")
     conn.commit()
     capsys.readouterr()
     lst = tmp_path / "docs.txt"
     lst.write_text(f"{h1}\n{h2}\n", encoding="utf-8")
 
     assert extract.main(["--db", str(config.DB_PATH), "--doc-list", str(lst)]) == 0
-    captured = capsys.readouterr()
-    out = json.loads(captured.out)
-    assert out["docs"] == 1 and out["answer_provenance_skipped"] == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["docs"] == 2 and out["answer_provenance_skipped"] == 0
     assert out["answer_provenance_lost"] == 0
     row = conn.execute("SELECT a_text, answer_source FROM questions WHERE doc_hash=? AND seq=2",
                        (h1,)).fetchone()
     assert row["a_text"] == "模型补答正文" and row["answer_source"] == "llm"
-    # 被跳过的文档不能被改成 processing（保护在改状态之前生效）
-    assert conn.execute("SELECT status FROM source_documents WHERE doc_hash=?", (h1,)
-                        ).fetchone()[0] == "processed"
 
-    # 显式放弃补答才放行，并报出丢了多少行
     assert extract.main(["--db", str(config.DB_PATH), "--doc-list", str(lst),
                          "--allow-answer-loss"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["docs"] == 2 and out["answer_provenance_skipped"] == 0     # 清单内两篇都重切
-    assert out["answer_provenance_lost"] == 1
-    row = conn.execute("SELECT a_text, answer_source FROM questions WHERE doc_hash=? AND seq=2",
-                       (h1,)).fetchone()
-    assert row["answer_source"] == "" and row["a_text"] != "模型补答正文"
-    # plan 预览也要能看出风险面
+    assert out["docs"] == 2 and out["answer_provenance_lost"] == 0
+    assert conn.execute("SELECT a_text FROM questions WHERE doc_hash=? AND seq=2", (h1,)
+                        ).fetchone()[0] == "模型补答正文"
     assert extract.main(["--db", str(config.DB_PATH), "--plan"]) == 0
-    assert json.loads(capsys.readouterr().out)["answer_provenance_docs"] == 0
+    assert json.loads(capsys.readouterr().out)["answer_provenance_docs"] == 1
 
 
 def test_plan_reports_answer_provenance_docs(tmp_env, capsys):
@@ -539,3 +529,327 @@ def test_negative_limit_is_rejected_before_database_access(tmp_env):
 def test_zero_limit_still_means_unlimited(tmp_env):
     """0 保持"不限制"语义，不能被误拦。"""
     assert extract.main(["--db", str(config.DB_PATH), "--limit", "0", "--dry-run"]) == 0
+
+
+def test_store_preserves_answers_state_and_labels_by_hash(tmp_env):
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "preserve.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "preserve.md")
+    rows[0]["a_text"] = ""
+    extract.store(conn, h, rows)
+    old = conn.execute(
+        "SELECT qid, q_norm_hash FROM questions WHERE doc_hash=? ORDER BY qid LIMIT 1", (h,)
+    ).fetchone()
+    conn.execute(
+        "UPDATE questions SET a_text='LLM 答案', answer_state='ok', answer_source='llm', "
+        "answer_model='m', answered_at='t', topic='Redis', qtype='算法', difficulty=4, "
+        "tags='[\"缓存\"]', position='[\"后端\"]', quality='[\"残缺\"]', canonical_q='标准问句' "
+        "WHERE qid=?", (old["qid"],))
+    conn.commit()
+
+    extract.store(conn, h, rows)
+    row = conn.execute(
+        "SELECT qid, a_text, answer_state, answer_source, answer_model, answered_at, topic, "
+        "qtype, difficulty, tags, position, quality, canonical_q FROM questions "
+        "WHERE doc_hash=? AND q_norm_hash=?", (h, old["q_norm_hash"])).fetchone()
+
+    assert row["qid"] != old["qid"]
+    assert tuple(row)[1:6] == ("LLM 答案", "ok", "llm", "m", "t")
+    assert tuple(row)[6:] == ("Redis", "算法", 4, '["缓存"]', '["后端"]', '["残缺"]', "标准问句")
+
+
+def test_store_new_source_answer_replaces_old_llm_answer(tmp_env):
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "new-answer.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "new-answer.md")
+    extract.store(conn, h, rows)
+    conn.execute(
+        "UPDATE questions SET a_text='旧模型答案', answer_state='no_answer_source', "
+        "answer_source='llm', answer_model='m', answered_at='t' WHERE doc_hash=? AND seq=1", (h,))
+    conn.commit()
+    rows[0]["a_text"] = "本次源文档答案"
+
+    extract.store(conn, h, rows)
+    row = conn.execute(
+        "SELECT a_text, answer_state, answer_source, answer_model, answered_at FROM questions "
+        "WHERE doc_hash=? AND seq=1", (h,)).fetchone()
+
+    assert tuple(row) == ("本次源文档答案", "ok", "", None, None)
+
+
+@pytest.mark.parametrize("source", ["llm_refused", "llm_error"])
+def test_store_inherits_empty_answer_terminal_state(tmp_env, source):
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "empty-answer.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "empty-answer.md")
+    rows[0]["a_text"] = ""
+    extract.store(conn, h, rows)
+    old = conn.execute("SELECT qid FROM questions WHERE doc_hash=? AND seq=1", (h,)).fetchone()
+    conn.execute(
+        "UPDATE questions SET answer_state='no_answer_source', answer_source=?, "
+        "answer_model='m', answered_at='t' WHERE qid=?", (source, old["qid"]))
+    conn.commit()
+
+    extract.store(conn, h, rows)
+    row = conn.execute(
+        "SELECT a_text, answer_state, answer_source, answer_model, answered_at FROM questions "
+        "WHERE doc_hash=? AND seq=1", (h,)).fetchone()
+    assert tuple(row) == ("", "no_answer_source", source, "m", "t")
+
+
+def test_store_refuses_unmatched_governed_question_and_rolls_back(tmp_env):
+    from mianjing_kb.extract import StateLossError
+
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "changed.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "changed.md")
+    extract.store(conn, h, rows)
+    old = conn.execute("SELECT qid FROM questions WHERE doc_hash=? AND seq=1", (h,)).fetchone()
+    conn.execute(
+        "UPDATE questions SET a_text='已治理答案', answer_state='ok', answer_source='llm', "
+        "answer_model='m', answered_at='t' WHERE qid=?", (old["qid"],))
+    conn.commit()
+    before = [tuple(r) for r in conn.execute(
+        "SELECT * FROM questions WHERE doc_hash=? ORDER BY qid", (h,))]
+    changed = [dict(r) for r in rows]
+    changed[0]["q_norm_hash"] = "different-hash"
+
+    with pytest.raises(StateLossError, match="allow-state-loss"):
+        extract.store(conn, h, changed)
+    assert [tuple(r) for r in conn.execute(
+        "SELECT * FROM questions WHERE doc_hash=? ORDER BY qid", (h,))] == before
+
+    extract.store(conn, h, changed, allow_state_loss=True)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM questions WHERE doc_hash=? AND a_text='已治理答案'", (h,)
+    ).fetchone()[0] == 0
+
+
+def test_store_allows_unmatched_source_answer_and_derived_state(tmp_env):
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "source-only.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "source-only.md")
+    extract.store(conn, h, rows)
+    conn.execute("UPDATE questions SET answer_state='boundary_gap' WHERE doc_hash=? AND seq=1", (h,))
+    conn.commit()
+    changed = [dict(r) for r in rows]
+    changed[0]["q_norm_hash"] = "changed-source-hash"
+
+    extract.store(conn, h, changed)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM questions WHERE doc_hash=? AND q_norm_hash=?",
+        (h, "changed-source-hash")).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("topic", "Redis"),
+    ("qtype", "算法"),
+    ("difficulty", 4),
+    ("tags", '["缓存"]'),
+    ("position", '["后端"]'),
+    ("quality", '["残缺"]'),
+    ("canonical_q", "标准问句"),
+])
+def test_store_refuses_unmatched_governance_field(tmp_env, field, value):
+    from mianjing_kb.extract import StateLossError
+
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "governed.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "governed.md")
+    extract.store(conn, h, rows)
+    old = conn.execute("SELECT qid FROM questions WHERE doc_hash=? AND seq=1", (h,)).fetchone()
+    conn.execute(f"UPDATE questions SET {field}=? WHERE qid=?", (value, old["qid"]))
+    conn.commit()
+    before = [tuple(r) for r in conn.execute(
+        "SELECT * FROM questions WHERE doc_hash=? ORDER BY qid", (h,))]
+    changed = [dict(r) for r in rows]
+    changed[0]["q_norm_hash"] = "different-hash"
+
+    with pytest.raises(StateLossError, match="allow-state-loss"):
+        extract.store(conn, h, changed)
+    assert [tuple(r) for r in conn.execute(
+        "SELECT * FROM questions WHERE doc_hash=? ORDER BY qid", (h,))] == before
+
+    loss_report = {}
+    extract.store(conn, h, changed, allow_state_loss=True, loss_report=loss_report)
+    assert loss_report["count"] == 1 and loss_report["provenance_count"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM questions WHERE doc_hash=? AND q_norm_hash=?",
+        (h, "different-hash")).fetchone()[0] == 1
+
+
+def test_store_refuses_to_orphan_last_label_fact(tmp_env):
+    from mianjing_kb.extract import StateLossError
+
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "fact.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "fact.md")
+    extract.store(conn, h, rows)
+    old_hash = rows[0]["q_norm_hash"]
+    conn.execute("UPDATE questions SET a_text='', answer_state=NULL WHERE doc_hash=? AND seq=1", (h,))
+    conn.execute(
+        "INSERT INTO label_facts (q_norm_hash, topic, merged_at) VALUES (?, 'Redis', 'now')",
+        (old_hash,))
+    conn.commit()
+    changed = [dict(r) for r in rows]
+    changed[0]["q_norm_hash"] = "new-hash"
+
+    with pytest.raises(StateLossError, match="label_facts 1 条"):
+        extract.store(conn, h, changed)
+    assert conn.execute("SELECT topic FROM label_facts WHERE q_norm_hash=?", (old_hash,)
+                        ).fetchone()[0] == "Redis"
+
+
+def test_store_allows_orphan_fact_when_another_document_keeps_reference(tmp_env):
+    corpus, conn = tmp_env
+    h1, _ = _seed_doc(conn, corpus, "fact-a.md", MD_A)
+    h2, _ = _seed_doc(conn, corpus, "fact-b.md", MD_B)
+    rows1 = extract.extract_doc(h1, corpus / "fact-a.md")
+    rows2 = extract.extract_doc(h2, corpus / "fact-b.md")
+    extract.store(conn, h1, rows1)
+    extract.store(conn, h2, rows2)
+    shared = {r["q_norm_hash"] for r in rows1} & {r["q_norm_hash"] for r in rows2}
+    old_hash = next(iter(shared))
+    conn.execute("UPDATE questions SET a_text='', answer_state=NULL "
+                 "WHERE doc_hash=? AND q_norm_hash=?", (h1, old_hash))
+    conn.execute(
+        "INSERT INTO label_facts (q_norm_hash, topic, merged_at) VALUES (?, 'Redis', 'now')",
+        (old_hash,))
+    conn.commit()
+    changed = [dict(r) for r in rows1]
+    next(r for r in changed if r["q_norm_hash"] == old_hash)["q_norm_hash"] = "new-hash"
+
+    extract.store(conn, h1, changed)
+    assert conn.execute("SELECT topic FROM label_facts WHERE q_norm_hash=?", (old_hash,)
+                        ).fetchone()[0] == "Redis"
+
+
+def test_store_refuses_conflicting_duplicate_hash(tmp_env):
+    from mianjing_kb.extract import StateLossError
+
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "duplicate.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "duplicate.md")
+    extract.store(conn, h, rows)
+    first = rows[0]
+    conn.execute("DROP INDEX uq_questions_qkey")
+    conn.execute(
+        "INSERT INTO questions (doc_hash, seq, q_text, a_text, span_start, span_end, q_norm, "
+        "q_norm_hash, simhash, extracted_at, q_key) VALUES (?,99,?,?,0,1,?,?,0,'now',?)",
+        (h, first["q_text"], "冲突答案", first["q_norm"], first["q_norm_hash"], first["q_key"]))
+    conn.commit()
+
+    with pytest.raises(StateLossError, match="冲突"):
+        extract.store(conn, h, rows)
+
+
+def test_store_accepts_plain_sqlite_connection(tmp_env):
+    import sqlite3
+
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "plain.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "plain.md")
+    raw = sqlite3.connect(str(config.DB_PATH))
+    try:
+        assert extract.store(raw, h, rows) == 0
+    finally:
+        raw.close()
+
+
+def test_purge_orphans_refuses_governed_rows_without_explicit_authorization(tmp_env):
+    from mianjing_kb.extract import StateLossError
+
+    _corpus, conn = tmp_env
+    conn.execute(
+        "INSERT INTO questions (doc_hash, seq, q_text, a_text, answer_state, answer_source, "
+        "q_norm, q_norm_hash, simhash, span_start, span_end, extracted_at) "
+        "VALUES ('stale',1,'旧题','治理答案','ok','llm','旧题','old-hash',0,0,1,'now')")
+    conn.commit()
+
+    with pytest.raises(StateLossError):
+        extract.purge_orphans(conn, set())
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash='stale'").fetchone()[0] == 1
+    assert extract.purge_orphans(conn, set(), allow_state_loss=True) == 1
+
+
+def test_purge_orphans_refuses_fact_shared_only_by_multiple_stale_docs(tmp_env):
+    from mianjing_kb.extract import StateLossError
+
+    corpus, conn = tmp_env
+    h1, _ = _seed_doc(conn, corpus, "stale-a.md", MD_A)
+    h2, _ = _seed_doc(conn, corpus, "stale-b.md", MD_B)
+    rows1 = extract.extract_doc(h1, corpus / "stale-a.md")
+    rows2 = extract.extract_doc(h2, corpus / "stale-b.md")
+    extract.store(conn, h1, rows1)
+    extract.store(conn, h2, rows2)
+    shared = {r["q_norm_hash"] for r in rows1} & {r["q_norm_hash"] for r in rows2}
+    old_hash = next(iter(shared))
+    conn.execute(
+        "INSERT INTO label_facts (q_norm_hash, topic, merged_at) VALUES (?, 'Redis', 'now')",
+        (old_hash,))
+    conn.commit()
+
+    with pytest.raises(StateLossError, match="label_facts 1 条"):
+        extract.purge_orphans(conn, set())
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash IN (?,?)",
+                        (h1, h2)).fetchone()[0] == 4
+    assert conn.execute("SELECT COUNT(*) FROM label_facts WHERE q_norm_hash=?",
+                        (old_hash,)).fetchone()[0] == 1
+
+
+def test_main_reports_structured_state_loss_and_returns_nonzero(tmp_env, monkeypatch, capsys):
+    corpus, conn = tmp_env
+    h, p = _seed_doc(conn, corpus, "loss.md", MD_A)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    rows = extract.extract_doc(h, p)
+    old = conn.execute("SELECT qid FROM questions WHERE doc_hash=? AND seq=1", (h,)).fetchone()
+    conn.execute("UPDATE questions SET a_text='治理答案', answer_source='llm' WHERE qid=?",
+                 (old["qid"],))
+    conn.commit()
+    before = [tuple(r) for r in conn.execute(
+        "SELECT * FROM questions WHERE doc_hash=? ORDER BY qid", (h,))]
+    changed = [dict(r) for r in rows]
+    changed[0]["q_norm_hash"] = "different-hash"
+    real_extract = extract.extract_doc_status
+    monkeypatch.setattr(extract, "extract_doc_status",
+                        lambda doc_hash, path: (changed, "ok") if path == p else real_extract(doc_hash, path))
+    capsys.readouterr()
+
+    assert extract.main(["--db", str(config.DB_PATH)]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["state_loss_blocked"] == 1
+    assert out["state_loss"][0]["qids"] == [old["qid"]]
+    assert [tuple(r) for r in conn.execute(
+        "SELECT * FROM questions WHERE doc_hash=? ORDER BY qid", (h,))] == before
+
+    assert extract.main(["--db", str(config.DB_PATH), "--allow-state-loss"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["state_loss_blocked"] == 0 and out["answer_provenance_lost"] == 1
+
+
+def test_allow_empty_overwrite_authorizes_state_loss(tmp_env, capsys):
+    corpus, conn = tmp_env
+    h, p = _seed_doc(conn, corpus, "empty-loss.md", MD_A)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    conn.execute("UPDATE questions SET answer_source='llm' WHERE doc_hash=? AND seq=1", (h,))
+    p.write_text("太短", encoding="utf-8")
+    conn.commit()
+    capsys.readouterr()
+
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    assert json.loads(capsys.readouterr().out)["empty_preserved"] == 1
+    assert extract.main(["--db", str(config.DB_PATH), "--allow-empty-overwrite"]) == 0
+    capsys.readouterr()
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash=?", (h,)).fetchone()[0] == 0
+
+
+def test_plan_detects_answer_model_without_source(tmp_env, capsys):
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "model-only.md", MD_A)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    conn.execute("UPDATE questions SET answer_model='m' WHERE doc_hash=? AND seq=1", (h,))
+    conn.commit()
+    capsys.readouterr()
+
+    assert extract.main(["--db", str(config.DB_PATH), "--plan"]) == 0
+    assert json.loads(capsys.readouterr().out)["answer_provenance_docs"] == 1

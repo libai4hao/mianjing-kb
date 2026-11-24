@@ -319,7 +319,7 @@ def collect() -> dict:
     attention = []
     if not kb.get("present"):
         attention.append("kb.sqlite 不存在")
-    if gates["state"] in ("STALE", "FAIL", "MISSING"):
+    if gates["state"] in ("STALE", "FAIL", "MISSING", "INVALID"):
         attention.append(f"门禁 {gates['state']}")
     if not gates.get("present") or gates.get("stale"):
         attention.append("门禁报告需重跑")

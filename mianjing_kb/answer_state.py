@@ -23,7 +23,7 @@
     python -m mianjing_kb.answer_state --db <kb.sqlite> --only-missing --apply   # 只补空状态并写库
     python -m mianjing_kb.answer_state --db <kb.sqlite> --apply   # 全库重算并写库（会改写历史状态，慎用）
 
-`extract` 重切过的文档，题行上的 answer_state 会被清空——重切后用 `--only-missing --apply` 补回。
+`extract` 同 q_norm_hash 重切会继承 answer_state；新增或无法对齐的题用 `--only-missing --apply` 补回。
 """
 from __future__ import annotations
 
@@ -135,8 +135,7 @@ def main(argv=None) -> int:
     lock = nullcontext()
     if apply:
         lock = wlock.write_lock(
-            "kb" if path.resolve() == Path(config.DB_PATH).resolve() else "online",
-            tool="answer_state", build_dir=config.BUILD_DIR, wait_sec=30.0, target=path)
+            "kb", tool="answer_state", build_dir=path.parent, wait_sec=30.0, target=path)
     try:
         with lock:
             conn = db.connect(path, create=False, readonly=not apply)

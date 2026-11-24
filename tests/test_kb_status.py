@@ -97,6 +97,7 @@ def test_gate_unknown_verdict_is_invalid(mini_env, raw):
     gates = ks._gate_summary(build, kb_id, out_id)
     assert gates["state"] == "INVALID"
     assert gates["verdict"] == "INVALID"
+    assert "门禁 INVALID" in ks.collect()["attention"]
     line = ks._gate_line(gates)
     assert "verdict=PASS" not in line
 

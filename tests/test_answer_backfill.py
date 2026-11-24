@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 
 from mianjing_kb import answer_backfill as ab
-from mianjing_kb.kb import db
+from mianjing_kb.kb import config, db, wlock
 
 
 @pytest.fixture()
@@ -64,7 +64,8 @@ def test_run_does_not_overwrite_answer_filled_after_pick(conn, monkeypatch):
     res = ab.run(conn, targets, concurrency=1)
     row = conn.execute("SELECT a_text, answer_source FROM questions WHERE qid=1").fetchone()
     assert row["a_text"] == "原文拆出的答案" and row["answer_source"] == ""
-    assert res["answered"] == 2 and res["written"] == 1 and res["guard_skipped"] == 1
+    assert res["answered"] == 1 and res["written"] == 1
+    assert res["guard_skipped"] == 1 and res["error"] == 1
 
 
 def tmp_file(conn):
@@ -128,3 +129,71 @@ def test_pick_targets_retries_legacy_llm_error(conn):
     conn.execute("UPDATE questions SET answer_source='llm_error' WHERE qid=2")
     conn.commit()
     assert 2 in [q for q, _ in ab.pick_targets(conn)]
+
+
+def test_pick_targets_rejects_negative_limit(conn):
+    with pytest.raises(ValueError, match="大于等于 0"):
+        ab.pick_targets(conn, -1)
+
+
+def test_apply_holds_custom_db_lock_during_selection_and_model_call(tmp_path, monkeypatch, capsys):
+    build = tmp_path / "custom-build"
+    build.mkdir()
+    path = build / "kb.sqlite"
+    monkeypatch.setattr(config, "BUILD_DIR", tmp_path / "other-build")
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "other-build" / "kb.sqlite")
+    conn = db.connect(path)
+    conn.execute(
+        "INSERT INTO questions (doc_hash, seq, q_text, a_text, answer_state, q_norm, "
+        "q_norm_hash, simhash, span_start, span_end, extracted_at) "
+        "VALUES ('doc',1,'什么是 JVM？','','boundary_gap','jvm','h1',0,0,1,'now')")
+    conn.commit()
+    conn.close()
+
+    seen = []
+    real_pick = ab.pick_targets
+
+    def observe(name, fn):
+        def wrapper(*args, **kwargs):
+            locked, holder = wlock.inspect_lock(build / "locks" / "kb.lock")
+            seen.append((name, locked, (holder or {}).get("tool")))
+            return fn(*args, **kwargs)
+        return wrapper
+
+    monkeypatch.setattr(ab, "pick_targets", observe("pick", real_pick))
+    monkeypatch.setattr(ab.llm_client, "chat",
+                        observe("chat", lambda *a, **k: {"text": "模型答案"}))
+    assert ab.main(["--db", str(path), "--apply", "--concurrency", "1"]) == 0
+    capsys.readouterr()
+    assert seen == [(name, True, "answer_backfill") for name in ("pick", "chat")]
+    conn = db.connect(path, create=False, readonly=True)
+    assert conn.execute("SELECT a_text FROM questions").fetchone()[0] == "模型答案"
+    conn.close()
+
+
+@pytest.mark.parametrize("mutation", ["delete", "question", "source"])
+def test_run_does_not_count_stale_target_as_answered(conn, monkeypatch, mutation):
+    monkeypatch.setattr(ab.llm_client, "chat", lambda *a, **k: {"text": "模型答案"})
+    if mutation == "delete":
+        conn.execute("DELETE FROM questions WHERE qid=1")
+    elif mutation == "question":
+        conn.execute("UPDATE questions SET q_text='已经变化的题干' WHERE qid=1")
+    else:
+        conn.execute("UPDATE questions SET answer_source='llm_refused' WHERE qid=1")
+    conn.commit()
+
+    res = ab.run(conn, [(1, "什么是 JVM 类加载？")], concurrency=1)
+
+    assert res["answered"] == 0 and res["written"] == 0
+    assert res["guard_skipped"] == 1 and res["error"] == 1
+
+
+@pytest.mark.parametrize("extra", [[], ["--stats"], ["--stats", "--apply"]])
+def test_read_only_modes_do_not_acquire_write_lock(conn, monkeypatch, extra):
+    monkeypatch.setattr(ab.llm_client, "chat", lambda *a, **k: {"text": "答案"})
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("read-only mode took write lock")
+
+    monkeypatch.setattr(ab.wlock, "write_lock", forbidden)
+    assert ab.main(["--db", str(tmp_file(conn)), *extra]) == 0

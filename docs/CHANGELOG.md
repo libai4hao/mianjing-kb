@@ -1,6 +1,6 @@
 # 工程变更日志（CHANGELOG）
 
-> 状态：现行 · 最后更新：2026-11-22 · 适用版本：v2-R3
+> 状态：现行 · 最后更新：2026-11-25 · 适用版本：v2-R3
 >
 > 只记**工程变更**（代码、门禁、依赖、文档结构），不记数据快照——题数、库大小会随重建漂移，
 > 一律以 `docs/29-数据基线与统计口径-2026-11-19.md` 为准。历史里程碑按日期倒序。
@@ -8,22 +8,25 @@
 
 ## 2026-11-25
 
-- **全仓代码评审 + P0/P1 修复**（`docs/60`）：评审对象 `b3d6930`，门禁全绿但写库链上有三条静默破坏类缺陷。
-  - **P0 `extract` 重切抹补答**：`store()` 删了重插，题行上的模型补答正文（只存在 `questions.a_text`）
-    与 `answer_source/answer_model/answered_at` 一起被删，输出无提示；`docs/53` 记录的"补答 4,233+947 被抹平"
-    就是它。现在题里带补答溯源的文档**默认跳过并逐篇告警**（在改 `processing` 之前拦下），
-    `--allow-answer-loss` 才放行并报 `answer_provenance_lost`（行数）；`--plan` 报 `answer_provenance_docs`。
-    输出新增 `answer_provenance_skipped` / `answer_provenance_lost`，退出码不变。
-  - **P1 `answer_state` 预览改库**：预览用可写连接并跑 `db.migrate()`，对停在旧 schema 的回滚快照"预览"
-    就会把它升到 019，且不持写锁。现在预览 `mode=ro`，`--apply` 先拿写锁再连接（迁移在锁内）。
-  - **P1 `answer_backfill` 无写锁、写回无守卫**：未接 `wlock`；UPDATE 不带"答案仍为空"条件，选题后被
-    `qsalvage` 拆分补上原文答案的题会被模型答案覆盖；不带 `--apply` 也对全部目标调模型再丢弃；
-    写事务横跨模型调用。现在预览只读、默认 20 条（`--limit 0` 全量，负数拒绝）；写库按 50 条一批、
-    每批短暂持锁；UPDATE 加 `a_text 仍为空 AND answer_source IN ('', 'llm_error')` 守卫，
-    新增 `written` / `guard_skipped` 统计。
-  - 新增 6 个测试；`docs/33` 同步（迁移范围更正为 001–019）。14 条 P2 记入 `docs/60` §3 待排期，
-    其中 ISSUE-07 同类的 `--limit -1` 在另外 6 个入口仍存在。
-  - 门禁：ruff 0 告警；pytest **866 passed / 5 skipped / 6 xfailed**（105.6 s）；privacy_scan 306 文件 0 命中；demo PASS。
+- **外部 review ISSUE-01～07 复核与定点修复**（`docs/60`）：外部补丁基线 `05fa028` 与当前
+  `7bbab58` 冲突，未直接应用；逐项移植有效修复，并拒绝其自定义库 `online` 锁、预览迁移等回归设计。
+  - **ISSUE-04 `extract` 重抽状态保护**：`store()` 同 `q_norm_hash` 继承答案、`answer_state`、补答溯源和
+    治理字段；新源答案非空时以源文为准。无法对齐的模型溯源、人工治理字段或最后一份 `label_facts`
+    默认回滚当前文档/整批 purge，输出 `state_loss` 清单并非零退出；`--allow-state-loss` 显式放行，
+    兼容旧 `--allow-answer-loss`。普通源答案和可重算状态不阻止正常内容变更。
+  - **ISSUE-03/05 `answer_backfill`**：`--apply` 在目标库父目录的 `kb.lock` 内覆盖选题、模型调用和写回；
+    UPDATE 校验 qid、原题干、空答案和来源，陈旧目标计 `guard_skipped` + `error`，不虚报成功。
+    预览/stats 只读且不拿锁；负数 limit 在 CLI 和函数入口都拒绝。
+  - **ISSUE-07 `answer_state`**：预览继续只读、不迁移；`--apply` 在统一写锁内完成迁移、分类和回填，
+    自定义库不再误抢生产锁，保留 `--only-missing`。
+  - **ISSUE-01/02 `batch_label`**：逐 hash 重置事实同步标志，修复跨 hash 污染；merge 在 UPDATE 前按实际
+    写入表达式统计 `merged_changed` / `merged_kept_existing`，覆盖七个字段的 NULL/空值矩阵。
+  - **ISSUE-06 `status`**：`attention` 纳入 `INVALID` 门禁。
+  - 新增状态继承、fail-closed、purge 保护、锁边界、陈旧目标和统计矩阵等回归测试；`docs/33`、`docs/49` 同步。
+    未改 schema migration、依赖或生产库。14 条 P2 仍记入 `docs/60` §3 待排期，
+    其中 `--limit -1` 在另外 6 个入口仍存在。
+  - 门禁：五个定向测试文件 **163 passed**；ruff 0 告警；compileall / pip wheel 通过；
+    全量 pytest **919 passed / 5 skipped / 6 xfailed**（930 collected）；privacy_scan 307 文件 0 命中。
 
 ## 2026-11-24
 

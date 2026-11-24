@@ -29,6 +29,7 @@ import re
 import sys
 import time
 import unicodedata
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -219,10 +220,14 @@ def mark_status(conn, doc_hashes: list[str], new_status: str, only_from=status.I
     return n
 
 
-def purge_orphans(conn, pool_keys: set[str]) -> int:
-    """清理 questions 里 doc_hash 不在当前池的孤儿行（内容 hash 时代遗留/后续源退役）。"""
+def purge_orphans(conn, pool_keys: set[str], *, allow_state_loss: bool = False) -> int:
+    """清理孤儿题行；已治理数据未被显式授权丢弃时整批拒绝。"""
     stale = [r[0] for r in conn.execute("SELECT DISTINCT doc_hash FROM questions").fetchall()
              if r[0] not in pool_keys]
+    stale_docs = set(stale)
+    for doc_hash in stale:
+        _prepare_rows_preserving_state(
+            conn, doc_hash, [], allow_state_loss=allow_state_loss, removing_docs=stale_docs)
     removed = 0
     for i in range(0, len(stale), 500):
         chunk = stale[i:i + 500]
@@ -290,16 +295,143 @@ def extract_doc(doc_hash: str, path: Path) -> list[dict]:
     return rows
 
 
-def store(conn, doc_hash: str, rows: list[dict]) -> int:
-    """幂等写入：先删该 doc 旧题再插（文档内容变了整篇重切）。
+class StateLossError(RuntimeError):
+    """重抽或孤儿清理会丢弃无法对齐的已治理数据。"""
 
-    B1 修复（2026-11-19）：插入后按 q_norm_hash 重挂 label_facts（007）里已 merge
-    的打标——重切会换 qid（AUTOINCREMENT 高水位续号），打标事实按题干 hash 存活。
-    返回重挂数。
-    """
+    def __init__(self, message: str, *, details: dict | None = None):
+        super().__init__(message)
+        self.details = details or {}
+
+
+def _prepare_rows_preserving_state(conn, doc_hash: str, rows: list[dict], *,
+                                   allow_state_loss: bool = False,
+                                   loss_report: dict | None = None,
+                                   removing_docs: set[str] | None = None) -> list[dict]:
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(questions)")}
+    answer_cols = tuple(c for c in (
+        "a_text", "answer_state", "answer_source", "answer_model", "answered_at"
+    ) if c in columns)
+    label_cols = tuple(c for c in (
+        "topic", "qtype", "difficulty", "tags", "position", "quality", "canonical_q"
+    ) if c in columns)
+    tracked = answer_cols + label_cols
+    select_cols = ["qid", "q_norm_hash", *tracked]
+    old_rows = [dict(zip(select_cols, row)) for row in conn.execute(
+        f"SELECT {','.join(select_cols)} FROM questions WHERE doc_hash=? ORDER BY qid", (doc_hash,)
+    ).fetchall()]
+    new_rows = [dict(r) for r in rows]
+
+    def present(value) -> bool:
+        if value is None:
+            return False
+        return str(value).strip() not in ("", "[]")
+
+    def has_provenance(old: dict) -> bool:
+        provenance_cols = ("answer_source", "answer_model", "answered_at")
+        return any(present(old.get(c)) for c in provenance_cols)
+
+    def governed(old: dict) -> bool:
+        if has_provenance(old):
+            return True
+        if any(present(old.get(c)) for c in label_cols if c != "qtype"):
+            return True
+        return old.get("qtype") not in (None, "", "八股")
+
+    hash_counts = Counter(str(r.get("q_norm_hash") or "") for r in new_rows)
+    new_hashes = set(hash_counts) - {""}
+    duplicates = sorted(h for h, count in hash_counts.items() if h and count > 1)
+    if duplicates:
+        raise StateLossError(
+            f"重抽 {doc_hash} 的新结果包含重复 q_norm_hash={duplicates[0]}；当前文档未被替换。",
+            details={"doc_hash": doc_hash, "reason": "duplicate_new_hash",
+                     "q_norm_hashes": duplicates})
+
+    old_by_hash: dict[str, list[dict]] = {}
+    unmatched_qids = []
+    provenance_qids = []
+    for old in old_rows:
+        h = str(old.get("q_norm_hash") or "")
+        if h and h in new_hashes:
+            old_by_hash.setdefault(h, []).append(old)
+        elif governed(old):
+            unmatched_qids.append(old.get("qid"))
+            if has_provenance(old):
+                provenance_qids.append(old.get("qid"))
+
+    excluded_docs = set(removing_docs or ())
+    excluded_docs.add(doc_hash)
+    lost_fact_hashes = []
+    if "label_facts" in {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}:
+        for row in conn.execute(
+            "SELECT DISTINCT lf.q_norm_hash FROM label_facts lf "
+            "JOIN questions q ON q.q_norm_hash=lf.q_norm_hash WHERE q.doc_hash=?", (doc_hash,)
+        ):
+            h = str(row[0] or "")
+            if h and h not in new_hashes:
+                refs = conn.execute(
+                    "SELECT DISTINCT doc_hash FROM questions WHERE q_norm_hash=?", (h,))
+                if not any(str(r[0] or "") not in excluded_docs for r in refs):
+                    lost_fact_hashes.append(h)
+
+    loss = {"doc_hash": doc_hash, "reason": "unmatched_governed_questions",
+            "qids": unmatched_qids, "count": len(unmatched_qids),
+            "provenance_qids": provenance_qids, "provenance_count": len(provenance_qids),
+            "lost_fact_hashes": lost_fact_hashes, "lost_fact_count": len(lost_fact_hashes)}
+    if loss_report is not None:
+        loss_report.update(loss)
+    if (unmatched_qids or lost_fact_hashes) and not allow_state_loss:
+        sample_qids = ",".join(str(x) for x in unmatched_qids[:10]) or "-"
+        sample_hashes = ",".join(lost_fact_hashes[:5]) or "-"
+        raise StateLossError(
+            f"重抽 {doc_hash} 将丢失已治理数据：未匹配题目 {len(unmatched_qids)} 条 "
+            f"(qid={sample_qids})，失去最后引用的 label_facts {len(lost_fact_hashes)} 条 "
+            f"(hash={sample_hashes})。先核对 chunker/题干变化；确认接受丢失后显式加 "
+            "--allow-state-loss。当前文档未被替换。", details=loss)
+
+    for h, matches in old_by_hash.items():
+        signatures = {tuple(str(r.get(c) or "") for c in tracked) for r in matches}
+        if len(signatures) > 1:
+            qids = [r.get("qid") for r in matches]
+            raise StateLossError(
+                f"重抽 {doc_hash} 的 q_norm_hash={h} 对应多条旧记录且治理字段冲突；"
+                "请先人工处理重复题，当前文档未被替换。",
+                details={"doc_hash": doc_hash, "reason": "conflicting_duplicate_hash",
+                         "q_norm_hash": h, "qids": qids})
+
+    old_by_hash_one = {h: matches[0] for h, matches in old_by_hash.items()}
+    for row in new_rows:
+        for col in tracked:
+            row.setdefault(col, "" if col == "answer_source" else None)
+        old = old_by_hash_one.get(str(row.get("q_norm_hash") or ""))
+        if old is None:
+            continue
+        if not present(row.get("a_text")):
+            row["a_text"] = old.get("a_text")
+            for col in answer_cols:
+                if col != "a_text":
+                    row[col] = old.get(col)
+        elif "answer_state" in columns:
+            row["answer_state"] = "ok"
+        for col in label_cols:
+            if present(old.get(col)):
+                row[col] = old.get(col)
+
+    if new_rows:
+        keys = set(new_rows[0])
+        if any(set(r) != keys for r in new_rows[1:]):
+            raise ValueError("rows 的列集合必须一致")
+    return new_rows
+
+
+def store(conn, doc_hash: str, rows: list[dict], *, allow_state_loss: bool = False,
+          loss_report: dict | None = None) -> int:
+    """按稳定题干 hash 继承答案和治理字段，再替换该文档的题目。"""
+    rows = _prepare_rows_preserving_state(
+        conn, doc_hash, rows, allow_state_loss=allow_state_loss, loss_report=loss_report)
     conn.execute("DELETE FROM questions WHERE doc_hash=?", (doc_hash,))
     if rows:
-        cols = ",".join(rows[0].keys())
+        cols = ",".join(rows[0])
         ph = ",".join("?" for _ in rows[0])
         conn.executemany(
             f"INSERT INTO questions ({cols}) VALUES ({ph})",
@@ -356,17 +488,18 @@ def _read_doc_list(path: str) -> set[str]:
 
 
 def _docs_with_answer_provenance(conn, doc_hashes: list[str]) -> set[str]:
-    """题里带模型补答溯源（`answer_source` 非空）的文档。
-
-    `store()` 是删了重插，补答正文（只存在 `questions.a_text`）与 `answer_model /
-    answered_at` 会随旧行一起删掉，且没有别处留存；这里先把它们认出来，默认不重切。
-    """
+    """题里带模型答案或补答溯源的文档，供只读计划展示风险面。"""
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(questions)")}
+    tracked = [c for c in ("answer_source", "answer_model", "answered_at") if c in columns]
+    if not tracked:
+        return set()
+    guard = " OR ".join(f"COALESCE({c},'')<>''" for c in tracked)
     out: set[str] = set()
     for i in range(0, len(doc_hashes), 500):
         part = doc_hashes[i:i + 500]
         out.update(r[0] for r in conn.execute(
             f"SELECT DISTINCT doc_hash FROM questions WHERE doc_hash IN ({','.join('?' * len(part))}) "
-            "AND COALESCE(answer_source,'')<>''", part))
+            f"AND ({guard})", part))
     return out
 
 
@@ -394,7 +527,7 @@ def _run(args) -> int:
         wanted = _read_doc_list(args.doc_list)
         doc_list_missing = len(wanted - {h for h, _p in pool_all})
         pool = [x for x in pool if x[0] in wanted]
-    # 带补答溯源的文档默认不重切（P0，2026-11-25 review）：见 _docs_with_answer_provenance。
+    # 只读计划展示补答溯源风险面；实际重抽按 hash 继承，不再整篇跳过。
     provenance_docs = _docs_with_answer_provenance(conn, [h for h, _p in pool])
     report_path = None if (args.plan or args.dry_run) else write_identity_report(mapping)
     if args.plan:
@@ -424,23 +557,13 @@ def _run(args) -> int:
     skipped_unchanged = pool_total - len(pool)
     if args.limit:
         pool = pool[:args.limit]
-    # 补答保护放在改状态之前：被跳过的文档不进 processing，也就不需要回写状态。
-    answer_loss_skipped = 0
-    if provenance_docs and not args.allow_answer_loss:
-        keep, name_of = [], dict(pool_all)
-        for x in pool:
-            if x[0] in provenance_docs:
-                answer_loss_skipped += 1
-                print(f"[warn] {name_of[x[0]].name}: 该文档的题带模型补答，重切会连同补答正文一起删掉，"
-                      f"已跳过（确认放弃补答请加 --allow-answer-loss）", file=sys.stderr)
-            else:
-                keep.append(x)
-        pool = keep
     started = time.perf_counter()
     if not args.dry_run and pool:
         mark_status(conn, [h for h, _p in pool], status.PROCESSING)
         conn.commit()
     n_docs = n_q = n_empty = n_err = n_reattached = n_answer_lost = 0
+    n_state_loss_blocked = 0
+    state_losses: list[dict] = []
     n_empty_preserved = 0
     qtype: dict[str, int] = {}
     conf: dict[str, int] = {}
@@ -471,18 +594,28 @@ def _run(args) -> int:
                 print(f"[warn] {p.name}: 本次 0 题但已有 {old_n} 条旧题，保留旧题不删除"
                       f"（确认清空请加 --allow-empty-overwrite）", file=sys.stderr)
                 continue
-            if doc_hash in provenance_docs:      # 只有带了 --allow-answer-loss 才会走到这里
-                n_answer_lost += conn.execute(
-                    "SELECT COUNT(*) FROM questions WHERE doc_hash=? "
-                    "AND COALESCE(answer_source,'')<>''", (doc_hash,)).fetchone()[0]
+            loss_report: dict = {}
             conn.execute("SAVEPOINT extract_one")
             try:
-                n_reattached += store(conn, doc_hash, rows)
+                n_reattached += store(
+                    conn, doc_hash, rows,
+                    allow_state_loss=(args.allow_state_loss
+                                      or (not rows and args.allow_empty_overwrite)),
+                    loss_report=loss_report)
+                n_answer_lost += loss_report.get("provenance_count", 0)
                 md_rel, md_hash, text_source = _product_loc(conn, doc_hash, mapping)
                 products.upsert(conn, doc_hash, md_rel=md_rel, md_hash=md_hash,
                                 text_source=text_source, input_path=p, questions_n=len(rows),
                                 extracted_at=datetime.now().strftime(NOW_FMT))
                 mark_status(conn, [doc_hash], status.PROCESSED)
+            except StateLossError as ex:
+                conn.execute("ROLLBACK TO extract_one")
+                conn.execute("RELEASE extract_one")
+                n_err += 1
+                n_state_loss_blocked += 1
+                state_losses.append(ex.details)
+                print(f"[warn] {p.name}: {ex}", file=sys.stderr)
+                continue
             except Exception as ex:  # noqa: BLE001
                 conn.execute("ROLLBACK TO extract_one")
                 conn.execute("RELEASE extract_one")
@@ -507,7 +640,17 @@ def _run(args) -> int:
             purge_skipped = "limit"
         elif n_err > max(1, int(len(pool_all) * 0.05)):
             purge_skipped = "errors"
-        n_purged = 0 if purge_skipped else purge_orphans(conn, {k for k, _ in pool_all})
+        n_purged = 0
+        if not purge_skipped:
+            try:
+                n_purged = purge_orphans(conn, {k for k, _ in pool_all},
+                                         allow_state_loss=args.allow_state_loss)
+            except StateLossError as ex:
+                n_err += 1
+                n_state_loss_blocked += 1
+                state_losses.append(ex.details)
+                purge_skipped = "state-loss"
+                print(f"[warn] 孤儿清理已拒绝：{ex}", file=sys.stderr)
         n_lost = conn.execute("SELECT COUNT(*) FROM label_facts WHERE q_norm_hash NOT IN "
                               "(SELECT q_norm_hash FROM questions)").fetchone()[0]
         if n_lost:
@@ -523,8 +666,10 @@ def _run(args) -> int:
         "incremental": args.incremental, "skipped_unchanged": skipped_unchanged,
         "skipped_gate": gate_skipped,
         "skipped_doc_list_missing": doc_list_missing,
-        "answer_provenance_skipped": answer_loss_skipped,
+        "answer_provenance_skipped": 0,
         "answer_provenance_lost": n_answer_lost if not args.dry_run else 0,
+        "state_loss_blocked": n_state_loss_blocked,
+        "state_loss": state_losses,
         "purged_orphan_docs": n_purged if not args.dry_run else 0,
         "purge_skipped": purge_skipped,
         "label_reattached": n_reattached if not args.dry_run else 0,
@@ -560,9 +705,9 @@ def main(argv=None) -> int:
     ap.add_argument("--doc-list",
                     help="只处理清单里的 doc_hash（每行一个，# 开头为注释）；"
                          "用于定向补切，自动跳过孤儿清理与全量统计口径")
-    ap.add_argument("--allow-answer-loss", action="store_true",
-                    help="允许重切带模型补答的文档（默认跳过并告警：补答正文只存在 "
-                         "questions.a_text，重切即丢；重切后需重跑 answer_state --only-missing）")
+    ap.add_argument("--allow-state-loss", "--allow-answer-loss", dest="allow_state_loss",
+                    action="store_true",
+                    help="显式允许丢弃无法按 q_norm_hash 对齐的补答溯源、治理字段或最后一份标签事实")
     args = ap.parse_args(argv)
     if args.limit < 0:
         # Python 切片允许负数：--limit -1 会处理"除最后 1 件之外的整个池"（ISSUE-07）

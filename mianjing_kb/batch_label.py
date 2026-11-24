@@ -939,6 +939,7 @@ def _propagate_by_hash(conn, hashes, *, overwrite: bool = False) -> dict:
     filled_topic = overwritten = filled_tags = 0
     changed_qids: list[int] = []
     for h in hashes:
+        changed_this_hash = False
         rows = conn.execute("SELECT qid, topic, qtype, difficulty, tags FROM questions "
                             "WHERE q_norm_hash=?", (h,)).fetchall()
         if len(rows) < 2:
@@ -966,10 +967,12 @@ def _propagate_by_hash(conn, hashes, *, overwrite: bool = False) -> dict:
                 if empty:
                     conn.execute("UPDATE questions SET topic=? WHERE qid=?", (top, r["qid"]))
                     filled_topic += 1
+                    changed_this_hash = True
                     changed_qids.append(r["qid"])
                 elif overwrite:
                     conn.execute("UPDATE questions SET topic=? WHERE qid=?", (top, r["qid"]))
                     overwritten += 1
+                    changed_this_hash = True
                     changed_qids.append(r["qid"])
             if src_tags and not r["tags"]:
                 conn.execute(
@@ -977,8 +980,9 @@ def _propagate_by_hash(conn, hashes, *, overwrite: bool = False) -> dict:
                     "difficulty=COALESCE(difficulty, ?) WHERE qid=?",
                     (src_tags, src["qtype"], src["difficulty"], r["qid"]))
                 filled_tags += 1
+                changed_this_hash = True
                 changed_qids.append(r["qid"])
-        if filled_topic or overwritten or filled_tags:
+        if changed_this_hash:
             # label_facts 是"跨重切存活"的打标事实源，必须跟着 topic/tags 一起走，
             # 否则重修/重切后挂回来的还是传播前的旧标签（docs/51 §5）。
             fields = ["topic=?"]
@@ -1065,6 +1069,18 @@ def merge(conn, drop_orphans: bool = False, hash_consistency: str = "fill") -> d
     n = conn.execute("SELECT COUNT(*) FROM labels_staging "
                      "WHERE review_state IS NOT 'disagree' "
                      "  AND review_state IS NOT 'pending'").fetchone()[0]
+    # 必须按更新前的原值统计，UPDATE 后再比较只会看到已经写入的目标值。
+    changed_rows = conn.execute(
+        "SELECT COUNT(*) FROM labels_staging s JOIN questions q ON q.qid=s.qid "
+        "WHERE s.review_state IS NOT 'disagree' AND s.review_state IS NOT 'pending' "
+        "  AND (COALESCE(NULLIF(s.topic,''), q.topic) IS NOT q.topic "
+        "    OR COALESCE(s.qtype, q.qtype) IS NOT q.qtype "
+        "    OR COALESCE(s.difficulty, q.difficulty) IS NOT q.difficulty "
+        "    OR COALESCE(NULLIF(s.tags,'[]'), q.tags) IS NOT q.tags "
+        "    OR COALESCE(s.position, q.position) IS NOT q.position "
+        "    OR COALESCE(s.quality, q.quality) IS NOT q.quality "
+        "    OR COALESCE(NULLIF(s.canonical_q,''), q.canonical_q) IS NOT q.canonical_q)"
+    ).fetchone()[0]
     conn.execute(
         "UPDATE questions SET "
         " topic=COALESCE(NULLIF((SELECT s.topic FROM labels_staging s "
@@ -1083,15 +1099,7 @@ def merge(conn, drop_orphans: bool = False, hash_consistency: str = "fill") -> d
         "WHERE qid IN (SELECT qid FROM labels_staging "
         "              WHERE review_state IS NOT 'disagree' "
         "                AND review_state IS NOT 'pending')")
-    # 实际被写进去的行数：COALESCE 保留旧值（如已有 tags、空 topic）的行不算"改动"
-    kept_old = conn.execute(
-        "SELECT COUNT(*) FROM labels_staging s JOIN questions q ON q.qid=s.qid "
-        "WHERE s.review_state IS NOT 'disagree' AND s.review_state IS NOT 'pending' "
-        "  AND ((COALESCE(s.topic,'') != '' AND q.topic IS NOT s.topic) "
-        "    OR (s.qtype IS NOT NULL AND q.qtype IS NOT s.qtype) "
-        "    OR (s.difficulty IS NOT NULL AND q.difficulty IS NOT s.difficulty) "
-        "    OR (COALESCE(s.tags,'') NOT IN ('', '[]') AND q.tags IS NOT s.tags))"
-    ).fetchone()[0]
+    kept_old = n - changed_rows
     conn.execute(
         "INSERT OR REPLACE INTO label_facts "
         "(q_norm_hash, topic, qtype, difficulty, tags, normalizer_version, q_norm_sample, "
@@ -1113,7 +1121,7 @@ def merge(conn, drop_orphans: bool = False, hash_consistency: str = "fill") -> d
     conn.commit()
     holds = conn.execute("SELECT COUNT(*) FROM labels_staging "
                          "WHERE review_state IN ('disagree','pending')").fetchone()[0]
-    out = {"ok": True, "merged": n, "merged_changed": n - kept_old,
+    out = {"ok": True, "merged": n, "merged_changed": changed_rows,
            "merged_kept_existing": kept_old,
            "n_review_hold": holds, "gate": g6["state"],
            "hash_consistency": consistency,

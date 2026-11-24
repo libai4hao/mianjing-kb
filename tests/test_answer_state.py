@@ -131,3 +131,52 @@ class TestPreviewIsReadOnly:
             "boundary_gap", "no_answer_source", "toc_noise")
         assert c.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == len(kbdb.MIGRATIONS)
         c.close()
+
+
+def test_apply_holds_custom_db_lock_for_migrate_classify_and_backfill(tmp_path, monkeypatch, capsys):
+    from mianjing_kb import answer_state
+    from mianjing_kb.kb import config, db, wlock
+
+    build = tmp_path / "configured-build"
+    build.mkdir()
+    custom = tmp_path / "custom-build"
+    custom.mkdir()
+    path = custom / "kb.sqlite"
+    monkeypatch.setattr(config, "BUILD_DIR", build)
+    monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
+    conn = db.connect(path)
+    conn.execute(
+        "INSERT INTO questions (doc_hash, seq, q_text, a_text, q_norm, q_norm_hash, "
+        "simhash, span_start, span_end, extracted_at) "
+        "VALUES ('doc',1,'什么是 JVM？','答案','jvm','h1',0,0,1,'now')")
+    conn.commit()
+    conn.close()
+
+    seen = []
+    real_migrate, real_classify, real_backfill = db.migrate, answer_state.classify, answer_state.backfill
+
+    def checked(name, fn):
+        def wrapper(*args, **kwargs):
+            locked, holder = wlock.inspect_lock(custom / "locks" / "kb.lock")
+            seen.append((name, locked, (holder or {}).get("tool")))
+            return fn(*args, **kwargs)
+        return wrapper
+
+    monkeypatch.setattr(answer_state.db, "migrate", checked("migrate", real_migrate))
+    monkeypatch.setattr(answer_state, "classify", checked("classify", real_classify))
+    monkeypatch.setattr(answer_state, "backfill", checked("backfill", real_backfill))
+
+    assert answer_state.main(["--db", str(path), "--apply"]) == 0
+    capsys.readouterr()
+    assert seen == [(name, True, "answer_state") for name in ("migrate", "classify", "backfill")]
+
+
+def test_preview_never_acquires_write_lock(tmp_path, monkeypatch):
+    from mianjing_kb import answer_state
+    from mianjing_kb.kb import db
+
+    path = tmp_path / "kb.sqlite"
+    db.connect(path).close()
+    monkeypatch.setattr(answer_state.wlock, "write_lock",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("preview took write lock")))
+    assert answer_state.main(["--db", str(path)]) == 0
