@@ -922,6 +922,42 @@ def review_resolve(conn, spec: str) -> dict:
     return {"resolved": resolved, "unknown": unknown}
 
 
+def _propagate_by_hash(conn, hashes) -> dict:
+    """同一 q_norm_hash 的多份拷贝（同题出现在多篇源文档）落库后统一 topic。
+
+    起因（docs/51 §5）：拷贝是逐 qid 独立打标的，4,556 组拷贝里 934 处 topic 互相矛盾，
+    检索侧同一道题出现两种主题，主题过滤会漏。merge 时把该 hash 的多数值推给所有拷贝，
+    平票不猜；顺带把空白拷贝的 tags/qtype/difficulty 从有值的兄弟行补齐（等于免费覆盖待打标）。
+    """
+    from collections import Counter
+
+    changed = filled = 0
+    for h in hashes:
+        rows = conn.execute("SELECT qid, topic, qtype, difficulty, tags FROM questions "
+                            "WHERE q_norm_hash=?", (h,)).fetchall()
+        if len(rows) < 2:
+            continue
+        counts = Counter(r["topic"] for r in rows
+                         if r["topic"] and r["topic"] not in ("", OTHER_TOPIC))
+        if not counts:
+            continue
+        top, n = counts.most_common(1)[0]
+        if any(v >= n for t, v in counts.items() if t != top):   # 平票不在门禁里猜
+            continue
+        src = next((r for r in rows if r["topic"] == top and r["tags"]), None)
+        for r in rows:
+            if r["topic"] != top:
+                conn.execute("UPDATE questions SET topic=? WHERE qid=?", (top, r["qid"]))
+                changed += 1
+            if src is not None and not r["tags"]:
+                conn.execute(
+                    "UPDATE questions SET tags=?, qtype=COALESCE(NULLIF(qtype,''), ?), "
+                    "difficulty=COALESCE(difficulty, ?) WHERE qid=?",
+                    (src["tags"], src["qtype"], src["difficulty"], r["qid"]))
+                filled += 1
+    return {"hash_rows_changed": changed, "hash_rows_filled": filled}
+
+
 def merge(conn, drop_orphans: bool = False) -> dict:
     """G6 门禁复核 → FAIL 拒绝；PASS/WARN 放行（WARN=软门禁，提示人工抽查）。
 
@@ -1019,12 +1055,18 @@ def merge(conn, drop_orphans: bool = False) -> dict:
         "WHERE COALESCE(s.topic, '') != '' AND s.review_state IS NOT 'disagree' "
         "  AND s.review_state IS NOT 'pending'",
         (config.NORMALIZER_VERSION, datetime.now().strftime(NOW_FMT)))
+    merged_hashes = [r[0] for r in conn.execute(
+        "SELECT DISTINCT q_norm_hash FROM labels_staging "
+        "WHERE q_norm_hash IS NOT NULL AND q_norm_hash<>'' "
+        "  AND review_state IS NOT 'disagree' AND review_state IS NOT 'pending'")]
+    consistency = _propagate_by_hash(conn, merged_hashes)
     conn.execute("DELETE FROM labels_staging WHERE review_state IS NOT 'disagree' "
                  "AND review_state IS NOT 'pending'")
     conn.commit()
     holds = conn.execute("SELECT COUNT(*) FROM labels_staging "
                          "WHERE review_state IN ('disagree','pending')").fetchone()[0]
     out = {"ok": True, "merged": n, "n_review_hold": holds, "gate": g6["state"],
+           "hash_consistency": consistency,
            "next_step": "python -m mianjing_kb.refresh --reembed"
                         "  # 检索库 topic 是快照，merge 只写 kb.sqlite（B2）"}
     if orphans:

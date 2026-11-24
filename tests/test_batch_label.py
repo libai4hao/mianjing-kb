@@ -193,6 +193,23 @@ def test_merge_g6_gate_blocks_and_passes(mini_db, monkeypatch, tmp_path):
     assert not out2["ok"] and out2["gate"] == "SKIP"
 
 
+def test_merge_propagates_topic_across_same_hash(mini_db, monkeypatch, tmp_path):
+    """同 q_norm_hash 的拷贝 merge 后统一 topic，空拷贝顺带补齐 tags（docs/51 §5）。"""
+    mini_db.execute("UPDATE questions SET q_norm_hash='duphash' WHERE qid IN (1,2)")
+    mini_db.commit()
+    mini_db.execute(
+        "INSERT INTO labels_staging (qid, q_norm_hash, topic, qtype, difficulty, tags, provider, "
+        "model, redacted, latency_ms, tokens, labeled_at) "
+        "VALUES (1,'duphash','Java基础','八股',3,'[\"HashMap\"]','p','m',0,1,1,'now')")
+    mini_db.commit()
+    out = bl.merge(mini_db)
+    assert out["ok"] and out["merged"] == 1
+    assert out["hash_consistency"]["hash_rows_changed"] >= 1
+    topic2 = mini_db.execute("SELECT topic FROM questions WHERE qid=2").fetchone()[0]
+    tags2 = mini_db.execute("SELECT tags FROM questions WHERE qid=2").fetchone()[0]
+    assert topic2 == "Java基础" and tags2 == '["HashMap"]'
+
+
 def test_merge_blocked_on_bad_schema(mini_db):
     """schema 不合格（qtype 越枚举）→ G6 FAIL → merge 拒绝，staging 保留。"""
     mini_db.execute("INSERT INTO labels_staging (qid, topic, qtype, difficulty, tags, provider, "
