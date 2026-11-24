@@ -344,6 +344,111 @@ def test_doc_list_processes_only_listed_docs(tmp_env, tmp_path, capsys):
     assert per.get(h1) == 2 and per.get(h2) == 2
 
 
+@pytest.mark.parametrize("plan", [False, True])
+def test_doc_list_all_missing_returns_nonzero_and_lists_hashes(tmp_env, tmp_path, capsys, plan):
+    corpus, conn = tmp_env
+    _seed_doc(conn, corpus, "a.md", MD_A)
+    before = [tuple(r) for r in conn.execute("SELECT * FROM questions ORDER BY qid")]
+    lst = tmp_path / "missing-docs.txt"
+    lst.write_text("# 全部不存在\nnot-a-real-hash\nanother-unknown\n", encoding="utf-8")
+    argv = ["--db", str(config.DB_PATH), "--doc-list", str(lst)]
+    if plan:
+        argv.append("--plan")
+
+    assert extract.main(argv) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["docs"] == 0 if not plan else out["pool_after_gate"] == 0
+    assert out["doc_list_no_match"] is True
+    assert out["doc_list_missing_hashes"] == ["another-unknown", "not-a-real-hash"]
+    assert out["doc_list_gate_skipped"] == []
+    assert out["skipped_doc_list_missing"] == 2
+    assert [tuple(r) for r in conn.execute("SELECT * FROM questions ORDER BY qid")] == before
+
+
+@pytest.mark.parametrize("plan", [False, True])
+def test_doc_list_empty_returns_usage_error_before_writes(tmp_env, tmp_path, capsys, plan):
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "a.md", MD_A)
+    lst = tmp_path / "empty-docs.txt"
+    lst.write_text("# 没有有效条目\n\n", encoding="utf-8")
+    argv = ["--db", str(config.DB_PATH), "--doc-list", str(lst)]
+    if plan:
+        argv.append("--plan")
+
+    assert extract.main(argv) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["doc_list_no_match"] is True
+    assert out["doc_list_missing_hashes"] == []
+    assert out["skipped_doc_list_missing"] == 0
+    assert conn.execute("SELECT status FROM source_documents WHERE doc_hash=?", (h,)).fetchone()[0] == "classified"
+
+
+@pytest.mark.parametrize("plan", [False, True])
+def test_empty_doc_list_does_not_create_missing_database(tmp_path, capsys, plan):
+    target = tmp_path / "missing" / "kb.sqlite"
+    lst = tmp_path / "empty-docs.txt"
+    lst.write_text("# 空清单\n", encoding="utf-8")
+    argv = ["--db", str(target), "--doc-list", str(lst)]
+    if plan:
+        argv.append("--plan")
+    assert extract.main(argv) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["doc_list_no_match"] is True
+    assert out["skipped_doc_list_missing"] == 0
+    assert not target.exists()
+    assert not target.parent.exists()
+
+
+def test_doc_list_gate_skips_are_identified_per_document(tmp_env, tmp_path, capsys):
+    corpus, conn = tmp_env
+    h1, _ = _seed_doc(conn, corpus, "a.md", MD_A)
+    h2, _ = _seed_doc(conn, corpus, "b.md", MD_B)
+    conn.execute("UPDATE source_documents SET gate_result='review' WHERE doc_hash=?", (h2,))
+    conn.commit()
+    lst = tmp_path / "mixed-docs.txt"
+    lst.write_text(f"{h1}\n{h2}\nunknown\n", encoding="utf-8")
+
+    assert extract.main(["--db", str(config.DB_PATH), "--doc-list", str(lst)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["docs"] == 1
+    assert out["doc_list_no_match"] is False
+    assert out["doc_list_missing_hashes"] == ["unknown"]
+    assert out["doc_list_gate_skipped"] == [{"doc_hash": h2, "gate": "review"}]
+    assert out["skipped_doc_list_missing"] == 2
+
+
+def test_doc_list_all_gated_returns_nonzero(tmp_env, tmp_path, capsys):
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "a.md", MD_A)
+    conn.execute("UPDATE source_documents SET gate_result='fail' WHERE doc_hash=?", (h,))
+    conn.commit()
+    lst = tmp_path / "gated-docs.txt"
+    lst.write_text(f"{h}\n", encoding="utf-8")
+
+    assert extract.main(["--db", str(config.DB_PATH), "--doc-list", str(lst),
+                         "--require-gate"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["doc_list_no_match"] is True
+    assert out["doc_list_missing_hashes"] == []
+    assert out["doc_list_gate_skipped"] == [{"doc_hash": h, "gate": "fail"}]
+    assert out["skipped_doc_list_missing"] == 1
+
+
+def test_doc_list_valid_but_incrementally_unchanged_is_not_no_match(tmp_env, tmp_path, capsys):
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "a.md", MD_A)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    capsys.readouterr()
+    lst = tmp_path / "unchanged-docs.txt"
+    lst.write_text(f"{h}\n", encoding="utf-8")
+
+    assert extract.main(["--db", str(config.DB_PATH), "--doc-list", str(lst),
+                         "--incremental"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["doc_list_no_match"] is False
+    assert out["docs"] == 0 and out["skipped_unchanged"] == 1
+
+
 def test_doc_list_preserves_llm_answers_by_hash(tmp_env, tmp_path, capsys):
     corpus, conn = tmp_env
     h1, p1 = _seed_doc(conn, corpus, "a.md", MD_A)

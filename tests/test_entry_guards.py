@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from mianjing_kb import build_db, extract, rehearse_migrate
+from mianjing_kb import backfill_convert, batch_label, build_db, classify, eval_cluster, extract, ingest_queue, rehearse_migrate
 from mianjing_kb.kb import db, wlock
 
 
@@ -57,3 +57,38 @@ def test_rehearse_copies_and_migrates(tmp_path):
     con = sqlite3.connect(f"file:{src.as_posix()}?mode=ro", uri=True)
     assert con.execute("SELECT COUNT(*) FROM source_documents").fetchone()[0] == 1
     con.close()
+
+
+@pytest.mark.parametrize(
+    ("module", "args"),
+    [
+        (batch_label, ("--limit", "-1")),
+        (classify, ("--limit", "-1")),
+        (eval_cluster, ("--limit-md", "-1", "--skip-corpus")),
+        (ingest_queue, ("--limit", "-1")),
+        (backfill_convert, ("--limit", "-1")),
+    ],
+)
+def test_limit_entrypoints_reject_negative_before_io(module, args, tmp_path, capsys):
+    argv = list(args)
+    if module is not backfill_convert:
+        argv += ["--db", str(tmp_path / "missing.sqlite")]
+    with pytest.raises(SystemExit) as exc:
+        module.main(argv)
+    assert exc.value.code == 2
+    assert "limit" in capsys.readouterr().err
+
+
+def test_limit_helpers_reject_negative_before_io(tmp_path):
+    with pytest.raises(ValueError, match="limit"):
+        batch_label.pick_targets(object(), -1)
+    with pytest.raises(ValueError, match="limit"):
+        batch_label.review_targets(object(), -1)
+    with pytest.raises(ValueError, match="limit"):
+        classify.build_select_sql("pending_classify", False, -1)
+    with pytest.raises(ValueError, match="limit"):
+        eval_cluster.md_stats(tmp_path, -1)
+    with pytest.raises(ValueError, match="limit"):
+        ingest_queue.fetch(object(), -1)
+    with pytest.raises(ValueError, match="limit"):
+        backfill_convert.convert(-1)

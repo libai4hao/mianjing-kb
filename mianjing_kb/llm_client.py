@@ -7,7 +7,7 @@
                      非回环地址一律按"内容离开本机"处理：需 LLM_ALLOW_CONTENT_UPLOAD=1 且上传前脱敏
     LLM_KEY          online 必填（用户级环境变量，绝不进 git；local 留空）
     LLM_ALLOW_CONTENT_UPLOAD=1  显式同意把已脱敏文本发送到非本地 endpoint；默认拒绝
-    LLM_MODEL        local: qwen3:4b | online: deepseek-flash
+    LLM_MODEL        local: qwen3-4b | online: deepseek-flash
     LLM_CONCURRENCY  local: 1 | online: 8
     LLM_PRICE        输入价,输出价（¥/百万 token；如 "1,4"）
     LLM_JSON_MODE    覆盖 provider 默认的 json_object 支持开关（1/0 true/false yes/no on/off）
@@ -211,7 +211,12 @@ def resolve_config(env: dict | None = None) -> dict:
 # ---------------- 脱敏（docs/15 §3.7：上传前必做） ----------------
 _RE_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 _RE_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_RE_WECHAT = re.compile(r"(微信|weixin|wx|qq)\s*[:：号]?\s*[A-Za-z0-9_-]{5,20}", re.I)
+_RE_WECHAT = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(?:"
+    r"微信(?:号码?)?\s*[:：]?\s*"
+    r"|(?:weixin|wx|qq)(?:(?:号|号码)\s*[:：]?\s*|\s*[:：]\s*|\s+|(?=[0-9_-]))"
+    r")[A-Za-z0-9_-]{5,20}(?![A-Za-z0-9_-])"
+)
 _RE_IDCARD = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
 _RE_NAMED_PERSON = re.compile(
     r"(?i)(?:姓名|联系人|收件人|候选人|面试者|作者|负责人|户主)\s*[:：=]\s*"
@@ -418,14 +423,18 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
     # 该规则只覆盖可识别格式，不构成自由文本匿名化保证。
     outbound_system = redact(system)[0] if remote else system
     outbound_user = redact(user)[0] if remote else user
+    try:
+        ollama_endpoint = urlsplit(cfg["base"]).port == 11434
+    except ValueError:
+        raise ConfigError(f"LLM_BASE 端口无法解析，当前: {cfg['base']!r}") from None
     sys_prompt = outbound_system
     last_err = ""
     for attempt in range(1, retries + 1):
         if attempt > 1 and json_mode:
             sys_prompt = outbound_system + "\n只输出严格 JSON，不要任何其他文字、围栏或解释。"
-        # Qwen3 默认开思考链（吃光 max_tokens 且污染 JSON）：本地（无 response_format
-        # 支持）追加 /no_think 关闭——docs/12 冒烟同款坑
-        u_text = outbound_user if cfg.get("json_mode") else outbound_user + "\n/no_think"
+        # /no_think 是 Ollama 专用控制标记；chat_json 仍需关闭默认思考，只有服务端 JSON 模式可省略。
+        u_text = (outbound_user if cfg.get("json_mode") or not ollama_endpoint
+                  else outbound_user + "\n/no_think")
         payload = {
             "model": cfg["model"],
             "messages": [{"role": "system", "content": sys_prompt},

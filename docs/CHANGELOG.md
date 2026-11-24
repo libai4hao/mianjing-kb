@@ -23,8 +23,7 @@
     写入表达式统计 `merged_changed` / `merged_kept_existing`，覆盖七个字段的 NULL/空值矩阵。
   - **ISSUE-06 `status`**：`attention` 纳入 `INVALID` 门禁。
   - 新增状态继承、fail-closed、purge 保护、锁边界、陈旧目标和统计矩阵等回归测试；`docs/33`、`docs/49` 同步。
-    未改 schema migration、依赖或生产库。14 条 P2 仍记入 `docs/60` §3 待排期，
-    其中 `--limit -1` 在另外 6 个入口仍存在。
+    未改 schema migration、依赖或生产库。当时剩余的 14 条 P2 已在同日后续批次收口，见下条。
   - 门禁：五个定向测试文件 **163 passed**；ruff 0 告警；compileall / pip wheel 通过；
     全量 pytest **919 passed / 5 skipped / 6 xfailed**（930 collected）；privacy_scan 307 文件 0 命中。
 - **真实样本抽查后的编号题边界完善**：Kafka / 网易 / 阿里三篇临时语料回放显示后续编号题被粘进
@@ -33,8 +32,19 @@
   26 / 11 / 21；extract 为 26 / 8 / 21，空题干均为 0。网易四个同题干“检查程序”仍按既有 `q_key`
   去重，阿里 21 题含 OCR 重复候选，两者保留人工复核项，不改稳定身份或 schema；生产库与语料未动。
   - 门禁：全量 pytest **931 passed / 5 skipped / 6 xfailed**（942 collected，75.49 s）；ruff 0 告警；
-    compileall / pip wheel 通过；privacy_scan 307 文件 0 命中。`doc_audit` 仍只有 docs/52、57、58、59
-    四篇既有 `missing_status_header`，本次未新增；`chunk_regress --check` PASS。
+    compileall / pip wheel 通过；privacy_scan 307 文件 0 命中；`chunk_regress --check` PASS。
+- **`docs/60` 剩余 14 项 P2 收口**：统一负数 limit 与入口 UTF-8；修正 `--doc-list` 退出码/逐篇诊断、
+  `answer_state --only-missing` 子集与全库口径；题池预览/执行产物隔离并保留完整回滚文本；预览统一只读，
+  apply 使用目标库父目录锁，配置的 `面经库.db` 使用 `online`，其余目标使用 `kb`；staging、retire、clean_qtext
+  补齐热备份/单事务。qsalvage 拆分同步候选键，retire/qsalvage 只清理本次受影响且无 dependents/variants/candidates
+  的 canonical，保留无关簇并重算幸存 witness。LLM 修正 Ollama `/no_think` 判定与微信号变体脱敏；schema 自检补
+  答案治理列；OCR 文档统一 v2.1.5 / `KB_OCR_ENGINE_DIR`；Ruff CI 覆盖 scripts。
+  - 独立复审补充：空 doc-list 在拿锁/建库前退出；retire/clean_qtext apply 输出热备份路径；候选簇参与 canonical
+    空簇判定；默认 20 篇切题回归的两条过宽问句规则定点收紧，未重建基线。
+  - 门禁：全量 pytest **987 passed / 5 skipped / 6 xfailed**（998 collected，93.34 s）；Ruff、compileall、wheel 通过；
+    privacy_scan 307 文件 0 命中；默认 `chunk_regress --check` PASS（9898 题、空答案 1548、弱题 467、缺 0 篇）。
+    未执行生产重抽，未提交或推送；生产仍按 A 档增量，B 档单独评审，C 档暂不重切。
+- **文档状态头门禁收尾**：补齐 docs/52、57、58、59 缺失的状态头；`doc_audit` 64 份文档 0 问题。
 
 ## 2026-11-24
 

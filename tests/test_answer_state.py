@@ -133,6 +133,70 @@ class TestPreviewIsReadOnly:
         c.close()
 
 
+def test_only_missing_reports_subset_and_database_scopes(tmp_path, monkeypatch, capsys):
+    import json
+    from mianjing_kb import answer_state
+    from mianjing_kb.kb import config, db
+
+    monkeypatch.setattr(config, "BUILD_DIR", tmp_path)
+    path = tmp_path / "kb.sqlite"
+    conn = db.connect(path)
+    rows = [
+        (1, "d1", 1, "有答案一", "答案一", "no_answer_source"),
+        (2, "d1", 2, "有答案二", "答案二", "boundary_gap"),
+        (3, "d1", 3, "空答案一", "", None),
+        (4, "d1", 4, "空答案二", "", "toc_noise"),
+        (5, "d2", 1, "另一文档空答案", "", None),
+        (6, "d1", 5, "有答案但未判状态", "答案三", None),
+    ]
+    conn.executemany(
+        "INSERT INTO questions (qid,doc_hash,seq,q_text,a_text,q_norm,q_norm_hash,"
+        "simhash,span_start,span_end,extracted_at,answer_state) VALUES (?,?,?,?,?,?,?,0,0,1,'now',?)",
+        [(qid, dh, seq, q, a, q, f"h{qid}", state) for qid, dh, seq, q, a, state in rows])
+    conn.commit()
+    conn.close()
+
+    assert answer_state.main(["--db", str(path), "--only-missing"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["scope"]["selection"] == "missing_states_only"
+    assert out["subset"] == {"total": 3, "empty": 2,
+                             "counts": {answer_state.NO_SOURCE: 1,
+                                        answer_state.GAP: 1, answer_state.OK: 1}}
+    assert out["database"]["total"] == 6
+    assert out["database"]["empty"] == 3
+    assert out["database"]["nonempty_by_state"] == {
+        answer_state.NO_SOURCE: 1, answer_state.GAP: 1, "missing": 1}
+    assert out["database"]["docs_with_empty"] == 2
+    assert out["total"] == 3 and out["empty"] == 2
+    assert out["docs_with_empty"] == 2
+
+
+def test_only_missing_apply_keeps_nonempty_historical_states(tmp_path, monkeypatch, capsys):
+    import json
+    from mianjing_kb import answer_state
+    from mianjing_kb.kb import config, db
+
+    monkeypatch.setattr(config, "BUILD_DIR", tmp_path)
+    path = tmp_path / "kb.sqlite"
+    conn = db.connect(path)
+    conn.executemany(
+        "INSERT INTO questions (qid,doc_hash,seq,q_text,a_text,q_norm,q_norm_hash,"
+        "simhash,span_start,span_end,extracted_at,answer_state) VALUES (?,?,?,?,?,?,?,0,0,1,'now',?)",
+        [(1, "d", 1, "有答案", "源答案", "有答案", "h1", "boundary_gap"),
+         (2, "d", 2, "空答案", "", "空答案", "h2", None)])
+    conn.commit()
+    conn.close()
+
+    assert answer_state.main(["--db", str(path), "--only-missing", "--apply"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["database"]["nonempty_by_state"] == {answer_state.GAP: 1}
+    conn = sqlite3.connect(str(path))
+    rows = dict(conn.execute("SELECT qid, answer_state FROM questions"))
+    conn.close()
+    assert rows[1] == answer_state.GAP
+    assert rows[2] == answer_state.NO_SOURCE
+
+
 def test_apply_holds_custom_db_lock_for_migrate_classify_and_backfill(tmp_path, monkeypatch, capsys):
     from mianjing_kb import answer_state
     from mianjing_kb.kb import config, db, wlock

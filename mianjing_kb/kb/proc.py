@@ -93,5 +93,7 @@ def tail(text: str, limit: int = 400) -> str:
 
 
 if __name__ == "__main__":                                  # 自测用：python -m mianjing_kb.kb.proc 3
+    from mianjing_kb.kb.stdio import configure_utf8_stdio
+    configure_utf8_stdio()
     sec = float(sys.argv[1]) if len(sys.argv) > 1 else 2
     print(run_with_timeout([sys.executable, "-c", f"import time; time.sleep({sec})"], 1.0))

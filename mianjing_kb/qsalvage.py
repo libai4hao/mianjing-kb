@@ -25,11 +25,13 @@ import hashlib
 import json
 import re
 import sys
+from contextlib import nullcontext
+from datetime import datetime
 from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, wlock  # noqa: E402
 from mianjing_kb.kb.qtext import clean_question_text  # noqa: E402
 from mianjing_kb.question_freq import normalize, simhash  # noqa: E402
 from mianjing_kb.extract import _signed64  # noqa: E402
@@ -126,6 +128,20 @@ def _identity(q_text: str) -> dict:
     }
 
 
+def _canonical_ids_for_keys(conn, tables: set[str], q_keys: list[str]) -> set[str]:
+    keys = sorted({key for key in q_keys if key})
+    affected: set[str] = set()
+    for table in ("canonical_dependents", "question_variants", "merge_candidates"):
+        if table not in tables:
+            continue
+        for i in range(0, len(keys), 500):
+            part = keys[i:i + 500]
+            affected.update(r[0] for r in conn.execute(
+                f"SELECT DISTINCT canonical_id FROM {table} "
+                f"WHERE q_key IN ({','.join('?' * len(part))})", part))
+    return affected
+
+
 def blank_whitespace_answers(conn) -> int:
     """把「只含空白」的 a_text 归一成空串。
 
@@ -150,6 +166,10 @@ def plan(conn, run_min_len: int = 8) -> dict:
     keys_by_doc = defaultdict(set)
     for r in rows:
         keys_by_doc[r[1]].add(r[5])
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+    candidate_keys = ({r[0] for r in conn.execute("SELECT q_key FROM merge_candidates")}
+                      if "merge_candidates" in tables else set())
 
     split, retire = [], []
     for qid, dh, seq, q, a, qkey, qt in rows:
@@ -160,11 +180,14 @@ def plan(conn, run_min_len: int = 8) -> dict:
             new_q, new_a = cand
             ident = _identity(new_q)
             new_key = f"{dh}:{ident['q_norm_hash']}"
+            candidate_conflict = new_key != qkey and new_key in candidate_keys
             split.append({
                 "qid": qid, "doc_hash": dh, "seq": seq, "qtype": qt, "old_q_key": qkey,
-                "old_q": q[:160], "new_q": ident["q_text"][:160], "a_len": len(new_a),
+                "old_q": q, "new_q": ident["q_text"], "a_len": len(new_a),
                 "new_q_key": new_key,
-                "conflict": new_key != qkey and new_key in keys_by_doc[dh],
+                "conflict": (new_key != qkey
+                             and (new_key in keys_by_doc[dh] or candidate_conflict)),
+                "candidate_conflict": candidate_conflict,
                 "new_a": new_a,
             })
             keys_by_doc[dh].add(new_key)
@@ -172,7 +195,7 @@ def plan(conn, run_min_len: int = 8) -> dict:
         reason = toc_row_reason(q)
         if reason:
             retire.append({"qid": qid, "doc_hash": dh, "seq": seq, "qtype": qt,
-                           "q_key": qkey, "reason": reason, "q": q[:160]})
+                           "q_key": qkey, "reason": reason, "q": q})
 
     missing = [{"qid": r[0], "doc_hash": r[1], "qtype": r[6], "q": (r[3] or "")[:120]}
                for r in rows if not r[4].strip()]
@@ -198,8 +221,13 @@ def plan(conn, run_min_len: int = 8) -> dict:
 def apply(conn, p: dict, out_dir: Path, write_missing: bool = True) -> dict:
     """执行拆分与退役。调用方负责事务与写锁。"""
     out_dir.mkdir(parents=True, exist_ok=True)
-    touched_canonical = set()
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+    target_keys = [s["old_q_key"] for s in p["split"] if not s["conflict"]]
+    target_keys.extend(r["q_key"] for r in p["retire"])
+    affected = _canonical_ids_for_keys(conn, tables, target_keys)
     applied_split = applied_retire = skipped = 0
+    candidates_moved = candidates_removed = 0
     blanked = blank_whitespace_answers(conn)
 
     for s in p["split"]:
@@ -213,31 +241,63 @@ def apply(conn, p: dict, out_dir: Path, write_missing: bool = True) -> dict:
             (ident["q_text"], s["new_a"], ident["q_norm"], ident["q_norm_hash"],
              ident["simhash"], s["new_q_key"], s["qid"]),
         )
-        # 已打标事实/簇依赖按 q_key 记录，跟着改；answering_text 同步成新答案。
-        n1 = conn.execute(
-            "update canonical_dependents set q_key=? where q_key=?",
-            (s["new_q_key"], s["old_q_key"]),
-        ).rowcount
-        n2 = conn.execute(
-            "update question_variants set q_key=?, answering_text=? where q_key=?",
-            (s["new_q_key"], s["new_a"], s["old_q_key"]),
-        ).rowcount
-        if n1 or n2:
-            touched_canonical.add(s["old_q_key"])
+        if "canonical_dependents" in tables:
+            conn.execute(
+                "update canonical_dependents set q_key=? where q_key=?",
+                (s["new_q_key"], s["old_q_key"]),
+            )
+        if "question_variants" in tables:
+            conn.execute(
+                "update question_variants set q_key=?, answering_text=? where q_key=?",
+                (s["new_q_key"], s["new_a"], s["old_q_key"]),
+            )
+        if "merge_candidates" in tables:
+            candidates_moved += conn.execute(
+                "update merge_candidates set q_key=? where q_key=?",
+                (s["new_q_key"], s["old_q_key"]),
+            ).rowcount
         applied_split += 1
 
     for r in p["retire"]:
-        conn.execute("delete from canonical_dependents where q_key=?", (r["q_key"],))
-        conn.execute("delete from question_variants where q_key=?", (r["q_key"],))
+        if "canonical_dependents" in tables:
+            conn.execute("delete from canonical_dependents where q_key=?", (r["q_key"],))
+        if "question_variants" in tables:
+            conn.execute("delete from question_variants where q_key=?", (r["q_key"],))
+        if "merge_candidates" in tables:
+            candidates_removed += conn.execute(
+                "delete from merge_candidates where q_key=?", (r["q_key"],)).rowcount
         conn.execute("delete from questions where qid=?", (r["qid"],))
         applied_retire += 1
 
     cq_removed = 0
-    if applied_retire or touched_canonical:
-        before = conn.execute("select count(*) from canonical_questions").fetchone()[0]
-        conn.execute("delete from canonical_questions where canonical_id not in "
-                     "(select distinct canonical_id from canonical_dependents)")
-        cq_removed = before - conn.execute("select count(*) from canonical_questions").fetchone()[0]
+    if "canonical_questions" in tables and affected:
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(canonical_questions)")}
+        empty_ids = []
+        for cid in sorted(affected):
+            has_dependents = ("canonical_dependents" in tables and conn.execute(
+                "SELECT 1 FROM canonical_dependents WHERE canonical_id=? LIMIT 1", (cid,)).fetchone())
+            has_variants = ("question_variants" in tables and conn.execute(
+                "SELECT 1 FROM question_variants WHERE canonical_id=? LIMIT 1", (cid,)).fetchone())
+            has_candidates = ("merge_candidates" in tables and conn.execute(
+                "SELECT 1 FROM merge_candidates WHERE canonical_id=? LIMIT 1", (cid,)).fetchone())
+            if not has_dependents and not has_variants and not has_candidates:
+                empty_ids.append(cid)
+        if empty_ids:
+            cq_removed = conn.execute(
+                f"DELETE FROM canonical_questions WHERE canonical_id IN ({','.join('?' * len(empty_ids))})",
+                empty_ids).rowcount
+        if "witness" in columns:
+            for cid in sorted(affected - set(empty_ids)):
+                witness = (conn.execute(
+                    "SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(collection),''),'doc:'||doc_hash)) "
+                    "FROM canonical_dependents WHERE canonical_id=?", (cid,)).fetchone()[0]
+                    if "canonical_dependents" in tables else 0)
+                if "updated_at" in columns:
+                    conn.execute("UPDATE canonical_questions SET witness=?, updated_at=? WHERE canonical_id=?",
+                                 (witness, datetime.now().strftime(NOW_FMT), cid))
+                else:
+                    conn.execute("UPDATE canonical_questions SET witness=? WHERE canonical_id=?",
+                                 (witness, cid))
 
     with open(out_dir / "retire.csv", "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=["qid", "doc_hash", "seq", "qtype", "reason", "q"],
@@ -246,7 +306,8 @@ def apply(conn, p: dict, out_dir: Path, write_missing: bool = True) -> dict:
         for r in p["retire"]:
             w.writerow(r)
     with open(out_dir / "split.csv", "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=["qid", "doc_hash", "qtype", "old_q", "new_q", "a_len"],
+        w = csv.DictWriter(f, fieldnames=["qid", "doc_hash", "qtype", "old_q_key", "old_q",
+                                          "new_q_key", "new_q", "new_a", "a_len"],
                            extrasaction="ignore")
         w.writeheader()
         for s in p["split"]:
@@ -260,6 +321,8 @@ def apply(conn, p: dict, out_dir: Path, write_missing: bool = True) -> dict:
 
     return {"split_applied": applied_split, "split_skipped_conflict": skipped,
             "retired": applied_retire, "canonical_questions_removed": cq_removed,
+            "merge_candidates_moved": candidates_moved,
+            "merge_candidates_removed": candidates_removed,
             "blanked_whitespace_a_text": blanked}
 
 
@@ -275,47 +338,63 @@ def main(argv=None) -> int:
     if not path.exists():
         print(json.dumps({"error": f"数据库不存在：{path}"}, ensure_ascii=False))
         return 2
-    out_dir = Path(args.out) if args.out else config.BUILD_DIR / "qsalvage"
-    conn = __import__("sqlite3").connect(str(path))
-    conn.row_factory = __import__("sqlite3").Row
+    if args.out:
+        out_dir = Path(args.out)
+        if out_dir.exists() and (not out_dir.is_dir() or any(out_dir.iterdir())):
+            print(json.dumps({"error": f"--out 目录非空，拒绝覆盖：{out_dir}"}, ensure_ascii=False))
+            return 2
+    else:
+        kind = "apply" if args.apply else "preview"
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        out_dir = path.parent / "qsalvage" / f"{kind}-{stamp}"
+    lock = nullcontext()
+    if args.apply:
+        lock = wlock.write_lock(wlock.lock_name_for_target(path), tool="qsalvage",
+                                build_dir=path.parent, wait_sec=30.0, target=path)
     try:
-        p = plan(conn, run_min_len=args.run_min_len)
-        head = {
-            "before": p["before"],
-            "split": len(p["split"]),
-            "split_conflict": sum(1 for s in p["split"] if s["conflict"]),
-            "retire": len(p["retire"]),
-            "runs_review": len(p["runs_review"]),
-            "runs_review_empty": sum(r["n"] for r in p["runs_review"]),
-            "answer_missing": len(p["answer_missing"]),
-            "apply": bool(args.apply),
-        }
-        if args.apply:
-            lock_name = "kb"
-            with wlock.write_lock(lock_name, tool="qsalvage", build_dir=config.BUILD_DIR,
-                                  wait_sec=30.0, target=path):
-                with conn:
-                    head.update(apply(conn, p, out_dir))
-        else:
-            out_dir.mkdir(parents=True, exist_ok=True)
-            with open(out_dir / "plan.json", "w", encoding="utf-8") as f:
-                json.dump({k: p[k] for k in ("before", "runs_review", "answer_missing")}, f,
-                          ensure_ascii=False, indent=1)
-            with open(out_dir / "split.csv", "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.DictWriter(f, fieldnames=["qid", "doc_hash", "qtype", "old_q", "new_q",
-                                                  "a_len", "conflict"], extrasaction="ignore")
-                w.writeheader()
-                for s in p["split"]:
-                    w.writerow(s)
-            with open(out_dir / "retire.csv", "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.DictWriter(f, fieldnames=["qid", "doc_hash", "seq", "qtype", "reason", "q"],
-                                   extrasaction="ignore")
-                w.writeheader()
-                for r in p["retire"]:
-                    w.writerow(r)
-        print(json.dumps(head, ensure_ascii=False, indent=1))
-    finally:
-        conn.close()
+        with lock:
+            conn = db.connect(path, create=False, readonly=not args.apply)
+            try:
+                p = plan(conn, run_min_len=args.run_min_len)
+                head = {
+                    "before": p["before"],
+                    "split": len(p["split"]),
+                    "split_conflict": sum(1 for s in p["split"] if s["conflict"]),
+                    "retire": len(p["retire"]),
+                    "runs_review": len(p["runs_review"]),
+                    "runs_review_empty": sum(r["n"] for r in p["runs_review"]),
+                    "answer_missing": len(p["answer_missing"]),
+                    "apply": bool(args.apply),
+                    "out_dir": str(out_dir),
+                }
+                if args.apply:
+                    head["backup"] = str(db.backup_db(path))
+                    with conn:
+                        head.update(apply(conn, p, out_dir))
+                else:
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    with open(out_dir / "plan.json", "w", encoding="utf-8") as f:
+                        json.dump({k: p[k] for k in ("before", "runs_review", "answer_missing")}, f,
+                                  ensure_ascii=False, indent=1)
+                    with open(out_dir / "split.csv", "w", newline="", encoding="utf-8-sig") as f:
+                        w = csv.DictWriter(f, fieldnames=["qid", "doc_hash", "qtype", "old_q_key",
+                                                          "old_q", "new_q_key", "new_q", "new_a",
+                                                          "a_len", "conflict"], extrasaction="ignore")
+                        w.writeheader()
+                        for s in p["split"]:
+                            w.writerow(s)
+                    with open(out_dir / "retire.csv", "w", newline="", encoding="utf-8-sig") as f:
+                        w = csv.DictWriter(f, fieldnames=["qid", "doc_hash", "seq", "qtype",
+                                                          "reason", "q"], extrasaction="ignore")
+                        w.writeheader()
+                        for r in p["retire"]:
+                            w.writerow(r)
+                print(json.dumps(head, ensure_ascii=False, indent=1))
+            finally:
+                conn.close()
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex)}, ensure_ascii=False, indent=1))
+        return 2
     return 0
 
 

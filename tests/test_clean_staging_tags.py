@@ -55,3 +55,76 @@ def test_clean_dry_run_does_not_write(conn):
     cst.clean(conn, apply=False)
     after = conn.execute("SELECT tags FROM labels_staging WHERE qid=1").fetchone()[0]
     assert before == after
+
+
+def _main_db(tmp_path, monkeypatch):
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    monkeypatch.setattr(config, "BUILD_DIR", configured)
+    path = tmp_path / "custom" / "kb.sqlite"
+    conn = db.connect(path)
+    conn.execute(
+        "INSERT INTO labels_staging (qid,q_norm_hash,topic,qtype,difficulty,tags,provider,"
+        "model,redacted,latency_ms,tokens,labeled_at) VALUES (1,'h','Java基础','八股',3,?,'p','m',0,1,1,'now')",
+        (json.dumps(["ZooKeeper", "选主", "选主"], ensure_ascii=False),))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_main_preview_is_readonly_and_apply_locks_and_backs_up(tmp_path, monkeypatch, capsys):
+    path = _main_db(tmp_path, monkeypatch)
+    cst = _load()
+    real_connect, real_lock, real_backup = cst.db.connect, cst.wlock.write_lock, cst.db.backup_db
+    seen = []
+
+    def checked_connect(db_path, **kwargs):
+        seen.append(kwargs.get("readonly"))
+        return real_connect(db_path, **kwargs)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("预览不应拿写锁或做备份")
+
+    monkeypatch.setattr(cst.db, "connect", checked_connect)
+    monkeypatch.setattr(cst.wlock, "write_lock", forbidden)
+    monkeypatch.setattr(cst.db, "backup_db", forbidden)
+    assert cst.main(["--db", str(path)]) == 0
+    capsys.readouterr()
+    assert seen == [True]
+    assert not (config.BUILD_DIR / "locks").exists()
+
+    seen.clear()
+    monkeypatch.setattr(cst.wlock, "write_lock", real_lock)
+
+    def checked_backup(db_path, *args, **kwargs):
+        locked, holder = cst.wlock.inspect_lock(path.parent / "locks" / "kb.lock")
+        seen.append((locked, (holder or {}).get("tool")))
+        return real_backup(db_path, *args, **kwargs)
+
+    monkeypatch.setattr(cst.db, "backup_db", checked_backup)
+    assert cst.main(["--db", str(path), "--apply"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert seen == [False, (True, "clean_staging_tags")]
+    assert Path(out["backup"]).is_file()
+    assert not (config.BUILD_DIR / "locks").exists()
+    conn = db.connect(path, create=False, readonly=True)
+    assert json.loads(conn.execute("SELECT tags FROM labels_staging").fetchone()[0]) == ["选主"]
+    conn.close()
+
+
+def test_main_apply_rolls_back_all_updates_on_failure(tmp_path, monkeypatch):
+    path = _main_db(tmp_path, monkeypatch)
+    cst = _load()
+    real_clean = cst.clean
+
+    def failing_clean(conn, apply=False):
+        real_clean(conn, apply=apply)
+        raise RuntimeError("模拟写入后失败")
+
+    monkeypatch.setattr(cst, "clean", failing_clean)
+    with pytest.raises(RuntimeError, match="模拟写入后失败"):
+        cst.main(["--db", str(path), "--apply"])
+    conn = db.connect(path, create=False, readonly=True)
+    tags = json.loads(conn.execute("SELECT tags FROM labels_staging").fetchone()[0])
+    conn.close()
+    assert tags == ["ZooKeeper", "选主", "选主"]

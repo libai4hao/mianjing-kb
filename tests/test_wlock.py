@@ -6,13 +6,23 @@ import time
 
 import pytest
 
-from mianjing_kb.kb import wlock
+from mianjing_kb.kb import config, wlock
 
 
 def _hold_lock(build_dir, ready, release):
     with wlock.write_lock("kb", tool="child-process", build_dir=build_dir):
         ready.set()
         release.wait(10)
+
+
+def test_target_lock_name_distinguishes_configured_online_database(tmp_path, monkeypatch):
+    build = tmp_path / "build"
+    monkeypatch.setattr(config, "BUILD_DIR", build)
+    monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
+    assert wlock.lock_name_for_target(build / "kb.sqlite") == "kb"
+    assert wlock.lock_name_for_target(build / "面经库.db") == "online"
+    assert wlock.lock_name_for_target(tmp_path / "custom" / "kb.sqlite") == "kb"
+    assert wlock.lock_name_for_target(tmp_path / "custom" / "online.db") == "kb"
 
 
 def test_lock_roundtrip_keeps_lock_file_and_metadata(tmp_path):

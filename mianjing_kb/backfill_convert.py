@@ -219,6 +219,8 @@ def rehash_existing() -> None:
 
 
 def convert(limit: int = 0, only_pdf: bool = False) -> None:
+    if int(limit) < 0:
+        raise ValueError("limit 必须大于等于 0（0 表示不限制）")
     plan = json.loads(PLAN_FILE.read_text(encoding="utf-8"))["plan"] if PLAN_FILE.exists() else build_plan()
     log = json.loads(CONVERT_LOG.read_text(encoding="utf-8")) if CONVERT_LOG.exists() else []
     done = {l["rel"] for l in log if l.get("ok")}
@@ -355,6 +357,8 @@ def main(argv=None) -> int:
     ap.add_argument("--merge-ocr", action="store_true")
     ap.add_argument("--rehash", action="store_true", help="给已完成但没带 hash 后缀的 md 补改名")
     args = ap.parse_args(argv)
+    if args.limit < 0:
+        ap.error("--limit 必须大于等于 0（0 表示不限制）")
     if args.plan:
         build_plan()
     if args.convert:

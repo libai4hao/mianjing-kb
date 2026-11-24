@@ -17,5 +17,5 @@ pytest>=8
 pyflakes>=3
 
 # 非 pip 依赖（需单独安装，代码里按路径调用）：
-#   PaddleOCR-json v1.4.1   —— ocr_pages 的页级 OCR 引擎（KB_OCR_ENGINE_EXE / KB_OCR_ENGINE_DIR）
+#   PaddleOCR-json v2.1.5   —— ocr_pages 的页级 OCR 引擎（KB_OCR_ENGINE_DIR 指向安装目录）
 #   Word（Office 2007+）    —— .doc → .docx、.doc 取文本（Word COM）

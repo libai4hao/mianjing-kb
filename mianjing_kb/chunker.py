@@ -546,11 +546,15 @@ def _has_question_intent(text: str) -> bool:
     if task_signal or fill_blank_signal:
         return True
     if (len(s) <= 160 and not s.endswith("。")
+            and not re.search(r'[，,；;]', s)
             and re.search(r'如何|怎么|为什么|为何|哪个|哪种', s)
             and not re.match(r'^(?:作用|原理|实现方式|特点|优点|缺点|步骤|总结|注意|说明)[：:]', s)):
         return True
-    if (len(s) <= 160
-            and re.search(r'多少(?:个|种|类|项|次|遍|轮|字节|位|条)|哪[一二三四五六七八九十0-9]+个(?:方面|问题|维度)', s)
+    if (len(s) <= 200 and not s.endswith("。")
+            and re.search(
+                r'(?:那么|则|请问|问)[^。！？!]{0,100}'
+                r'(?:多少(?:个|种|类|项|次|遍|轮|字节|位|条)|哪[一二三四五六七八九十0-9]+个(?:方面|问题|维度))',
+                s)
             and not re.match(r'^(?:当前|目前|这时|此时|因此|所以|例如|比如|其中|通常|一般)', s)):
         return True
     # 选择题空括号占位 + 题干引导词：没有问号也是题。

@@ -113,6 +113,21 @@ def summary(conn) -> dict:
     return {"counts": counts, "empty": empty}
 
 
+def _database_metrics(conn) -> dict:
+    has_state = "answer_state" in {r[1] for r in conn.execute("PRAGMA table_info(questions)")}
+    state_sql = "coalesce(answer_state,'')" if has_state else "''"
+    rows = conn.execute(
+        f"select doc_hash, coalesce(a_text,''), {state_sql} from questions").fetchall()
+    nonempty = Counter(state or "missing" for _dh, answer, state in rows if answer.strip())
+    return {
+        "total": len(rows),
+        "empty": sum(1 for _dh, answer, _state in rows if not answer.strip()),
+        "counts": dict(Counter((state or "missing") for _dh, _answer, state in rows)),
+        "nonempty_by_state": dict(nonempty),
+        "docs_with_empty": len({dh for dh, answer, _state in rows if not answer.strip()}),
+    }
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="空答案成因标记（ok / 源文档缺答案 / 切块缺口 / 目录噪声）")
     ap.add_argument("--db", default=str(config.DB_PATH))
@@ -144,6 +159,7 @@ def main(argv=None) -> int:
                     db.migrate(conn)          # 在写锁内迁移（create=False 不会自动迁移）
                 res = dict(classify(conn, doc_coverage_min=args.doc_coverage_min,
                                     run_min_len=args.run_min_len))
+                database = _database_metrics(conn)
                 if args.only_missing:
                     have = {r[0] for r in conn.execute(
                         "select qid from questions where coalesce(answer_state,'')<>''")}
@@ -151,10 +167,17 @@ def main(argv=None) -> int:
                     res["counts"] = dict(Counter(res["state"].values()))
                     res["total"] = len(res["state"])
                     res["empty"] = len(res["state"]) - res["counts"].get(OK, 0)
-                out = {"total": res["total"], "empty": res["empty"], "counts": res["counts"],
+                out = {"scope": {
+                           "selection": "missing_states_only" if args.only_missing else "all_questions",
+                           "doc_coverage": "whole_database",
+                       },
+                       "subset": {"total": res["total"], "empty": res["empty"],
+                                  "counts": res["counts"]},
+                       "database": database,
+                       "total": res["total"], "empty": res["empty"], "counts": res["counts"],
                        "doc_coverage_median": round(res["doc_coverage_median"], 3),
                        "doc_coverage_min": res["doc_coverage_min"],
-                       "docs_with_empty": res["doc_coverage_empty_docs"], "apply": apply,
+                       "docs_with_empty": database["docs_with_empty"], "apply": apply,
                        "only_missing": bool(args.only_missing)}
                 if apply:
                     with conn:

@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from mianjing_kb.kb import stdio
 
 REPO = Path(__file__).resolve().parents[1]
@@ -66,3 +68,43 @@ def test_module_entrypoint_survives_cp1252_stdout():
     )
     assert p.returncode == 0, p.stderr
     assert "classify" in p.stdout
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "mianjing_kb.retire_questions",
+        "mianjing_kb.clean_qtext",
+        "mianjing_kb.canonical_audit",
+        "mianjing_kb.migrate_norm",
+        "mianjing_kb.pilot5000",
+    ],
+)
+def test_additional_module_entrypoints_survive_cp1252_stdout(module):
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "cp1252"
+    env["PYTHONUTF8"] = "0"
+    p = subprocess.run(
+        [sys.executable, "-m", module, "--help"],
+        cwd=str(REPO), env=env, capture_output=True, text=True, encoding="utf-8",
+    )
+    assert p.returncode == 0, p.stderr
+
+
+def test_proc_module_entrypoint_configures_utf8_stdio():
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "cp1252"
+    env["PYTHONUTF8"] = "0"
+    code = (
+        "import runpy, sys; "
+        "from mianjing_kb.kb import stdio; "
+        "stdio.configure_utf8_stdio=lambda: print('UTF8_OK'); "
+        "sys.argv=['mianjing_kb.kb.proc','0']; "
+        "runpy.run_module('mianjing_kb.kb.proc',run_name='__main__')"
+    )
+    p = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(REPO), env=env, capture_output=True, text=True, encoding="utf-8",
+    )
+    assert p.returncode == 0, p.stderr
+    assert "UTF8_OK" in p.stdout

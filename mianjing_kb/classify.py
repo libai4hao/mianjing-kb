@@ -526,6 +526,8 @@ def main(argv=None) -> int:
     ap.add_argument("--vec", action="store_true",
                     help="配合 --neighbor：改用语义向量（fastembed 标题余弦，命中同义改写），门槛 cos≥0.85+conf≥0.6")
     args = ap.parse_args(argv)
+    if args.limit < 0:
+        ap.error("--limit 必须大于等于 0（0 表示不限制）")
     mutating = not args.dry_run and not args.stats
     try:
         if mutating:

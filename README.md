@@ -15,8 +15,8 @@ python -m pip install -r requirements.txt      # PyYAML / pymupdf / fastembed / 
 python -m pip install -e .                    # 装出 `kb` 命令入口（等价于 python mianjing_kb/<step>.py）
 ```
 
-Python ≥ 3.11。OCR 不是 pip 包：需另装 [PaddleOCR-json](https://github.com/hiroi-sora/PaddleOCR-json)
-并用 `KB_OCR_ENGINE_EXE` 指过去。
+Python ≥ 3.11。OCR 不是 pip 包：需另装 [PaddleOCR-json](https://github.com/hiroi-sora/PaddleOCR-json) v2.1.5，
+并用 `KB_OCR_ENGINE_DIR` 指向包含 `PaddleOCR-json.exe` 的安装目录。
 
 ## 快速上手
 
@@ -47,7 +47,7 @@ python -m pytest tests -q                # 全量测试（含 e2e demo、聚类�
 |---|---|---|
 | `<CORPUS_ROOT>` | `KB_CORPUS_ROOT` | 语料根（必填） |
 | `<ANNOTATION_XLSX>` | `KB_ANNOTATION_XLSX` | 标注母版 xlsx（`gen_answer_baseline.py` 用） |
-| `<OCR_ENGINE_DIR>` / `<OCR_ENGINE_EXE>` | `KB_OCR_ENGINE_DIR` / `KB_OCR_ENGINE_EXE` | OCR 引擎 |
+| `<OCR_ENGINE_DIR>` | `KB_OCR_ENGINE_DIR` | PaddleOCR-json v2.1.5 安装目录 |
 | `<BUILD_DIR>` | `KB_BUILD_DIR` | 台账 / 库 / 日志目录 |
 | `<REPO_ROOT>` / `<PYTHON_HOME>` | — | 仓库根 / 解释器（叙述用） |
 

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """retire_questions：按 doc_hash 退役题目，连带 FTS / 向量 / canonical 依赖。"""
+import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 from mianjing_kb import retire_questions as rq
@@ -66,3 +68,88 @@ def test_apply_removes_rows_and_prunes_empty_canonical(db):
 def test_main_rejects_missing_db(tmp_path):
     assert rq.main(["--db", str(tmp_path / "missing.sqlite"), "--doc-hash", "x"]) == 2
     assert not (tmp_path / "missing.sqlite").exists()
+
+
+def test_apply_scopes_canonical_cleanup_candidates_and_witnesses(tmp_path):
+    path = tmp_path / "kb.sqlite"
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE questions(qid INTEGER PRIMARY KEY, doc_hash TEXT, q_key TEXT);
+        CREATE TABLE canonical_questions(canonical_id TEXT PRIMARY KEY, witness INTEGER, updated_at TEXT);
+        CREATE TABLE canonical_dependents(canonical_id TEXT, q_key TEXT, doc_hash TEXT, collection TEXT);
+        CREATE TABLE question_variants(canonical_id TEXT, q_key TEXT, doc_hash TEXT);
+        CREATE TABLE merge_candidates(q_key TEXT PRIMARY KEY, canonical_id TEXT, status TEXT);
+        INSERT INTO questions VALUES(1,'gone','gone:h1'),(2,'gone','gone:h2'),(3,'keep','keep:h3');
+        INSERT INTO canonical_questions VALUES('affected',2,'old'),('survivor',2,'old'),('unrelated-orphan',9,'old');
+        INSERT INTO canonical_dependents VALUES
+          ('affected','gone:h1','gone','c1'),('survivor','gone:h2','gone','c1'),
+          ('survivor','keep:h3','keep','c2');
+        INSERT INTO question_variants VALUES
+          ('affected','gone:h1','gone'),('survivor','gone:h2','gone'),('survivor','keep:h3','keep');
+        INSERT INTO merge_candidates VALUES
+          ('gone:h1','affected','pending'),('keep:h3','survivor','approved'),
+          ('other:h9','unrelated-orphan','rejected');
+        """)
+    con.commit()
+    con.close()
+
+    con = sqlite3.connect(path)
+    res = rq.retire(con, ["gone"], apply=True)
+    con.commit()
+    con.close()
+    assert res["canonical_questions_removed"] == 1
+    assert res["merge_candidates_removed"] == 1
+    con = sqlite3.connect(path)
+    assert con.execute("SELECT canonical_id FROM canonical_questions ORDER BY 1").fetchall() == [
+        ("survivor",), ("unrelated-orphan",)]
+    assert con.execute("SELECT witness FROM canonical_questions WHERE canonical_id='survivor'"
+                       ).fetchone()[0] == 1
+    assert con.execute("SELECT q_key,status FROM merge_candidates ORDER BY 1").fetchall() == [
+        ("keep:h3", "approved"), ("other:h9", "rejected")]
+    con.close()
+
+
+def test_main_preview_skips_lock_and_apply_uses_target_parent(tmp_path, monkeypatch, capsys):
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    monkeypatch.setattr(config, "BUILD_DIR", configured)
+    target = tmp_path / "custom" / "online.db"
+    target.parent.mkdir()
+    con = sqlite3.connect(target)
+    con.execute("CREATE TABLE questions(qid INTEGER PRIMARY KEY, doc_hash TEXT, q_key TEXT)")
+    con.execute("INSERT INTO questions VALUES(1,'gone','gone:h1')")
+    con.commit()
+    con.close()
+    calls = []
+    backup_seen = []
+    real_lock = rq.wlock.write_lock
+    real_backup = rq.kbdb.backup_db
+
+    def checked(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_lock(*args, **kwargs)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("预览不应拿写锁或做备份")
+
+    def checked_backup(db_path, *args, **kwargs):
+        locked, holder = rq.wlock.inspect_lock(target.parent / "locks" / "kb.lock")
+        backup_seen.append((locked, (holder or {}).get("tool")))
+        return real_backup(db_path, *args, **kwargs)
+
+    monkeypatch.setattr(rq.wlock, "write_lock", checked)
+    monkeypatch.setattr(rq.kbdb, "backup_db", forbidden)
+    assert rq.main(["--db", str(target), "--doc-hash", "gone"]) == 0
+    capsys.readouterr()
+    assert calls == [] and backup_seen == []
+    monkeypatch.setattr(rq.kbdb, "backup_db", checked_backup)
+    assert rq.main(["--db", str(target), "--doc-hash", "gone", "--apply"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert len(calls) == 1
+    assert calls[0][1]["build_dir"] == target.parent
+    assert calls[0][1]["target"] == target
+    assert backup_seen == [(True, "retire_questions")]
+    assert Path(out["backup"]).is_file()
+    assert not (configured / "locks").exists()
+    assert (target.parent / "locks" / "kb.lock").exists()

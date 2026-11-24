@@ -30,6 +30,8 @@ COLUMNS = ["doc_hash", "file_name", "parent_dir", "dir_path", "ext", "size_bytes
 
 
 def fetch(conn, limit: int = 0) -> list[dict]:
+    if int(limit) < 0:
+        raise ValueError("limit 必须大于等于 0（0 表示不限制）")
     sql = f"SELECT {','.join(COLUMNS)} FROM ingest_queue ORDER BY dir_path, file_name"
     if limit:
         sql += f" LIMIT {limit}"
@@ -44,6 +46,8 @@ def main(argv=None) -> int:
     ap.add_argument("--lookup", default=None, help="按 hash 或文件名片段查询")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args(argv)
+    if args.limit < 0:
+        ap.error("--limit 必须大于等于 0（0 表示不限制）")
 
     conn = db.connect(args.db, create=False)
     rows = fetch(conn, args.limit)

@@ -62,7 +62,7 @@ jobs:
           python -m pip install -e . --no-deps
 
       - name: ruff
-        run: python -m ruff check mianjing_kb tests
+        run: python -m ruff check mianjing_kb tests scripts
 
       - name: pytest
         run: python -m pytest tests -q

@@ -156,6 +156,23 @@ def test_redact_clean_text_noop():
     assert not hit and "HashMap" in t
 
 
+def test_redact_preserves_technical_identifiers_containing_wx_or_qq():
+    raw = "wxWidgets、weixinWidgets、qq.com 与 wxWidgetsQQ 是什么？"
+    clean, hit = redact(raw)
+    assert not hit
+    assert clean == raw
+
+
+@pytest.mark.parametrize("raw", ["微信 wx_abc123", "wx: abcdef", "QQ123456",
+                                 "weixin: abcdef", "微信号：abcdef", "微信号码：abcdef",
+                                 "weixin号：abcdef", "wx号：abcdef", "qq号码：abcdef"])
+def test_redact_contact_forms_still_masked(raw):
+    clean, hit = redact(raw)
+    assert hit
+    assert "[联系方式]" in clean
+    assert raw not in clean
+
+
 def test_redact_url_keeps_path_but_strips_credentials_and_token():
     """URL 不整段删；但 user:pass@ 和 token/signature query 不能发给模型。"""
     t, hit = redact("参考 https://user:pass@host/docs/a?token=abc&x=1 与 "
@@ -491,6 +508,37 @@ def test_local_loopback_needs_no_opt_in(monkeypatch):
     assert cfg["local_endpoint"] is True
     assert chat(cfg, "s", "u", retries=1)["text"] == "ok"
     assert len(calls) == 1 and calls[0]["messages"][1]["content"].endswith("/no_think")
+
+
+@pytest.mark.parametrize("base,expected", [
+    ("http://127.0.0.1:11434/v1", True),
+    ("http://ollama.internal:11434/v1", True),
+    ("http://127.0.0.1:8080/v1", False),
+    ("https://api.deepseek.com/v1", False),
+])
+def test_no_think_only_for_ollama_endpoint(monkeypatch, base, expected):
+    from mianjing_kb import llm_client as lc
+    calls = []
+    monkeypatch.setattr(lc, "_post", lambda cfg, payload: calls.append(payload) or
+                        (200, {"choices": [{"message": {"content": "ok"}}], "usage": {}}))
+    cfg = resolve_config(env={"LLM_BASE": base, "LLM_KEY": "k",
+                              "LLM_ALLOW_CONTENT_UPLOAD": "1"})
+    chat(cfg, "s", "u", json_mode=False, retries=1)
+    assert calls[0]["messages"][1]["content"].endswith("/no_think") is expected
+
+
+def test_no_think_uses_config_json_mode_for_ollama(monkeypatch):
+    from mianjing_kb import llm_client as lc
+    calls = []
+    monkeypatch.setattr(lc, "_post", lambda cfg, payload: calls.append(payload) or
+                        (200, {"choices": [{"message": {"content": "ok"}}], "usage": {}}))
+    cfg = resolve_config(env={"LLM_JSON_MODE": "0"})
+    chat_json(cfg, "s", "u", retries=1)
+    assert calls[0]["messages"][1]["content"].endswith("/no_think")
+    cfg["json_mode"] = True
+    chat_json(cfg, "s", "u", retries=1)
+    assert calls[1]["messages"][1]["content"] == "u"
+    assert calls[1]["response_format"] == {"type": "json_object"}
 
 
 def test_redact_local_absolute_paths_without_touching_urls(tmp_path):

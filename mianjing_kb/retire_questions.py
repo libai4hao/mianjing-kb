@@ -22,13 +22,15 @@ import argparse
 import json
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-from mianjing_kb.kb import config, wlock  # noqa: E402
+from mianjing_kb.kb import db as kbdb, wlock  # noqa: E402
 
 _MAX_PRINT = 10
+NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
 
 def _tables(conn: sqlite3.Connection) -> set[str]:
@@ -39,12 +41,30 @@ def _ph(n: int) -> str:
     return ",".join("?" * n)
 
 
+def _affected_canonical_ids(conn: sqlite3.Connection, tables: set[str],
+                            doc_hashes: list[str], q_keys: list[str]) -> set[str]:
+    affected: set[str] = set()
+    placeholders = _ph(len(doc_hashes))
+    for table in ("canonical_dependents", "question_variants"):
+        if table in tables:
+            affected.update(r[0] for r in conn.execute(
+                f"SELECT DISTINCT canonical_id FROM {table} WHERE doc_hash IN ({placeholders})",
+                doc_hashes))
+    if "merge_candidates" in tables and q_keys:
+        affected.update(r[0] for r in conn.execute(
+            f"SELECT DISTINCT canonical_id FROM merge_candidates WHERE q_key IN ({_ph(len(q_keys))})",
+            q_keys))
+    return affected
+
+
 def plan(conn: sqlite3.Connection, doc_hashes: list[str]) -> dict:
     """只读统计：返回各表将删除的行数与 qid 列表。"""
     tables = _tables(conn)
     hs = list(doc_hashes)
     qids = [r[0] for r in conn.execute(
         f"SELECT qid FROM questions WHERE doc_hash IN ({_ph(len(hs))})", hs)]
+    q_keys = [r[0] for r in conn.execute(
+        f"SELECT q_key FROM questions WHERE doc_hash IN ({_ph(len(hs))})", hs) if r[0]]
     out: dict = {"doc_hashes": hs, "qids": qids, "questions": len(qids), "tables": {}}
     if "questions_fts" in tables:
         out["tables"]["questions_fts"] = conn.execute(
@@ -59,6 +79,13 @@ def plan(conn: sqlite3.Connection, doc_hashes: list[str]) -> dict:
         if t in tables:
             out["tables"][t] = conn.execute(
                 f"SELECT COUNT(*) FROM {t} WHERE doc_hash IN ({_ph(len(hs))})", hs).fetchone()[0]
+    if "merge_candidates" in tables and q_keys:
+        out["tables"]["merge_candidates"] = conn.execute(
+            f"SELECT COUNT(*) FROM merge_candidates WHERE q_key IN ({_ph(len(q_keys))})", q_keys
+        ).fetchone()[0]
+    if "canonical_questions" in tables:
+        out["canonical_questions_affected"] = len(
+            _affected_canonical_ids(conn, tables, hs, q_keys))
     if "label_facts" in tables and qids:
         names = {r[1] for r in conn.execute("PRAGMA table_info(label_facts)")}
         if "q_norm_hash" in names:
@@ -79,8 +106,9 @@ def retire(conn: sqlite3.Connection, doc_hashes: list[str], apply: bool = False)
         return res
     tables = _tables(conn)
     hs, qids = res["doc_hashes"], res["qids"]
-    before_cq = conn.execute("SELECT canonical_id FROM canonical_questions").fetchall() \
-        if "canonical_questions" in tables else []
+    q_keys = [r[0] for r in conn.execute(
+        f"SELECT q_key FROM questions WHERE doc_hash IN ({_ph(len(hs))})", hs) if r[0]]
+    affected = _affected_canonical_ids(conn, tables, hs, q_keys)
     if "questions_fts" in tables:
         conn.execute(f"DELETE FROM questions_fts WHERE rowid IN ({_ph(len(qids))})", qids)
     if "vec_questions" in tables:
@@ -91,12 +119,42 @@ def retire(conn: sqlite3.Connection, doc_hashes: list[str], apply: bool = False)
     for t in ("canonical_dependents", "question_variants"):
         if t in tables:
             conn.execute(f"DELETE FROM {t} WHERE doc_hash IN ({_ph(len(hs))})", hs)
+    res["merge_candidates_removed"] = 0
+    if "merge_candidates" in tables and q_keys:
+        cur = conn.execute(
+            f"DELETE FROM merge_candidates WHERE q_key IN ({_ph(len(q_keys))})", q_keys)
+        res["merge_candidates_removed"] = cur.rowcount
     conn.execute(f"DELETE FROM questions WHERE doc_hash IN ({_ph(len(hs))})", hs)
-    if "canonical_questions" in tables and before_cq:
-        conn.execute("DELETE FROM canonical_questions WHERE canonical_id NOT IN "
-                     "(SELECT DISTINCT canonical_id FROM canonical_dependents)")
-        res["canonical_questions_removed"] = len(before_cq) - conn.execute(
-            "SELECT COUNT(*) FROM canonical_questions").fetchone()[0]
+    if "canonical_questions" in tables and affected:
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(canonical_questions)")}
+        empty_ids = []
+        for cid in sorted(affected):
+            has_dependents = ("canonical_dependents" in tables and conn.execute(
+                "SELECT 1 FROM canonical_dependents WHERE canonical_id=? LIMIT 1", (cid,)).fetchone())
+            has_variants = ("question_variants" in tables and conn.execute(
+                "SELECT 1 FROM question_variants WHERE canonical_id=? LIMIT 1", (cid,)).fetchone())
+            has_candidates = ("merge_candidates" in tables and conn.execute(
+                "SELECT 1 FROM merge_candidates WHERE canonical_id=? LIMIT 1", (cid,)).fetchone())
+            if not has_dependents and not has_variants and not has_candidates:
+                empty_ids.append(cid)
+        removed = 0
+        if empty_ids:
+            removed = conn.execute(
+                f"DELETE FROM canonical_questions WHERE canonical_id IN ({_ph(len(empty_ids))})",
+                empty_ids).rowcount
+        res["canonical_questions_removed"] = removed
+        if "witness" in columns:
+            for cid in sorted(affected - set(empty_ids)):
+                witness = (conn.execute(
+                    "SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(collection),''),'doc:'||doc_hash)) "
+                    "FROM canonical_dependents WHERE canonical_id=?", (cid,)).fetchone()[0]
+                    if "canonical_dependents" in tables else 0)
+                if "updated_at" in columns:
+                    conn.execute("UPDATE canonical_questions SET witness=?, updated_at=? WHERE canonical_id=?",
+                                 (witness, datetime.now().strftime(NOW_FMT), cid))
+                else:
+                    conn.execute("UPDATE canonical_questions SET witness=? WHERE canonical_id=?",
+                                 (witness, cid))
     res["applied"] = True
     return res
 
@@ -112,22 +170,30 @@ def main(argv=None) -> int:
     if not path.exists():
         print(json.dumps({"error": f"数据库不存在：{path}"}, ensure_ascii=False))
         return 2
-    lock_name = "kb" if path.resolve() == Path(config.DB_PATH).resolve() else "online"
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
+    lock_name = wlock.lock_name_for_target(path)
     try:
         if args.apply:
-            with wlock.write_lock(lock_name, tool="retire_questions", build_dir=config.BUILD_DIR,
+            with wlock.write_lock(lock_name, tool="retire_questions", build_dir=path.parent,
                                   wait_sec=30.0, target=path):
-                with conn:
-                    res = retire(conn, args.doc_hash, apply=True)
+                backup = kbdb.backup_db(path)
+                conn = sqlite3.connect(str(path))
+                conn.row_factory = sqlite3.Row
+                try:
+                    with conn:
+                        res = retire(conn, args.doc_hash, apply=True)
+                    res["backup"] = str(backup)
+                finally:
+                    conn.close()
         else:
-            res = retire(conn, args.doc_hash, apply=False)
+            conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            try:
+                res = retire(conn, args.doc_hash, apply=False)
+            finally:
+                conn.close()
     except wlock.LockHeld as ex:
         print(json.dumps({"verdict": "ABORT", "why": str(ex)}, ensure_ascii=False, indent=1))
         return 2
-    finally:
-        conn.close()
     if len(res.get("qids", [])) > _MAX_PRINT:
         res["qids"] = res["qids"][:_MAX_PRINT] + ["…"]
     print(json.dumps(res, ensure_ascii=False, indent=1))
@@ -135,4 +201,6 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    from mianjing_kb.kb.stdio import configure_utf8_stdio
+    configure_utf8_stdio()
     raise SystemExit(main())

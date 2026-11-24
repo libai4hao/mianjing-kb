@@ -159,6 +159,8 @@ def db_stats(db_path: Path) -> dict:
 
 
 def md_stats(md_root: Path, limit: int = 0) -> dict:
+    if int(limit) < 0:
+        raise ValueError("limit 必须大于等于 0（0 表示不限制）")
     files = sorted(p for p in md_root.rglob("*.md"))
     if limit:
         files = files[:limit]
@@ -322,6 +324,8 @@ def main(argv=None) -> int:
     ap.add_argument("--out-md", default="")
     ap.add_argument("--min-f1", type=float, default=0.0, help="低于此值 exit 1")
     args = ap.parse_args(argv)
+    if args.limit_md < 0:
+        ap.error("--limit-md 必须大于等于 0（0 表示不限制）")
 
     if not args.out_md and _has_placeholder(config.BUILD_DIR):
         print(json.dumps({

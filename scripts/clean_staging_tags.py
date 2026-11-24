@@ -18,10 +18,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, labelspec, vocab  # noqa: E402
+from mianjing_kb.kb import config, db, labelspec, vocab, wlock  # noqa: E402
 
 
 def clean(conn, apply: bool = False) -> dict:
@@ -52,8 +53,6 @@ def clean(conn, apply: bool = False) -> dict:
         if apply:
             conn.execute("UPDATE labels_staging SET tags=? WHERE qid=?",
                          (json.dumps(kept, ensure_ascii=False) if kept else None, qid))
-    if apply:
-        conn.commit()
     return {"rows": len(rows), "changed": changed, "dropped_dimension": dropped_total,
             "truncated": truncated_total, "synonym_hits": syn_total,
             "deduped": dedup_total, "cap": cap, "applied": apply}
@@ -64,11 +63,28 @@ def main(argv=None) -> int:
     ap.add_argument("--apply", action="store_true", help="写回；默认只统计")
     ap.add_argument("--db", default=str(config.DB_PATH))
     args = ap.parse_args(argv)
-    conn = db.connect(Path(args.db), create=False)
+    path = Path(args.db)
+    lock = nullcontext()
+    if args.apply:
+        lock = wlock.write_lock(wlock.lock_name_for_target(path), tool="clean_staging_tags",
+                                build_dir=path.parent, wait_sec=30.0, target=path)
     try:
-        print(json.dumps(clean(conn, args.apply), ensure_ascii=False, indent=1))
-    finally:
-        conn.close()
+        with lock:
+            conn = db.connect(path, create=False, readonly=not args.apply)
+            try:
+                if args.apply:
+                    backup = db.backup_db(path)
+                    with conn:
+                        out = clean(conn, True)
+                    out["backup"] = str(backup)
+                else:
+                    out = clean(conn, False)
+                print(json.dumps(out, ensure_ascii=False, indent=1))
+            finally:
+                conn.close()
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex)}, ensure_ascii=False, indent=1))
+        return 2
     return 0
 
 

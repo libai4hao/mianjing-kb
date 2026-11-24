@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """clean_qtext：存量题库显示清洗，身份字段（q_norm/q_key）必须原样。"""
+import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 from mianjing_kb import clean_qtext as cq
@@ -54,3 +56,55 @@ def test_apply_only_touches_q_text(db):
 def test_main_aborts_on_missing_db(tmp_path):
     assert cq.main(["--db", str(tmp_path / "missing.sqlite")]) == 2
     assert not (tmp_path / "missing.sqlite").exists()
+
+
+def test_main_preview_is_readonly_and_apply_locks_target_parent(tmp_path, monkeypatch, capsys):
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    monkeypatch.setattr(config, "BUILD_DIR", configured)
+    target = tmp_path / "custom" / "kb.sqlite"
+    target.parent.mkdir()
+    con = sqlite3.connect(target)
+    con.execute("CREATE TABLE questions(qid INTEGER PRIMARY KEY, q_text TEXT)")
+    con.execute("INSERT INTO questions VALUES(1,'**1** 、什么是 **Redis** ?')")
+    con.commit()
+    con.close()
+    real_connect = cq.kbdb.connect
+    real_lock = cq.wlock.write_lock
+    real_backup = cq.kbdb.backup_db
+    seen = []
+    backup_seen = []
+
+    def checked_connect(path, **kwargs):
+        seen.append(kwargs.get("readonly"))
+        return real_connect(path, **kwargs)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("预览不应拿写锁或做备份")
+
+    def checked_backup(db_path, *args, **kwargs):
+        locked, holder = cq.wlock.inspect_lock(target.parent / "locks" / "kb.lock")
+        backup_seen.append((locked, (holder or {}).get("tool")))
+        return real_backup(db_path, *args, **kwargs)
+
+    monkeypatch.setattr(cq.kbdb, "connect", checked_connect)
+    monkeypatch.setattr(cq.wlock, "write_lock", forbidden)
+    monkeypatch.setattr(cq.kbdb, "backup_db", forbidden)
+    assert cq.main(["--db", str(target)]) == 0
+    capsys.readouterr()
+    assert seen == [True] and backup_seen == []
+    assert not (configured / "locks").exists()
+
+    seen.clear()
+    monkeypatch.setattr(cq.wlock, "write_lock", real_lock)
+    monkeypatch.setattr(cq.kbdb, "backup_db", checked_backup)
+    assert cq.main(["--db", str(target), "--apply"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert seen == [False]
+    assert backup_seen == [(True, "clean_qtext")]
+    assert Path(out["backup"]).is_file()
+    assert (target.parent / "locks" / "kb.lock").exists()
+    assert not (configured / "locks").exists()
+    con = sqlite3.connect(target)
+    assert con.execute("SELECT q_text FROM questions").fetchone()[0] == "什么是 Redis?"
+    con.close()

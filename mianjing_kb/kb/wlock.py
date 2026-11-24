@@ -43,6 +43,14 @@ def lock_dir(build_dir: Path | str | None = None) -> Path:
     return d
 
 
+def lock_name_for_target(target: Path | str) -> str:
+    path = Path(target).resolve()
+    if path != Path(config.DB_PATH).resolve() and \
+            path == (Path(config.BUILD_DIR) / "面经库.db").resolve():
+        return "online"
+    return "kb"
+
+
 def _local_lock(path: Path) -> threading.Lock:
     key = str(path.resolve())
     with _LOCAL_GUARD:

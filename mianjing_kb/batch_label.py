@@ -117,6 +117,8 @@ def pick_targets(conn, limit: int = 0, qids: list[int] | None = None,
     qids 指定时只打这批题（样本集回归用），按 qid 稳定排序。
     skip_code：默认跳过代码行/代码碎片及确定性残缺/错配/多题混杂，防坏样本送进 LLM。
     """
+    if int(limit) < 0:
+        raise ValueError("limit 必须大于等于 0（0 表示不限制）")
     sql = ("SELECT q.qid, q.q_text, q.a_text, q.q_norm_hash FROM questions q "
            "LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash "
            f"WHERE {TODO_PREDICATE} ")
@@ -737,6 +739,8 @@ def review_targets(conn, limit: int = 0) -> list[dict]:
     与 G6b 按金标主题聚合的 weak_topics 同源——错行混进高准确率预测组也必进复核）；
     review_state 非 NULL 的已复核行不重选。
     """
+    if int(limit) < 0:
+        raise ValueError("limit 必须大于等于 0（0 表示不限制）")
     vocab = topic_vocab()
     params: list = []
     if vocab:
@@ -1189,6 +1193,8 @@ def main(argv=None) -> int:
                     help="回灌人工填好的 CSV 模板 → labels_staging（逐行校验、坏行报行号）")
     ap.add_argument("--manual-dry-run", action="store_true", help="配合 --manual-import：只校验不写库")
     args = ap.parse_args(argv)
+    if args.limit < 0:
+        ap.error("--limit 必须大于等于 0（0 表示不限制）")
 
     if args.provider:
         os.environ["LLM_PROVIDER"] = args.provider

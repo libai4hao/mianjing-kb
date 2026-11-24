@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """db.migrate 回归：007 label_facts 打标事实源 + staging/questions 伴随列（B1 修复）。"""
+import pytest
+
 from mianjing_kb.kb import db
 
 
@@ -64,6 +66,22 @@ def test_schema_version_records_all_migrations(tmp_path):
     db.migrate(conn)
     assert db.applied_versions(conn) == versions
     conn.close()
+
+
+@pytest.mark.parametrize("column", ["answer_state", "answer_source",
+                                    "answer_model", "answered_at"])
+def test_schema_validation_rejects_missing_answer_governance_columns(tmp_path, column):
+    """版本表声称 018/019 已应用但答案治理列缺失时，连接必须失败而不是放行。"""
+    import sqlite3
+
+    path = tmp_path / "legacy.sqlite"
+    db.connect(path).close()
+    raw = sqlite3.connect(str(path))
+    raw.execute(f"ALTER TABLE questions DROP COLUMN {column}")
+    raw.commit()
+    raw.close()
+    with pytest.raises(RuntimeError, match=rf"questions\.{column}"):
+        db.connect(path)
 
 
 def test_legacy_db_without_schema_version_is_backfilled(tmp_path):

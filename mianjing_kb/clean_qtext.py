@@ -18,6 +18,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -44,7 +45,6 @@ def clean_rows(conn, apply: bool, samples: int = 10) -> dict:
         updates.append((new[:2000], row["qid"]))
     if apply and updates:
         conn.executemany("UPDATE questions SET q_text=? WHERE qid=?", updates)
-        conn.commit()
     return {"scanned": scanned, "changed": changed, "applied": bool(apply),
             "examples": examples}
 
@@ -58,26 +58,32 @@ def main(argv=None) -> int:
     if not path.exists():
         print(json.dumps({"error": f"库不存在：{path}"}, ensure_ascii=False), file=sys.stderr)
         return 2
-    build_dir = Path(config.BUILD_DIR)
-    lock = wlock.write_lock("kb", tool="clean_qtext", build_dir=build_dir,
-                            wait_sec=LOCK_WAIT_SEC, target=path)
+    lock = nullcontext()
+    if args.apply:
+        lock = wlock.write_lock(wlock.lock_name_for_target(path), tool="clean_qtext",
+                                build_dir=path.parent, wait_sec=LOCK_WAIT_SEC, target=path)
     try:
-        lock.__enter__()
+        with lock:
+            conn = kbdb.connect(path, create=False, readonly=not args.apply)
+            conn.row_factory = sqlite3.Row
+            try:
+                if args.apply:
+                    backup = kbdb.backup_db(path)
+                    with conn:
+                        out = clean_rows(conn, True)
+                    out["backup"] = str(backup)
+                else:
+                    out = clean_rows(conn, False)
+            finally:
+                conn.close()
     except wlock.LockHeld as ex:
         print(json.dumps({"verdict": "ABORT", "why": str(ex)}, ensure_ascii=False), file=sys.stderr)
         return 2
-    try:
-        conn = kbdb.connect(path, create=False, readonly=not args.apply)
-        conn.row_factory = sqlite3.Row
-        try:
-            out = clean_rows(conn, args.apply)
-        finally:
-            conn.close()
-    finally:
-        lock.__exit__(None, None, None)
     print(json.dumps(out, ensure_ascii=False, indent=1))
     return 0
 
 
 if __name__ == "__main__":
+    from mianjing_kb.kb.stdio import configure_utf8_stdio
+    configure_utf8_stdio()
     raise SystemExit(main())

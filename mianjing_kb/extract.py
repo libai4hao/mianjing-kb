@@ -487,6 +487,18 @@ def _read_doc_list(path: str) -> set[str]:
     return out
 
 
+def _empty_doc_list_result(args) -> int:
+    print(json.dumps({
+        "docs": 0, "pool_after_gate": 0, "skipped_gate": {},
+        "doc_list_no_match": True,
+        "doc_list_missing_hashes": [],
+        "doc_list_gate_skipped": [],
+        "skipped_doc_list_missing": 0,
+        "dry_run": bool(args.dry_run), "plan": bool(args.plan), "report": None,
+    }, ensure_ascii=False, indent=1))
+    return 2
+
+
 def _docs_with_answer_provenance(conn, doc_hashes: list[str]) -> set[str]:
     """题里带模型答案或补答溯源的文档，供只读计划展示风险面。"""
     columns = {r[1] for r in conn.execute("PRAGMA table_info(questions)")}
@@ -503,7 +515,19 @@ def _docs_with_answer_provenance(conn, doc_hashes: list[str]) -> set[str]:
     return out
 
 
-def _run(args) -> int:
+def _run(args, wanted: set[str] | None = None) -> int:
+    doc_list_report = {
+        "doc_list_no_match": False,
+        "doc_list_missing_hashes": [],
+        "doc_list_gate_skipped": [],
+        "skipped_doc_list_missing": 0,
+    }
+    doc_list_rc = 0
+    if getattr(args, "doc_list", None):
+        if wanted is None:
+            wanted = _read_doc_list(args.doc_list)
+        if not wanted:
+            return _empty_doc_list_result(args)
     read_only = bool(args.dry_run or args.plan or args.stats)
     conn = db.connect(args.db, create=not read_only, readonly=read_only)
     if args.stats:
@@ -521,21 +545,35 @@ def _run(args) -> int:
 
     pool, mapping = doc_pool(conn)
     pool_all = pool
-    pool, gate_skipped = _filter_by_gate(pool, _gate_statuses(conn), args.require_gate)
-    doc_list_missing = 0
+    gate_statuses = _gate_statuses(conn)
+    pool, gate_skipped = _filter_by_gate(pool, gate_statuses, args.require_gate)
     if getattr(args, "doc_list", None):
-        wanted = _read_doc_list(args.doc_list)
-        doc_list_missing = len(wanted - {h for h, _p in pool_all})
+        pool_hashes = {h for h, _p in pool_all}
+        eligible_hashes = {h for h, _p in pool}
+        missing_hashes = sorted(wanted - pool_hashes)
+        src, latest = gate_statuses
+        gate_skipped_docs = [
+            {"doc_hash": h, "gate": src.get(h) or latest.get(h) or "ungated"}
+            for h in sorted((wanted & pool_hashes) - eligible_hashes)
+        ]
         pool = [x for x in pool if x[0] in wanted]
+        doc_list_report.update({
+            "doc_list_no_match": not pool,
+            "doc_list_missing_hashes": missing_hashes,
+            "doc_list_gate_skipped": gate_skipped_docs,
+            "skipped_doc_list_missing": len(missing_hashes) + len(gate_skipped_docs),
+        })
+        doc_list_rc = 2 if not wanted else (1 if not pool else 0)
     # 只读计划展示补答溯源风险面；实际重抽按 hash 继承，不再整篇跳过。
     provenance_docs = _docs_with_answer_provenance(conn, [h for h, _p in pool])
-    report_path = None if (args.plan or args.dry_run) else write_identity_report(mapping)
+    report_path = (None if (args.plan or args.dry_run or doc_list_rc)
+                   else write_identity_report(mapping))
     if args.plan:
         print(json.dumps({
             "pool_docs": len(pool_all),
             "pool_after_gate": len(pool),
             "skipped_gate": gate_skipped,
-            "skipped_doc_list_missing": doc_list_missing,
+            **doc_list_report,
             "answer_provenance_docs": len(provenance_docs),
             "md_mapped_sources": len(mapping.by_doc),
             "source_only": len(pool_all) - len(mapping.by_doc) - len(mapping.orphans),
@@ -545,10 +583,10 @@ def _run(args) -> int:
             "report": None,
         }, ensure_ascii=False, indent=1))
         conn.close()
-        return 0
+        return doc_list_rc
 
     # 产物台账先落"映射事实"（extracted_at 留空），增量判据才有输入
-    if not args.dry_run:
+    if not args.dry_run and not doc_list_rc:
         products.sync_mapping(conn, mapping)
         conn.commit()
     pool_total = len(pool)
@@ -665,7 +703,7 @@ def _run(args) -> int:
         "empty_preserved": n_empty_preserved, "errors": n_err,
         "incremental": args.incremental, "skipped_unchanged": skipped_unchanged,
         "skipped_gate": gate_skipped,
-        "skipped_doc_list_missing": doc_list_missing,
+        **doc_list_report,
         "answer_provenance_skipped": 0,
         "answer_provenance_lost": n_answer_lost if not args.dry_run else 0,
         "state_loss_blocked": n_state_loss_blocked,
@@ -685,7 +723,9 @@ def _run(args) -> int:
     }, ensure_ascii=False, indent=1))
     conn.close()
     # 有抽取/落库失败必须让自动化看到非零：仅靠 processing 状态无法区分“全成功/部分成功”。
-    return 1 if n_err else 0
+    if n_err:
+        return 1
+    return doc_list_rc
 
 
 def main(argv=None) -> int:
@@ -712,12 +752,15 @@ def main(argv=None) -> int:
     if args.limit < 0:
         # Python 切片允许负数：--limit -1 会处理"除最后 1 件之外的整个池"（ISSUE-07）
         ap.error("--limit 必须大于等于 0（0 表示不限制）")
+    wanted = _read_doc_list(args.doc_list) if args.doc_list else None
+    if wanted is not None and not wanted:
+        return _empty_doc_list_result(args)
     if args.dry_run or args.plan or args.stats:      # 只读，不进写锁
-        return _run(args)
+        return _run(args, wanted)
     db_path = Path(args.db)
     try:
         with wlock.write_lock("kb", tool="extract", build_dir=db_path.parent, target=db_path):
-            return _run(args)
+            return _run(args, wanted)
     except wlock.LockHeld as ex:
         print(json.dumps({"verdict": "ABORT", "why": str(ex),
                           "note": "另有工具在写 kb.sqlite；extract 不与之并行，稍后重试"},
