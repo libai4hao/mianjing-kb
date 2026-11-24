@@ -141,7 +141,7 @@ RE_EXAM_SECTION = re.compile(
     r'.{0,12}[（(][^）)]*(?:选|任选|每题|每道|共\s*\d+\s*分|\d+\s*分)[^）)]*[）)]')
 # D3 强提问语义行首：答案列表状态不能吞掉这类编号子题。
 RE_STRONG_QSTART = re.compile(
-    r'^(?:什么是|什么|如何|怎么|为什么|为何|哪些|哪几|谈谈|说说|简述|简答|请解释|请描述|请说明|是否|能否)')
+    r'^(?:什么是|什么|如何|怎么|为什么|为何|哪些|哪几|哪个|哪种|谈谈|说说|简述|简答|请解释|请描述|请说明|是否|能否)')
 
 # ---- review2 移植（2026-11-20）：问句语义/章节/答案小节词汇 ----
 # 提问动词只在行首生效，避免答案句中的问词把列表项误判成题。
@@ -466,7 +466,7 @@ def _is_list_item_question(qtext: str) -> bool:
         return True
     if _is_question_heading(s):
         return True
-    if re.match(r'^(?:如何|怎么|为什么|什么|哪些|哪几|是否|能否|请|谈谈|说说|介绍|解释)', s):
+    if re.match(r'^(?:如何|怎么|为什么|什么|哪些|哪几|哪个|哪种|是否|能否|请|谈谈|说说|介绍|解释)', s):
         return True
     if re.match(r'^通过.{0,20}(?:生成|填充|输出|计算|求|实现)', s):
         return True
@@ -526,8 +526,32 @@ def _has_question_intent(text: str) -> bool:
         return False
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:[)）])?[?？]", s):
         return False
+    task_signal = bool(
+        re.match(r'^(?:检查|阅读|分析)(?:以下|下面)?(?:代码|程序)', s)
+        or re.match(r'^考虑(?:以下|下面).{0,40}(?:代码|程序)', s)
+        or re.match(r'^通过.{0,20}(?:生成|填充|输出|计算|求|实现)', s))
+    codeish = _is_codeish(s)
+    fill_blank_signal = bool(
+        len(s) <= 240 and re.search(r'_{2,}', s)
+        and (not codeish or re.search(
+            r'寻找|计算|求出|多少|哪[一二三四五六七八九十0-9]+个|是否|如何|次数|个数|复杂度|概率|结果|输出|创建|反射|数为',
+            s)))
+    if codeish:
+        return bool(RE_QEND.search(s) or RE_QUESTION_INTENT.search(s)
+                    or re.match(r'^猜(?:数字|单词|数字游戏)', s)
+                    or task_signal or fill_blank_signal)
     if (RE_QEND.search(s) or RE_QUESTION_INTENT.search(s) or RE_QUESTION_SUFFIX.search(s)
             or RE_WEAK_INTENT.search(s) or RE_NE_QUESTION.search(s)):
+        return True
+    if task_signal or fill_blank_signal:
+        return True
+    if (len(s) <= 160 and not s.endswith("。")
+            and re.search(r'如何|怎么|为什么|为何|哪个|哪种', s)
+            and not re.match(r'^(?:作用|原理|实现方式|特点|优点|缺点|步骤|总结|注意|说明)[：:]', s)):
+        return True
+    if (len(s) <= 160
+            and re.search(r'多少(?:个|种|类|项|次|遍|轮|字节|位|条)|哪[一二三四五六七八九十0-9]+个(?:方面|问题|维度)', s)
+            and not re.match(r'^(?:当前|目前|这时|此时|因此|所以|例如|比如|其中|通常|一般)', s)):
         return True
     # 选择题空括号占位 + 题干引导词：没有问号也是题。
     if (re.search(r"[（(]\s*[）)]$", s)
@@ -558,6 +582,9 @@ def _is_qline(s: str) -> bool:
         return False
     if re.match(r'^(?:的|了|是|在|和|与|及|并|而|但|就|也|都|其|此|该)\s', s):
         return False
+    if (len(s) <= 180 and re.search(r'_{2,}', s)
+            and re.search(r'(?:寻找|计算|求出|多少|哪[一二三四五六七八九十0-9]+个|是否|如何|次数|个数|复杂度)', s)):
+        return True
     # `Redis 是内存数据库` 是陈述句；`ReadWriteLock 是什么` 仍是问句。
     if re.match(r'^[A-Za-z][A-Za-z0-9_\s]*是(?!什么|否)', s):
         return False
@@ -645,7 +672,7 @@ def _is_stem_continuation(prev_q: str, line: str) -> bool:
     if prev_done:
         return False
     # (a) 题干以「证明/求/计算」等任务词+冒号收尾 → 其后命题/公式是题干。
-    if (prev_q.rstrip().endswith(('：', ':'))
+    if (prev_q.rstrip().endswith(('：', ':')) and not re.search(r'_{2,}', prev_q)
             and re.search(r'(?:证明|求证|求|计算|求解|写出|推导|化简|等于|结果|输出)', prev_q)):
         return True
     # (c) 题干以助词/连接词悬空 + 续段极短（半个词/短片段）。
@@ -697,10 +724,10 @@ def _is_question_heading(s: str) -> bool:
         return False
     if s.endswith("。") and not re.search(r'[?？]', s):
         return (len(s) <= 35 and bool(re.search(
-            r'(?:如何|怎么|为什么|为何|是什么|什么是|哪些|哪几|区别|流程|机制|作用|原理|实现方式)',
+            r'(?:如何|怎么|为什么|为何|是什么|什么是|哪些|哪几|哪个|哪种|区别|流程|机制|作用|原理|实现方式)',
             s)))
     return bool(re.search(
-        r'(?:是什么|什么是|如何|怎么|为什么|为什么|为何|哪些|哪几|区别|作用|原理|流程|'
+        r'(?:是什么|什么是|如何|怎么|为什么|为什么|为何|哪些|哪几|哪个|哪种|区别|作用|原理|流程|'
         r'机制|优缺点|优点|缺点|使用场景|实现方式)', s))
 
 
@@ -768,6 +795,9 @@ def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
     # `参考：https://... 11.3.0 如何查看...` / `...图11.1.7 什么是 mongod？`
     # 先去掉 URL，再取行内层级编号之后的题干，避免引用和编号进入题干。
     line = re.sub(r'https?://\S+', ' ', line)
+    marker = re.fullmatch(r'\s*(?:#{1,6}\s+)?(\d{1,3})\s*[.、．]\s*', line)
+    if marker:
+        return int(marker.group(1)), "", "题号"
     # 行内出现“11.1.7 什么是…”这类层级编号：取最后一个编号后的题干。
     # 典型来源是网页/PDF 把“参考：URL”或上一节标题和下一节题目拼在同一行。
     for hm in reversed(list(re.finditer(r'\d{1,3}(?:\.\d{1,3}){2,3}', line))):
@@ -777,7 +807,7 @@ def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
         if (len(body) >= 4 and not _is_codeish(body)
                 and not body.startswith(("的", "了", "是", "在", "和", "与"))
                 and (_is_question_heading(body)
-                     or re.match(r'^(?:什么|如何|怎么|为什么|为何|哪些|哪几|请|简述|说说|介绍|解释|描述|实现|编写|设计|给定|求)', body))):
+                     or re.match(r'^(?:什么|如何|怎么|为什么|为何|哪些|哪几|哪个|哪种|请|简述|说说|介绍|解释|描述|实现|编写|设计|给定|求)', body))):
             return None, body, "标题"
     nested = _match_nested_number(line)
     if nested and (re.search(r'[?？]', nested[1]) or len(nested[1]) >= 4):
@@ -814,44 +844,88 @@ def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
 
 
 RE_INLINE_HIER = re.compile(r'(?<![\w./])(\d{1,4}(?:[.、．]\d{1,3}){2,})[ \t]+')
+RE_INLINE_QNO = re.compile(r'(?<![\w./()])(\d{1,3})\s*[.、．]\s*(?=[^\d\s]|$)')
+
+
+def _inline_questionish(text: str) -> bool:
+    s = strip_bold((text or "").strip())
+    if len(s) < 4:
+        return False
+    if re.match(r'^(?:作用|原理|实现方式|特点|优点|缺点|步骤|总结|注意|说明)[：:]', s):
+        return False
+    codeish = _is_codeish(s)
+    exam_signal = bool(
+        len(s) <= 240 and re.search(r'_{2,}', s)
+        and (not codeish or re.search(
+            r'寻找|计算|求出|多少|哪[一二三四五六七八九十0-9]+个|是否|如何|次数|个数|复杂度|概率|结果|输出|创建|反射|数为',
+            s)))
+    if codeish:
+        return bool(RE_QEND.search(s) or _has_question_intent(s) or exam_signal)
+    return bool(_has_question_intent(s) or _is_question_heading(s) or exam_signal)
 
 
 def _split_inline_hierarchical_lines(md_text: str) -> Tuple[List[str], List[int]]:
-    """把正文行内粘连的层级题号拆成虚拟行，同时保留原文字符偏移（review2）。
+    """把正文行内粘连的层级题号或普通题号拆成虚拟行，保留原文字符偏移。
 
     `使用命令 ... 11.3.1 什么是复制？` 中命令属于前一答案，`11.3.1` 才是新题起点。
-    拆分不改动 md_text：虚拟行的 starts 仍指向原文，source_span/a_segs 可精确回溯。
+    普通题号只在答案选项/闭标点之后且后缀有题目语义时拆分，避免误切答案列举。
     """
     source_lines = md_text.splitlines(keepends=True)
     lines: List[str] = []
     starts: List[int] = [0]
     pos = 0
-    for raw in source_lines:
-        split_at = None
+    for raw_idx, raw in enumerate(source_lines):
+        split_points: List[int] = []
         plain = raw.strip()
         if plain and not plain.startswith(("#", "```", "~~~", ">")):
-            for m in RE_INLINE_HIER.finditer(plain):
+            matches = sorted(list(RE_INLINE_HIER.finditer(plain))
+                             + list(RE_INLINE_QNO.finditer(plain)), key=lambda m: m.start())
+            for m in matches:
                 suffix = plain[m.end():].strip()
                 prefix = plain[:m.start()].strip()
-                if (prefix and len(suffix) >= 4 and not _is_codeish(suffix)
-                        and not suffix.startswith(("的", "了", "是", "在", "和", "与"))
-                        and (prefix[-1] in "）)】」』。！？!?；;：:"
-                             or _is_question_heading(suffix)
-                             or re.match(r'^(?:什么|如何|怎么|为什么|为何|哪些|哪几|请|简述|说说|介绍|解释|描述|实现|编写|设计|给定|求)', suffix))):
-                    split_at = raw.find(plain) + m.start()
-                    break
+                if not prefix:
+                    continue
+                if m.re is RE_INLINE_HIER:
+                    if (len(suffix) >= 4 and not _is_codeish(suffix)
+                            and not suffix.startswith(("的", "了", "是", "在", "和", "与"))
+                            and (prefix[-1] in "）)】」』。！？!?；;：:"
+                                 or _is_question_heading(suffix)
+                                 or re.match(r'^(?:什么|如何|怎么|为什么|为何|哪些|哪几|哪个|哪种|请|简述|说说|介绍|解释|描述|实现|编写|设计|给定|求)', suffix))):
+                        split_points.append(raw.find(plain) + m.start())
+                    continue
+                if int(m.group(1)) < 2:
+                    continue
+                option_prefix = bool(re.search(r'(?:^|\s)[A-F]\s+\S+\s*$', prefix))
+                if not (option_prefix or prefix[-1] in "）)】」』。！？!?；;：:"):
+                    continue
+                candidate = suffix
+                if not candidate:
+                    nxt = raw_idx + 1
+                    while nxt < len(source_lines) and not source_lines[nxt].strip():
+                        nxt += 1
+                    candidate = source_lines[nxt].strip() if nxt < len(source_lines) else ""
+                if _inline_questionish(candidate):
+                    qno_at = raw.find(plain) + m.start()
+                    split_points.append(qno_at)
+                    code_tail = re.search(
+                        r'(?<=[。！？!?])\s+(?=\*\*(?:public|class|package|import|#include)\b|(?:public|class|package|import)\b)',
+                        suffix)
+                    if code_tail:
+                        split_points.append(raw.find(plain) + m.end() + code_tail.start())
         end = pos + len(raw)
-        if split_at is None:
+        if not split_points:
             lines.append(raw)
             starts.append(end)
         else:
-            prefix, suffix = raw[:split_at], raw[split_at:]
-            if prefix:
-                lines.append(prefix)
-                starts.append(pos + len(prefix))
-            if suffix:
-                lines.append(suffix)
-                starts.append(end)
+            last = 0
+            for point in sorted(set(split_points)):
+                if point <= last:
+                    continue
+                lines.append(raw[last:point])
+                starts.append(pos + point)
+                last = point
+            lines.append(raw[last:])
+            starts.append(end)
         pos = end
     return lines, starts[:len(lines) + 1]
 
@@ -968,7 +1042,11 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         if s.startswith(">"):
             kinds[i] = "quote"
             continue
-        if _is_codeish(s):
+        numbered = _match_question(ln)
+        numbered_question = bool(
+            numbered and numbered[2] == "题号"
+            and (RE_QEND.search(numbered[1]) or _has_question_intent(numbered[1])))
+        if _is_codeish(s) and not numbered_question:
             kinds[i] = "code"
             continue
         if _is_promo(s):   # v2: 致谢/招聘广告短行；像题目的「广告系统设计」不剔
@@ -1097,30 +1175,6 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             last_hier_was_section = False   # 走旧路径的层级行：题区上下文
         q = _match_question(ln)
         if q is None:
-            # OCR/网页题库常见的“题号独占一行”：`1.` 下一行才是题干。
-            num_only = re.fullmatch(r'\d{1,3}[.、．]', s)
-            if num_only:
-                j = i + 1
-                while j < n and not lines[j].strip():
-                    j += 1
-                if j < n:
-                    nxt = lines[j].strip()
-                    if _is_promo(nxt):
-                        j += 1
-                        while j < n and not lines[j].strip():
-                            j += 1
-                        nxt = lines[j].strip() if j < n else ""
-                    if (len(nxt) >= 4 and not _is_codeish(nxt)
-                            and not _match_question(nxt)
-                            and not RE_LIST_ITEM.match(nxt)):
-                        qid_only = int(re.match(r'\d{1,3}', s).group())
-                        bounds.append({"line": j, "parts": [(qid_only, nxt)], "style": "题号"})
-                        last_qid = qid_only
-                        prev_blank = False
-                        list_active = False
-                        list_pending = False
-                        last_problem_mark = False
-                        continue
             # F4a（金标 075 分⻚/分段）：PDF 粘连的“节标题+面试官问句”整行，
             # 题号被 RE_DECIMAL 吞掉后真问题随行丢失/被吸入上一题答案。
             # 剥出面试官问句部分成题，节标题前缀丢弃。
@@ -1158,9 +1212,10 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             # R2' 同口径（空行前置或问题N 武装；非列表项、非小数、长度受限）。
             # 解锁讲解型 md（面向字节/连环炮系列：无数字题号，题干即独立问句行）。
             inner = strip_bold(s)
+            fill_blank_question = bool(re.search(r'_{2,}', inner) and _is_qline(inner))
             standalone = (7 < len(inner) <= 160
                     and not RE_LIST_ITEM.match(inner) and not RE_DECIMAL.match(inner)
-                    and not inner.rstrip().endswith(("：", ":"))
+                    and (not inner.rstrip().endswith(("：", ":")) or fill_blank_question)
                     and not _is_codeish(inner))
             if standalone and (
                     ((prev_blank or last_problem_mark) and _is_qline(inner))
@@ -1175,6 +1230,36 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         qtext = re.sub(r'^\d{1,3}\s*[，,]\s*', '', qtext)
         qtext = qtext.replace("**", "").strip().lstrip("、，,。；;：:")
         qtext = _strip_explanation_tail(qtext)
+        if style == "题号" and not qtext:
+            j = i + 1
+            while j < n and not lines[j].strip():
+                j += 1
+            if j < n:
+                nxt = lines[j].strip()
+                if _is_promo(nxt):
+                    j += 1
+                    while j < n and not lines[j].strip():
+                        j += 1
+                    nxt = lines[j].strip() if j < n else ""
+                if (len(nxt) >= 4 and _inline_questionish(nxt)
+                        and not _match_question(nxt) and not RE_LIST_ITEM.match(nxt)):
+                    kinds[i] = "section"
+                    bounds.append({"line": j, "parts": [(qid, nxt)], "style": "题号"})
+                    last_qid = qid
+                    prev_blank = False
+                    list_active = False
+                    list_pending = False
+                    last_problem_mark = False
+                    continue
+            kinds[i] = "section"
+            following = lines[j].strip() if j < n else ""
+            if (qid is not None and last_qid is not None and qid == last_qid + 1
+                    and following and not _match_question(following)
+                    and not RE_LIST_ITEM.match(following) and not _is_codeish(following)):
+                last_qid = qid
+            prev_blank = True
+            last_problem_mark = False
+            continue
         # F5c（金标 028 S0348）：叙述行“1、上来照例还是问了问项目：”
         # 有题号但整行是面经叙事，不是题；成题会偷走后面的叙述内容。
         # 结尾标点是面经叙述的常见收束（：/；），两者都按叙述行拦。
@@ -1335,8 +1420,8 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             last_problem_mark = False
             continue
         if (not md_num_heading and (list_active or list_pending or implicit_list)
-                and not explicit_question
-                and not _is_list_item_question(qtext)):
+                and not qtext.rstrip().endswith(("?", "？")) and not strong_subq
+                and not explicit_question and not _is_list_item_question(qtext)):
             list_active = True
             list_pending = False
             prev_blank = False
@@ -1527,7 +1612,8 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         if _tokens(b["q_text"] + b["a_text"]) <= MAX_TOKENS or not b["a_text"]:
             out.append(b)
             continue
-        head_end = b["source_span"][0] + head_len_of(md_text, b["source_span"][0])
+        head_end = (b["a_segs"][0][0] if b.get("a_segs")
+                    else b["source_span"][0] + head_len_of(md_text, b["source_span"][0]))
         parts = _paras_with_spans(b["a_text"], head_end)
         runs, acc, acc_tok, run_start = [], "", 0, None
         for ptext, (ps, pe) in parts:
@@ -1540,7 +1626,10 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             acc += ptext
             acc_tok += pt
         if acc:
-            runs.append((acc, [run_start, b["source_span"][1]]))
+            last_end = (b["a_segs"][-1][1] if b.get("a_segs") else b["source_span"][1])
+            while last_end > run_start and md_text[last_end - 1] == "\n":
+                last_end -= 1
+            runs.append((acc, [run_start, last_end]))
         for j, (atext, span) in enumerate(runs):
             nb = dict(b)
             nb.pop("a_segs", None)      # a_text 已被再切，行级映射失效 → 走旧口径（R8 块仅用于续并）

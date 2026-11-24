@@ -383,3 +383,297 @@ Mybatis 使用 RowBounds 进行内存分页，也可以使用 PageHelper 分页�
     assert sum("Executor" in q for q in qs) == 1
     assert any("RowBounds" in x["a"] for x in v2["items"] if "分页" in x["q"])
     assert any("SimpleExecutor" in x["a"] for x in v2["items"] if "Executor" in x["q"])
+
+
+def test_numbered_task_questions_override_answer_list_state():
+    md = """14.Kafka 与传统消息系统之间有三个关键区别
+
+(1).Kafka 持久化日志，这些日志可以被重复读取和无限期保留
+
+15.Kafka 创建 Topic 时如何将分区放置到不同的 Broker 中
+
+(1).副本因子不能大于 Broker 的个数
+
+16.Kafka 新建的分区会在哪个目录下创建
+
+在启动 Kafka 集群之前，需要配置 log.dirs 参数。
+
+17.partition 的数据如何保存到硬盘
+
+topic 中的多个 partition 以文件夹形式保存。
+
+18、讲讲 kafka 维护消费状态跟踪的方法
+
+Kafka 通过 offset 标记消费状态。
+
+19.kafka 的 ack 机制
+
+request.required.acks 有三个值。
+
+20.Kafka 的消费者如何消费数据
+
+消费者记录消费的物理偏移量。
+
+21.消费者负载均衡策略
+
+一个消费者组中的一个分片对应一个消费者成员。
+
+22.数据有序
+
+一个消费者组内部有序，组之间无序。
+
+23.kafaka 生产数据时数据的分组策略
+
+key 决定数据生产到哪个 partition。
+
+24.Kafka中的消息是否会丢失和重复消费？
+
+需要从发送和消费两方面分析。
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [x["q"] for x in v2["items"]]
+    for text in ("创建 Topic", "哪个目录", "保存到硬盘", "维护消费状态", "ack 机制",
+                 "如何消费数据", "负载均衡策略", "数据有序", "分组策略"):
+        assert any(text in q for q in qs), text
+    first = v2["items"][0]
+    assert "持久化日志" in first["a"]
+    assert "创建 Topic" not in first["a"]
+    assert "Kafka中的消息是否会丢失" in qs[-1]
+
+
+def test_number_only_markers_arm_following_question_stem():
+    md = """# 阿里巴巴笔试
+
+1.
+
+如图所示，从A点发出一束激光，那么最多反射次数是____。
+
+A 6 B 10 C 12
+
+2.
+
+假定CSomething是一个类，执行下面这些语句之后，内存里创建了____个对象。
+
+A 10 B 9 C 8
+
+### 3.
+
+检查程序，是否存在问题，如果存在指出问题所在，如果不存在，说明输出结果。
+
+A 0 B 1 C 2
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [x["q"] for x in v2["items"]]
+    assert len(v2["items"]) == 3, qs
+    assert any("最多反射次数" in q for q in qs)
+    assert any("创建了____个对象" in q for q in qs)
+    assert any("检查程序" in q for q in qs)
+    assert all(q.strip() for q in qs)
+
+
+def test_numbered_formula_question_is_not_code():
+    md = """1. 什么是 JVM？
+
+JVM 是 Java 虚拟机。
+
+3. 假设某商品在下一时刻无人浏览的概率为0.35，定义条件概率为P(O_{t+1}=0|O_t=1)=0.35，则t=100000时有人浏览的概率是____。
+
+A 0.5371 B 0.4582 C 0.6316
+
+4. 猜数字游戏的过程是你输入一个4位数，电脑会告诉你0A4B，那么最少还要猜____次。
+
+A 0 B 1 C 2
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [x["q"] for x in v2["items"]]
+    assert any("条件概率" in q for q in qs), qs
+    formula = next(x for x in v2["items"] if "条件概率" in x["q"])
+    assert "0.5371" in formula["a"]
+    assert any("猜数字游戏" in q for q in qs)
+
+
+def test_inline_numbered_question_splits_from_code_and_options():
+    md = """3. 检查程序，是否存在问题，如果存在指出问题所在，如果不存在，说明输出结果。
+
+**public class Inc { public static void main(String[] args) { int i = 0; i = i++; } }** A 0 B 1 C 2 D 3 4. 检查程序，是否存在问题，如果存在指出问题所在，如果不存在，说明输出结果。 **public class Example { public static void main(String[] args) { } }**
+
+A test ok B test bad
+
+5. 下列关于Spring特性中IoC描述错误的是：
+
+- A IoC是控制反转
+- B IoC是依赖注入
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [x["q"] for x in v2["items"]]
+    assert len([q for q in qs if "检查程序" in q]) == 2, qs
+    checks = [x for x in v2["items"] if "检查程序" in x["q"]]
+    assert "class Inc" in checks[0]["a"]
+    assert "class Example" not in checks[0]["a"]
+    assert "class Example" in checks[1]["a"]
+    assert any("Spring特性" in q for q in qs)
+
+
+def test_inline_markers_and_fill_blank_questions_split_exam_tail():
+    md = """16. Linux下两个进程可以同时打开同一个文件，这时如下描述错误的是：
+
+- A 两个进程分别产生两个独立的fd
+- F 一个进程的修改另一个进程可以立即感知
+
+## 17.
+
+考虑以下二分查找的代码：
+
+**int bsearch(int array[], int n, int v) { int left = 0; int right = n - 1; }** 对于输入array为{2, 6, 8, 10}，n=4，v=10时，while循环调用的次数为____。 A 1 B 3 C 4 D 5 E 6 F 无数次 18.
+
+对于输入array为{2, 6, 8, 10}，n=4，v=10时，while循环调用的次数为____。
+
+在一个axb的整数矩阵中，寻找最长的严格递减数字序列，该问题的最优复杂度是____。举例来说，以下是一个3x5的矩阵，其结果如下：
+
+A O(M*N) B O(M+N) C O(MlogN)
+
+19. 设一棵二叉树有3个叶子节点，有8个度为1的节点，则该二叉树中总的节点数为______。 A 12 B 13 C 14 D 15 E 16 F 17 20. 一台机器对200个单词进行排序花了200秒，那么花费800秒，大概可以对多少个单词进行排序 A 400 B 500 C 600
+
+D 700 E 800 F 900
+"""
+    v2 = chunker.chunk_v2(md)
+    qs = [x["q"] for x in v2["items"]]
+    assert any("二分查找" in q for q in qs), qs
+    assert sum("while循环调用的次数" in q for q in qs) == 1, qs
+    assert any("整数矩阵" in q for q in qs), qs
+    assert any("二叉树" in q for q in qs), qs
+    assert any("200个单词" in q for q in qs), qs
+    q17 = next(x for x in v2["items"] if "二分查找" in x["q"])
+    q18 = next(x for x in v2["items"] if "while循环调用的次数" in x["q"])
+    matrix = next(x for x in v2["items"] if "整数矩阵" in x["q"])
+    tree = next(x for x in v2["items"] if "二叉树" in x["q"])
+    sorting = next(x for x in v2["items"] if "200个单词" in x["q"])
+    assert "18." not in q17["a"]
+    assert "整数矩阵" not in q18["a"]
+    assert "二叉树" not in matrix["a"]
+    assert "200个单词" not in tree["a"]
+    assert "D 700" in sorting["a"]
+
+
+def test_numbered_code_count_lines_are_not_questions():
+    md = """1. 什么是计数器？
+
+计数器用于记录数量。
+
+1. int count = 0; // 当前多少
+
+2. int limit = 10; // 最多多少
+
+2. 计数器溢出怎么办？
+
+检查边界。
+"""
+    items = chunker.chunk_v2(md)["items"]
+    qs = [x["q"] for x in items]
+    assert len(items) == 2, qs
+    assert not any("int count" in q or "int limit" in q for q in qs)
+    assert "int count" in items[0]["a"] and "int limit" in items[0]["a"]
+
+
+def test_answer_list_labels_and_count_statements_stay_merged():
+    md = """## 1、说说 Redis 集群
+
+答案要点：
+
+1. 索引优化
+
+建立合适的索引。
+
+2. 作用：保证数据一致
+
+3. 当前最多可以保存多少个键
+
+由配置决定。
+"""
+    items = chunker.chunk_v2(md)["items"]
+    assert len(items) == 1, [x["q"] for x in items]
+    answer = items[0]["a"]
+    assert "作用：保证数据一致" in answer
+    assert "当前最多可以保存多少个键" in answer
+
+
+def test_number_only_marker_does_not_arm_plain_answer_text():
+    md = """1. 什么是缓存？
+
+缓存用于加速读取。
+
+2.
+
+这里只是普通答案说明，不是新的题干。
+
+3. 什么是数据库？
+
+数据库用于持久化存储。
+"""
+    items = chunker.chunk_v2(md)["items"]
+    qs = [x["q"] for x in items]
+    assert not any("普通答案说明" in q for q in qs), qs
+    cache = next(x for x in items if "缓存" in x["q"])
+    assert "普通答案说明" in cache["a"]
+    assert any("数据库" in q for q in qs)
+
+
+def test_inline_answer_subheading_is_not_split_after_options():
+    md = """1. 以下哪些描述正确？
+
+A 支持持久化 B 支持分片 2. 实现方式：主从复制
+
+主从复制是答案小节。
+"""
+    items = chunker.chunk_v2(md)["items"]
+    assert len(items) == 1, [x["q"] for x in items]
+    assert "实现方式：主从复制" in items[0]["a"]
+
+
+def test_inline_code_tail_keeps_long_answer_spans_aligned():
+    md = ("3. 检查程序，是否存在问题。\n\n"
+          "**public class Inc {}** A 0 B 1 C 2 D 3 "
+          "4. 检查程序，是否存在问题。 **public class Example { public static void main(String[] args) { } }**\n\n"
+          + "\n\n".join(f"第{i}段：" + "详细答案内容。" * 80 for i in range(1, 8))
+          + "\n\n5. 下一题\n\n下一答案。\n")
+    blocks = chunker.chunk(md, split_long=True)["blocks"]
+    continuations = [b for b in blocks if b["qid"] == 4 and b["style"].endswith("/续")]
+    assert continuations
+    for block in continuations:
+        start, end = block["source_span"]
+        assert md[start:end] == block["a_text"]
+
+
+def test_math_task_stems_override_code_punctuation():
+    md = """1. 假设某事件概率为P(A)=0.35，定义条件概率为P(B|A)=0.65，则后续概率是____。
+
+A 0.35 B 0.65
+
+2. 猜数字游戏输入0789后得到0A4B，那么最少还要猜____次。
+
+A 0 B 1
+"""
+    items = chunker.chunk_v2(md)["items"]
+    assert len(items) == 2, [x["q"] for x in items]
+    assert "条件概率" in items[0]["q"]
+    assert "猜数字游戏" in items[1]["q"]
+
+
+def test_long_fill_blank_candidate_splits_after_options():
+    stem = "对于输入array为{2, 6, 8, 10}，运行查找函数，循环调用的次数为____。"
+    stem = ("重复说明：" * 32) + stem
+    assert len(stem) > 180
+    md = f"""1. 考虑以下查找代码：
+
+int search(int n) {{ return n; }}
+
+A 1 B 2 C 3 2.
+
+{stem}
+
+A 1 B 2
+"""
+    items = chunker.chunk_v2(md)["items"]
+    assert len(items) == 2, [x["q"] for x in items]
+    assert items[1]["q"] == stem
+    assert "A 1 B 2" in items[1]["a"]

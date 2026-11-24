@@ -27,6 +27,14 @@
     其中 `--limit -1` 在另外 6 个入口仍存在。
   - 门禁：五个定向测试文件 **163 passed**；ruff 0 告警；compileall / pip wheel 通过；
     全量 pytest **919 passed / 5 skipped / 6 xfailed**（930 collected）；privacy_scan 307 文件 0 命中。
+- **真实样本抽查后的编号题边界完善**：Kafka / 网易 / 阿里三篇临时语料回放显示后续编号题被粘进
+  上一题答案；`chunker` 补齐纯题号、Markdown 编号标题、行内普通题号、任务句/填空题语义与列表状态边界，
+  并修正 R8 超长续块的 `a_segs` 精确偏移，新增 11 组回归。raw 题数分别从 17 / 8 / 10 提升到
+  26 / 11 / 21；extract 为 26 / 8 / 21，空题干均为 0。网易四个同题干“检查程序”仍按既有 `q_key`
+  去重，阿里 21 题含 OCR 重复候选，两者保留人工复核项，不改稳定身份或 schema；生产库与语料未动。
+  - 门禁：全量 pytest **931 passed / 5 skipped / 6 xfailed**（942 collected，75.49 s）；ruff 0 告警；
+    compileall / pip wheel 通过；privacy_scan 307 文件 0 命中。`doc_audit` 仍只有 docs/52、57、58、59
+    四篇既有 `missing_status_header`，本次未新增；`chunk_regress --check` PASS。
 
 ## 2026-11-24
 
