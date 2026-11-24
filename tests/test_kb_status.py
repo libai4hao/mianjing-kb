@@ -79,6 +79,40 @@ def test_gate_line_marks_stale_verdict_invalid():
     assert "verdict=PASS" in fresh and "INVALID" not in fresh
 
 
+@pytest.mark.parametrize("raw", ["ABORT", "ROLLED_BACK", "ROLLBACK_FAILED", "UNKNOWN", None, ""])
+def test_gate_unknown_verdict_is_invalid(mini_env, raw):
+    """ISSUE-02：只有明确的 PASS/FAIL 才是结论；中断/回滚/缺失一律 INVALID。
+
+    旧实现 `("FAIL" if verdict == "FAIL" else "PASS")` 会把 ABORT 当 PASS。
+    """
+    build = mini_env
+    kb_id = ks._identity(config.DB_PATH)
+    out_id = ks._identity(build / "missing-output.db")
+    summary = {"at": "2026-11-23T10:00:00", "hard_fail": 0, "gates": {},
+               "db_identity": {"kb": kb_id, "out": out_id}}
+    if raw is not None:
+        summary["verdict"] = raw
+    (build / "verify_report.json").write_text(
+        json.dumps({"summary": summary, "gates_detail": []}), encoding="utf-8")
+    gates = ks._gate_summary(build, kb_id, out_id)
+    assert gates["state"] == "INVALID"
+    assert gates["verdict"] == "INVALID"
+    line = ks._gate_line(gates)
+    assert "verdict=PASS" not in line
+
+
+def test_gate_fresh_pass_stays_pass(mini_env):
+    build = mini_env
+    kb_id = ks._identity(config.DB_PATH)
+    out_id = ks._identity(build / "missing-output.db")
+    report = {"summary": {"at": "2026-11-23T10:00:00", "verdict": "PASS", "hard_fail": 0,
+                          "gates": {}, "db_identity": {"kb": kb_id, "out": out_id}},
+              "gates_detail": []}
+    (build / "verify_report.json").write_text(json.dumps(report), encoding="utf-8")
+    gates = ks._gate_summary(build, kb_id, out_id)
+    assert gates["state"] == "PASS" and gates["verdict"] == "PASS"
+
+
 def test_missing_kb_does_not_crash(tmp_path, monkeypatch):
     corpus = tmp_path / "corpus"
     build = corpus / "21-面经数据库" / "build"

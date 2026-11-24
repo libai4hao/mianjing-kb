@@ -167,7 +167,29 @@ RE_LIST_INTRO = re.compile(
 RE_SECTION_TITLE = re.compile(
     r'^(?:第\s*[一二三四五六七八九十0-9]+\s*[章节篇]|'
     r'[一二三四五六七八九十]+[、.．]\s*)?.{1,48}'
-    r'(?:面试题|基础篇|进阶篇|提高篇|专题|章节|目录|总结|概述|知识点汇总|题库)\s*[:：。．]?$')
+    r'(?:面试题|基础篇|进阶篇|提高篇|专题|章节|目录|总结|汇总|概述|知识点汇总|题库)'
+    r'\s*[:：。．]?$')
+# 段落标题的"意图闸"：词尾命中上面那串词、但句子里有明显提问/比较语义时，
+# 它是真题不是章节（"为什么要使用 Executor 线程池框架"曾被一刀切成章节，2026-11-24）。
+# 词表只加"面试题汇总"这一项——实测再加 基础/篇/框架/经验 会让 20 篇回归语料的
+# 弱题（章节标题/碎句被当题）从 477 涨到 490，属于用 P0 换 P0（见 docs/52 §3）。
+RE_TITLE_INTENT = re.compile(
+    r'(?:为什么|为何|如何|怎样|怎么|什么|哪些|哪个|哪一种|是否|能否|多少|区别|对比|用过|吗)')
+SECTION_TITLE_MAXLEN = 24      # 章节标题都是短标签；长句即使以"框架/经验"结尾也不是标题
+
+
+def _is_section_title(text: str) -> bool:
+    """章节标题判定：词尾模式 + 长度 + 无提问语义（三关都过才算）。
+
+    只靠词尾模式会把真题误杀——实测生产库里 33 条以"框架/编程/提高"结尾的题干
+    （如"为什么要使用Executor 线程池框架"）会被判成章节并截断答案。
+    """
+    s = unicodedata.normalize("NFKC", (text or "").strip())
+    if not s or len(s) > SECTION_TITLE_MAXLEN:
+        return False
+    if "？" in s or "?" in s or RE_TITLE_INTENT.search(s):
+        return False
+    return bool(RE_SECTION_TITLE.match(s))
 
 
 def _strip_all_numbering(text: str) -> str:
@@ -357,7 +379,7 @@ def _local_outline_mask(lines: List[str], blocked: set[int]) -> set[int]:
             intervening = [x.strip() for x in lines[idx + 1:next_q] if x.strip()]
             has_answer = any(
                 _qnorm_len(x) >= 18
-                and not RE_SECTION_TITLE.match(unicodedata.normalize("NFKC", x))
+                and not _is_section_title(x)
                 for x in intervening)
             if not has_answer:
                 out.add(idx)
@@ -368,8 +390,7 @@ def _local_outline_mask(lines: List[str], blocked: set[int]) -> set[int]:
     def _run_answer_len(intervening: List[str]) -> int:
         total = 0
         for x in intervening:
-            nfkc = unicodedata.normalize("NFKC", x)
-            if RE_SECTION_TITLE.match(nfkc):
+            if _is_section_title(x):
                 continue
             if _match_question(x):
                 continue
@@ -1176,7 +1197,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                 # review2：真章节标题是硬边界——结束当前答案、重置题号，
                 # 并进 leftovers(章节标题) 参与 coverage 扣除；答案小节标题仍留答案区。
                 if (s.startswith("# ") or _looks_section_line(qtext)
-                        or "面试题" in qtext or RE_SECTION_TITLE.match(qtext)):
+                        or "面试题" in qtext or _is_section_title(qtext)):
                     kinds[i] = "section"
                     last_qid = None
                 list_active = False
@@ -1268,11 +1289,11 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                     re.sub(r'^\d{1,3}\s*[.、．]\s*', '', p)) for p in parts)
             if heading_q and (strong_q
                     or (not answer_subpoint_restart and not answer_label
-                        and not RE_SECTION_TITLE.match(qtext.strip())
+                        and not _is_section_title(qtext)
                         and not RE_LIST_INTRO.search(qtext.strip()))):
                 pass  # 落 new_q（旧行为）
             elif (answer_subpoint_restart or answer_label
-                    or RE_SECTION_TITLE.match(qtext.strip())
+                    or _is_section_title(qtext)
                     or RE_LIST_INTRO.search(qtext.strip())
                     or len(qtext.strip()) <= 40):
                 list_active = False

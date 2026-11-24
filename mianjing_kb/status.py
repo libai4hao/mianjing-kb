@@ -228,14 +228,25 @@ def _gate_summary(build_dir: Path, kb_id: dict, out_id: dict) -> dict:
         age = int(time.time() - (build_dir / "verify_report.json").stat().st_mtime)
     except OSError:
         pass
-    state = "STALE" if stale else ("FAIL" if summary.get("verdict") == "FAIL" else "PASS")
+    raw_verdict = summary.get("verdict")
+    # 只有当前数据库指纹匹配且 verdict 明确为 PASS/FAIL，才算有效结论（ISSUE-02）。
+    # ABORT / ROLLED_BACK / ROLLBACK_FAILED / None / 未知值一律 INVALID——
+    # 旧代码把"不是 FAIL"当天真 PASS，会把中断/回滚的报告当通过。
+    if stale:
+        state, verdict = "STALE", "INVALID"
+    elif raw_verdict == "PASS":
+        state, verdict = "PASS", "PASS"
+    elif raw_verdict == "FAIL":
+        state, verdict = "FAIL", "FAIL"
+    else:
+        state, verdict = "INVALID", "INVALID"
     if not stale and age is not None and age > STALE_SEC:
         # 文件旧但库没变仍是有效结论；单独标 age 供人判断，不升级为 STALE
         pass
-    # 过期报告的 verdict 不作数：库里已变，PASS 是对旧库的结论（P0-2，docs/47）
-    effective = "INVALID" if stale else summary.get("verdict")
-    return {"present": True, "state": state, "verdict": summary.get("verdict"),
-            "effective_verdict": effective,
+    # 兼容旧键：effective_verdict 与 verdict 同值，避免下游读到原始 PASS（P0-2，docs/47）
+    effective = verdict
+    return {"present": True, "state": state, "verdict": verdict,
+            "effective_verdict": effective, "raw_verdict": raw_verdict,
             "at": summary.get("at"), "age_sec": age, "stale": stale,
             "stale_reasons": reasons, "gates": summary.get("gates"),
             "hard_fail": summary.get("hard_fail")}

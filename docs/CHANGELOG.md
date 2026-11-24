@@ -6,6 +6,30 @@
 > 一律以 `docs/29-数据基线与统计口径-2026-11-19.md` 为准。历史里程碑按日期倒序。
 > 2026-11-16 之前的记录见 `docs/archive/` 与 git 历史，本表从外部 review 落地开始。
 
+## 2026-11-24
+
+- **外部 review（mianjing-kb-main(3).zip）ISSUE-01/02/05/06/07 落地**：
+  - `chunker`：章节标题只加 `汇总` 一个词（覆盖"面试题汇总"），并抽出 `_is_section_title()`
+    加三道闸（长度 ≤24、无 `？`、无提问词）后统一四个调用点、统一 NFKC。补丁原提议的
+    `基础/进阶/提高/篇/经验/编程/框架/技术栈/知识体系` 实测会让 20 篇回归语料弱题 477→490，
+    且生产库会误杀"为什么要使用 Executor 线程池框架"等真题，故不采用（`docs/52` §3）。
+    新增 `tests/test_chunker_title_regression.py`（4 个已覆盖标题 + 6 个 xfail 已知缺口 +
+    10 真题正例 + 4 条生产反例）；`python -m mianjing_kb.chunk_regress --check` PASS。
+  - `status`：`verdict` 只认明确 `PASS/FAIL`；`STALE` 一律 `INVALID`，`ABORT/ROLLED_BACK/
+    ROLLBACK_FAILED/UNKNOWN/缺失` 也映射 `INVALID`（旧实现"不是 FAIL 即 PASS"）。
+  - `llm_client.redact`：新增本机绝对路径遮罩（Windows 盘符、UNC、`/home`、`/Users`、
+    `/mnt/<drive>/Users`，带空格路径走引号分支），并保证技术 URL 的 path 不被误遮。
+  - `taxonomy.prompt_lines`：超预算不再静默——`prompt_stats()` 给出省略的分组/标签数，
+    `prompt_lines` 同时向 stderr 打警告。
+  - `extract --limit`：负数在解析后立刻 `ap.error`（Python 切片会把 `-1` 解释成"除最后一件外全做"）；
+    `0` 仍表示不限制。
+- **口径文档修正**：`docs/29` 标为 2026-11-19 历史快照（原先自称"唯一现行基线"），`docs/32` 标注
+  §4 为中间快照、当前数量以 `docs/51 §8` 为准，`docs/README` 规则 3 同步；`docs/32` 补
+  "只有 PASS/FAIL 才是结论"。
+- **review 报告中的数据类结论已过期**：报告称"标签覆盖 0.18%（36 条）、金标 0、空答案 26.46%"，
+  那是 `docs/47` 时点。当前（`docs/51 §8`）：有标签 17,090、金标 60（G6b PASS）、
+  待打标 49、空答案 1,035；补答与打标均已落库，不需要按报告的"冻结标签体系"建议回退。
+
 ## 2026-11-23
 
 - **首批打标 500 条 + 词表对齐（`docs/50`）**：`meta/topic_rules.yaml` 新增 `label_topics`

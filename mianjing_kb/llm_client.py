@@ -229,7 +229,18 @@ _RE_BANK_ACCOUNT = re.compile(
 )
 REDACT_MARK = "[联系方式]"
 PERSON_MARK = "[个人信息]"
+PATH_MARK = "[本机路径]"
 KEY_MARK = "[LLM_KEY]"
+# 本机绝对路径（ISSUE-05）：题干/答案里常带盘符路径（`<盘符>:\<用户目录>\…`）或 POSIX 家目录前缀。
+# 这类路径既是个人信息（用户名）又是本机目录结构，外发前必须遮罩。
+# 前一个字符不能是字母/数字/下划线/斜杠/冒号——避免把 URL 里同名家目录片段当成路径；
+# 中文字符不在排除集里，所以"路径是" + 盘符开头仍能命中。带空格的路径需原文加引号。
+_RE_LOCAL_PATH_QUOTED = re.compile(r'''(["'])((?:[A-Za-z]:\\|\\\\)[^\r\n]*?)\1''')
+_RE_LOCAL_PATH = re.compile(
+    r"""(?<![A-Za-z0-9_/\\:])"""
+    r"""(?:[A-Za-z]:\\[^\s<>"'，,。；;、）)】]+"""
+    r"""|\\\\[^\s\\/]+\\[^\s\\/]+\\[^\s<>"'，,。；;、）)】]+"""
+    r"""|/(?:home|Users|mnt/[a-z]/Users)/[^\s<>"'，,。；;、）)】]+)""")
 # 技术文档 URL 是题干上下文，保留 host/path；只清洗 userinfo 和敏感 query。
 _RE_URL = re.compile(r"https?://[^\s，。；）)】]+")
 _RE_SENSITIVE_QUERY = re.compile(
@@ -289,7 +300,7 @@ def scrub_secret(text: str, cfg: dict | None = None) -> str:
 
 
 def redact(text: str) -> tuple[str, bool]:
-    """遮罩常见结构化联系方式、姓名/地址标签、护照和银行账号。
+    """遮罩本机绝对路径及常见结构化联系方式、姓名/地址标签、护照和银行账号。
 
     这不是通用 NER：无法保证识别没有字段标签的自由文本姓名/住址；online 请求另需显式
     LLM_ALLOW_CONTENT_UPLOAD=1，授权后仍只发送本函数处理过的文本。
@@ -308,6 +319,19 @@ def redact(text: str) -> tuple[str, bool]:
         if new_text != text:
             hit = True
             text = new_text
+
+    # 先遮引号路径（允许空格），再遮裸路径；都保留原引号/边界字符，避免把句子吞掉。
+    def _quoted(m: re.Match) -> str:
+        nonlocal hit
+        hit = True
+        return f"{m.group(1)}{PATH_MARK}{m.group(1)}"
+
+    text = _RE_LOCAL_PATH_QUOTED.sub(_quoted, text)
+    new_text = _RE_LOCAL_PATH.sub(PATH_MARK, text)
+    if new_text != text:
+        hit = True
+        text = new_text
+
     for rx in (_RE_IDCARD, _RE_PHONE, _RE_EMAIL, _RE_WECHAT):
         _sub(rx)
 

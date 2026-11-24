@@ -162,12 +162,45 @@ def export_yaml(conn, path: Path) -> Path:
     return path
 
 
+def prompt_stats(tax: dict | None = None, max_groups: int = 14,
+                 max_tags: int = 170) -> dict:
+    """prompt 词表覆盖统计：超预算时被省略的分组/标签数（ISSUE-06）。
+
+    截断本身保留（prompt 不能无限长），但必须可观测：调用方能看到"词表 131 项、
+    实际进 prompt 131 项 / 省略 0 项"。
+    """
+    tax = tax or _yaml_snapshot()
+    groups = tax["groups"]
+    budget = max_tags
+    tags_total = sum(len(g["level2"]) for g in groups)
+    tags_in = groups_in = 0
+    for g in groups[:max_groups]:
+        if budget <= 0:
+            break
+        n = len(g["level2"][:budget])
+        tags_in += n
+        budget -= n
+        groups_in += 1
+    return {"groups_total": len(groups), "groups_included": groups_in,
+            "tags_total": tags_total, "tags_included": tags_in,
+            "tags_dropped": tags_total - tags_in,
+            "groups_dropped": len(groups) - groups_in,
+            "max_groups": max_groups, "max_tags": max_tags}
+
+
 def prompt_lines(tax: dict | None = None, max_groups: int = 14, max_tags: int = 170) -> str:
     """prompt 用的一二级分组摘要：`Java（JVM、集合…）；数据库（索引…）`。
 
     预算按当前词表规模（12 组 / 131 项，2026-11-23 P1 升格后）留余量；新增分组后不要回落到截断。
+    一旦超预算，向 stderr 打一条带数量的警告——静默丢标签会让模型永远学不到那批词。
     """
     tax = tax or _yaml_snapshot()
+    st = prompt_stats(tax, max_groups=max_groups, max_tags=max_tags)
+    if st["tags_dropped"] or st["groups_dropped"]:
+        print(f"[warn] taxonomy prompt 超预算：标签 {st['tags_included']}/{st['tags_total']}"
+              f"（省略 {st['tags_dropped']}），分组 {st['groups_included']}/{st['groups_total']}"
+              f"（省略 {st['groups_dropped']}）；调大 --max-groups/--max-tags 或精简词表",
+              file=sys.stderr)
     parts = []
     budget = max_tags
     for g in tax["groups"][:max_groups]:

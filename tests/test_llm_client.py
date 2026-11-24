@@ -491,3 +491,29 @@ def test_local_loopback_needs_no_opt_in(monkeypatch):
     assert cfg["local_endpoint"] is True
     assert chat(cfg, "s", "u", retries=1)["text"] == "ok"
     assert len(calls) == 1 and calls[0]["messages"][1]["content"].endswith("/no_think")
+
+
+def test_redact_local_absolute_paths_without_touching_urls(tmp_path):
+    """ISSUE-05：本机绝对路径（Windows 盘符/UNC/POSIX home/WSL）外发前必须遮罩。
+
+    Windows 路径用运行时 tmp_path（公开仓库不写本机绝对路径）；
+    POSIX/WSL 用片段拼接，避免把形似家目录的串落进仓库。
+    技术 URL 的 path 不能误伤（`https://example.com/user/x` 要原样保留）。
+    """
+    win = str(tmp_path / "Documents" / "resume.pdf")
+    win2 = str(tmp_path / "Private" / "面经.pdf")
+    quoted = str(tmp_path / "Alice Smith" / "file.pdf")
+    posix = "/".join(["", "home", "demo", "private", "resume.pdf"])
+    wsl = "/".join(["", "mnt", "c", "Users", "demo", "resume.pdf"])
+    unc = "\\\\server\\share\\users\\source.docx"
+
+    raw = (f"资料 {win} 请查收；备份 {win2}；UNC {unc}；"
+           f"home {posix}；wsl {wsl}；quoted \"{quoted}\"；"
+           "参考 https://example.com/docs/path 与 https://example.com/user/alice/doc")
+    clean, hit = redact(raw)
+    assert hit
+    for secret in (str(tmp_path), posix, wsl, "\\\\server\\share", quoted):
+        assert secret not in clean
+    assert "https://example.com/docs/path" in clean
+    assert "https://example.com/user/alice/doc" in clean
+    assert "请查收" in clean

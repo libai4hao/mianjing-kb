@@ -145,3 +145,16 @@ def test_offline_rule_label(conn):
     assert row["qtype"] == "算法" and row["difficulty"] == 3
     assert row["canonical_q"] == "手写 LRU 缓存"
     assert json.loads(row["tags"])                                 # 至少命中一个二级标签
+
+
+def test_prompt_budget_reports_omissions(conn, capsys):
+    """ISSUE-06：超预算不得静默截断——要给出省略数量并在 stderr 警吿。"""
+    tax = taxonomy.load(conn)
+    st = taxonomy.prompt_stats(tax)
+    assert st["tags_dropped"] == 0 and st["groups_dropped"] == 0   # 当前 12 组/131 项仍在预算内
+    taxonomy.prompt_lines(tax, max_groups=2, max_tags=3)
+    err = capsys.readouterr().err
+    assert "超预算" in err and "省略" in err
+    small = taxonomy.prompt_stats(tax, max_groups=2, max_tags=3)
+    assert small["tags_included"] <= 3 and small["tags_dropped"] > 0
+    assert small["groups_included"] == 1        # 第一组就把 3 个预算用完

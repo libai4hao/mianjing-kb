@@ -444,3 +444,15 @@ def test_text_of_preserves_heading_markers(tmp_env):
     assert "para\n\n## 2." in out.replace("\r\n", "\n")
     assert "# 供服务" not in out and "供服务自动注册" in out
 
+
+
+def test_negative_limit_is_rejected_before_database_access(tmp_env):
+    """ISSUE-07：--limit -1 会被切片解释成"除最后一件外全做"，必须在解析后立刻拒绝。"""
+    with pytest.raises(SystemExit) as exc:
+        extract.main(["--db", str(config.DB_PATH), "--limit", "-1", "--dry-run"])
+    assert exc.value.code == 2
+
+
+def test_zero_limit_still_means_unlimited(tmp_env):
+    """0 保持"不限制"语义，不能被误拦。"""
+    assert extract.main(["--db", str(config.DB_PATH), "--limit", "0", "--dry-run"]) == 0

@@ -503,6 +503,9 @@ def main(argv=None) -> int:
     ap.add_argument("--allow-empty-overwrite", action="store_true",
                     help="允许 0 题结果覆盖已有旧题（默认保留旧题并告警）")
     args = ap.parse_args(argv)
+    if args.limit < 0:
+        # Python 切片允许负数：--limit -1 会处理"除最后 1 件之外的整个池"（ISSUE-07）
+        ap.error("--limit 必须大于等于 0（0 表示不限制）")
     if args.dry_run or args.plan or args.stats:      # 只读，不进写锁
         return _run(args)
     db_path = Path(args.db)
