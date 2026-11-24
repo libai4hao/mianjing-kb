@@ -70,6 +70,13 @@
   51.6% 触发门禁，已全部 drop——结论是存量问题属数据质量，不是打标遗漏，应走碎片清洗/回源重抽。
   最终有标签 18,844 行、tags 空 2,799、`label_facts` 11,111、其他主题 4.24%；
   `refresh --reembed` 329.4 s（快照 `rollback/面经库-20261124-232653.db`），`verify_ledger` 全 PASS。
+- **历史碎片隔离（`docs/59`）**：用与 `batch_label` 相同的谓词从现库重算（2,656 条，与上轮
+  `skipped_code=2656` 一致），主因是「多题混杂」2,493 条。新建 `question_noise`（questions 同构 +
+  `reason/quarantined_at`）与 `label_facts_noise`，单事务复制后从 `questions`/`label_facts` 移除：
+  moved 2,656、moved_facts 34、`integrity_check=ok`。首次 `refresh` 被 `md_zero_questions` 拦下
+  （27 篇文档全部题目都是碎片），改为把"整篇 0 题"的 28 行退回 `questions`，隔离净 2,628 条。
+  最终题数 19,015、tags 空 171、`label_facts` 11,092（孤儿 0）、其他主题 4.82%；
+  `refresh --reembed` 299.3 s（快照 `rollback/面经库-20261124-234957.db`），`verify_ledger` 全 PASS。
 
 ## 2026-11-23
 
