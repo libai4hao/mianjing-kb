@@ -6,6 +6,25 @@
 > 一律以 `docs/29-数据基线与统计口径-2026-11-19.md` 为准。历史里程碑按日期倒序。
 > 2026-11-16 之前的记录见 `docs/archive/` 与 git 历史，本表从外部 review 落地开始。
 
+## 2026-11-25
+
+- **全仓代码评审 + P0/P1 修复**（`docs/60`）：评审对象 `b3d6930`，门禁全绿但写库链上有三条静默破坏类缺陷。
+  - **P0 `extract` 重切抹补答**：`store()` 删了重插，题行上的模型补答正文（只存在 `questions.a_text`）
+    与 `answer_source/answer_model/answered_at` 一起被删，输出无提示；`docs/53` 记录的"补答 4,233+947 被抹平"
+    就是它。现在题里带补答溯源的文档**默认跳过并逐篇告警**（在改 `processing` 之前拦下），
+    `--allow-answer-loss` 才放行并报 `answer_provenance_lost`（行数）；`--plan` 报 `answer_provenance_docs`。
+    输出新增 `answer_provenance_skipped` / `answer_provenance_lost`，退出码不变。
+  - **P1 `answer_state` 预览改库**：预览用可写连接并跑 `db.migrate()`，对停在旧 schema 的回滚快照"预览"
+    就会把它升到 019，且不持写锁。现在预览 `mode=ro`，`--apply` 先拿写锁再连接（迁移在锁内）。
+  - **P1 `answer_backfill` 无写锁、写回无守卫**：未接 `wlock`；UPDATE 不带"答案仍为空"条件，选题后被
+    `qsalvage` 拆分补上原文答案的题会被模型答案覆盖；不带 `--apply` 也对全部目标调模型再丢弃；
+    写事务横跨模型调用。现在预览只读、默认 20 条（`--limit 0` 全量，负数拒绝）；写库按 50 条一批、
+    每批短暂持锁；UPDATE 加 `a_text 仍为空 AND answer_source IN ('', 'llm_error')` 守卫，
+    新增 `written` / `guard_skipped` 统计。
+  - 新增 6 个测试；`docs/33` 同步（迁移范围更正为 001–019）。14 条 P2 记入 `docs/60` §3 待排期，
+    其中 ISSUE-07 同类的 `--limit -1` 在另外 6 个入口仍存在。
+  - 门禁：ruff 0 告警；pytest **866 passed / 5 skipped / 6 xfailed**（105.6 s）；privacy_scan 306 文件 0 命中；demo PASS。
+
 ## 2026-11-24
 
 - **外部 review（mianjing-kb-main(3).zip）ISSUE-01/02/05/06/07 落地**：

@@ -89,3 +89,45 @@ class TestOnlyMissing:
         c.close()
         assert rows[1] == "toc_noise"
         assert rows[2] in ("boundary_gap", "no_answer_source", "toc_noise")
+
+
+class TestPreviewIsReadOnly:
+    def test_preview_does_not_migrate_or_write(self, tmp_path, monkeypatch):
+        """P1-1（2026-11-25 review）：旧实现预览也走 db.migrate()，对停在旧 schema 的回滚快照
+        "看一眼分布"就把它升到最新。预览必须只读；--apply 才允许迁移并写库。"""
+        import sqlite3
+
+        from mianjing_kb import answer_state
+        from mianjing_kb.kb import config, db as kbdb
+
+        monkeypatch.setattr(config, "BUILD_DIR", tmp_path)
+        p = tmp_path / "snapshot.db"
+        conn = sqlite3.connect(str(p))
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE schema_version (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+        conn.commit()
+        for version, _sql in kbdb.MIGRATIONS:
+            if version < "018":
+                kbdb._apply_one(conn, version, _sql)
+        conn.execute("INSERT INTO questions (doc_hash, seq, q_text, a_text, span_start, span_end, "
+                     "q_norm, q_norm_hash, simhash, extracted_at) "
+                     "VALUES ('d', 1, '足够长的一道面试题是什么', '', 0, 1, 'n', 'h', 0, 'now')")
+        conn.commit()
+        conn.close()
+        before = p.read_bytes()
+
+        assert answer_state.main(["--db", str(p)]) == 0
+        assert p.read_bytes() == before
+        c = sqlite3.connect(str(p))
+        cols = [r[1] for r in c.execute("PRAGMA table_info(questions)")]
+        assert "answer_state" not in cols
+        assert c.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] < len(kbdb.MIGRATIONS)
+        c.close()
+
+        # --apply：迁移落在写锁内，状态补上
+        assert answer_state.main(["--db", str(p), "--apply"]) == 0
+        c = sqlite3.connect(str(p))
+        assert c.execute("SELECT answer_state FROM questions").fetchone()[0] in (
+            "boundary_gap", "no_answer_source", "toc_noise")
+        assert c.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == len(kbdb.MIGRATIONS)
+        c.close()

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """补答题（迁移 019）：目标筛选、写回留痕、拒答/失败分流。"""
 import pytest
+from pathlib import Path
+
 from mianjing_kb import answer_backfill as ab
 from mianjing_kb.kb import db
 
@@ -50,6 +52,56 @@ def test_run_dry_run_does_not_write(conn, monkeypatch):
     ab.run(conn, [(1, "什么是 JVM 类加载？")], concurrency=1, dry_run=True)
     row = conn.execute("SELECT a_text FROM questions WHERE qid=1").fetchone()
     assert row["a_text"] == ""
+
+
+def test_run_does_not_overwrite_answer_filled_after_pick(conn, monkeypatch):
+    """P1-2（2026-11-25 review）：选题与写回之间答案被别的工具补上（如 qsalvage 拆分），
+    模型答案不得覆盖它，也不改写 answer_source。"""
+    monkeypatch.setattr(ab.llm_client, "chat", lambda *a, **k: {"text": "模型答案"})
+    targets = ab.pick_targets(conn)
+    conn.execute("UPDATE questions SET a_text='原文拆出的答案' WHERE qid=1")
+    conn.commit()
+    res = ab.run(conn, targets, concurrency=1)
+    row = conn.execute("SELECT a_text, answer_source FROM questions WHERE qid=1").fetchone()
+    assert row["a_text"] == "原文拆出的答案" and row["answer_source"] == ""
+    assert res["answered"] == 2 and res["written"] == 1 and res["guard_skipped"] == 1
+
+
+def tmp_file(conn):
+    """fixture 的库文件：从已打开的连接上问出来，避免测试自己再拼路径。"""
+    return Path(conn.execute("PRAGMA database_list").fetchone()[2])
+
+
+def test_preview_defaults_to_small_limit_and_rejects_negative(conn, monkeypatch):
+    """不写库的预览不写库、不迁移；--limit -1 直接拒绝（SQL 的 LIMIT -1 等于不限制）。"""
+    calls = []
+    monkeypatch.setattr(ab.llm_client, "chat", lambda *a, **k: calls.append(1) or {"text": "答案"})
+    db_file = tmp_file(conn)
+    assert ab.main(["--db", str(db_file), "--limit", "1"]) == 0
+    assert len(calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE answer_source<>''").fetchone()[0] == 0
+    with pytest.raises(SystemExit) as exc:
+        ab.main(["--db", str(db_file), "--limit", "-1"])
+    assert exc.value.code == 2
+
+
+def test_dry_run_limit_applies_only_when_limit_omitted(conn, monkeypatch):
+    """省略 --limit 的预览只调 DRY_RUN_LIMIT 条；显式 --limit 0 才全量预览。"""
+    calls = []
+    monkeypatch.setattr(ab.llm_client, "chat", lambda *a, **k: calls.append(1) or {"text": "答案"})
+    for i in range(100, 130):
+        conn.execute("INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, answer_state, "
+                     "q_norm, q_norm_hash, simhash, span_start, span_end, extracted_at) "
+                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (i, f"h{i}", i, f"足够长的问题{i}是什么", "", "boundary_gap", f"n{i}",
+                      f"h{i}", 0, 0, 1, "now"))
+    conn.commit()
+    db_file = tmp_file(conn)
+    assert ab.main(["--db", str(db_file)]) == 0
+    assert len(calls) == ab.DRY_RUN_LIMIT - 1                 # 20 条目标里 1 条太短不送模型
+    assert ab.main(["--db", str(db_file), "--limit", "0"]) == 0
+    assert len(calls) == (ab.DRY_RUN_LIMIT - 1) + 32          # 全量 33 条目标，同样 1 条太短
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE answer_source<>''").fetchone()[0] == 0
 
 
 def test_stats_reports_remaining(conn):

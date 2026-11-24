@@ -355,6 +355,21 @@ def _read_doc_list(path: str) -> set[str]:
     return out
 
 
+def _docs_with_answer_provenance(conn, doc_hashes: list[str]) -> set[str]:
+    """题里带模型补答溯源（`answer_source` 非空）的文档。
+
+    `store()` 是删了重插，补答正文（只存在 `questions.a_text`）与 `answer_model /
+    answered_at` 会随旧行一起删掉，且没有别处留存；这里先把它们认出来，默认不重切。
+    """
+    out: set[str] = set()
+    for i in range(0, len(doc_hashes), 500):
+        part = doc_hashes[i:i + 500]
+        out.update(r[0] for r in conn.execute(
+            f"SELECT DISTINCT doc_hash FROM questions WHERE doc_hash IN ({','.join('?' * len(part))}) "
+            "AND COALESCE(answer_source,'')<>''", part))
+    return out
+
+
 def _run(args) -> int:
     read_only = bool(args.dry_run or args.plan or args.stats)
     conn = db.connect(args.db, create=not read_only, readonly=read_only)
@@ -379,6 +394,8 @@ def _run(args) -> int:
         wanted = _read_doc_list(args.doc_list)
         doc_list_missing = len(wanted - {h for h, _p in pool_all})
         pool = [x for x in pool if x[0] in wanted]
+    # 带补答溯源的文档默认不重切（P0，2026-11-25 review）：见 _docs_with_answer_provenance。
+    provenance_docs = _docs_with_answer_provenance(conn, [h for h, _p in pool])
     report_path = None if (args.plan or args.dry_run) else write_identity_report(mapping)
     if args.plan:
         print(json.dumps({
@@ -386,6 +403,7 @@ def _run(args) -> int:
             "pool_after_gate": len(pool),
             "skipped_gate": gate_skipped,
             "skipped_doc_list_missing": doc_list_missing,
+            "answer_provenance_docs": len(provenance_docs),
             "md_mapped_sources": len(mapping.by_doc),
             "source_only": len(pool_all) - len(mapping.by_doc) - len(mapping.orphans),
             "orphan_md": len(mapping.orphans),
@@ -406,11 +424,23 @@ def _run(args) -> int:
     skipped_unchanged = pool_total - len(pool)
     if args.limit:
         pool = pool[:args.limit]
+    # 补答保护放在改状态之前：被跳过的文档不进 processing，也就不需要回写状态。
+    answer_loss_skipped = 0
+    if provenance_docs and not args.allow_answer_loss:
+        keep, name_of = [], dict(pool_all)
+        for x in pool:
+            if x[0] in provenance_docs:
+                answer_loss_skipped += 1
+                print(f"[warn] {name_of[x[0]].name}: 该文档的题带模型补答，重切会连同补答正文一起删掉，"
+                      f"已跳过（确认放弃补答请加 --allow-answer-loss）", file=sys.stderr)
+            else:
+                keep.append(x)
+        pool = keep
     started = time.perf_counter()
     if not args.dry_run and pool:
         mark_status(conn, [h for h, _p in pool], status.PROCESSING)
         conn.commit()
-    n_docs = n_q = n_empty = n_err = n_reattached = 0
+    n_docs = n_q = n_empty = n_err = n_reattached = n_answer_lost = 0
     n_empty_preserved = 0
     qtype: dict[str, int] = {}
     conf: dict[str, int] = {}
@@ -441,6 +471,10 @@ def _run(args) -> int:
                 print(f"[warn] {p.name}: 本次 0 题但已有 {old_n} 条旧题，保留旧题不删除"
                       f"（确认清空请加 --allow-empty-overwrite）", file=sys.stderr)
                 continue
+            if doc_hash in provenance_docs:      # 只有带了 --allow-answer-loss 才会走到这里
+                n_answer_lost += conn.execute(
+                    "SELECT COUNT(*) FROM questions WHERE doc_hash=? "
+                    "AND COALESCE(answer_source,'')<>''", (doc_hash,)).fetchone()[0]
             conn.execute("SAVEPOINT extract_one")
             try:
                 n_reattached += store(conn, doc_hash, rows)
@@ -489,6 +523,8 @@ def _run(args) -> int:
         "incremental": args.incremental, "skipped_unchanged": skipped_unchanged,
         "skipped_gate": gate_skipped,
         "skipped_doc_list_missing": doc_list_missing,
+        "answer_provenance_skipped": answer_loss_skipped,
+        "answer_provenance_lost": n_answer_lost if not args.dry_run else 0,
         "purged_orphan_docs": n_purged if not args.dry_run else 0,
         "purge_skipped": purge_skipped,
         "label_reattached": n_reattached if not args.dry_run else 0,
@@ -524,6 +560,9 @@ def main(argv=None) -> int:
     ap.add_argument("--doc-list",
                     help="只处理清单里的 doc_hash（每行一个，# 开头为注释）；"
                          "用于定向补切，自动跳过孤儿清理与全量统计口径")
+    ap.add_argument("--allow-answer-loss", action="store_true",
+                    help="允许重切带模型补答的文档（默认跳过并告警：补答正文只存在 "
+                         "questions.a_text，重切即丢；重切后需重跑 answer_state --only-missing）")
     args = ap.parse_args(argv)
     if args.limit < 0:
         # Python 切片允许负数：--limit -1 会处理"除最后 1 件之外的整个池"（ISSUE-07）

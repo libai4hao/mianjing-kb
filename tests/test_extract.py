@@ -344,6 +344,61 @@ def test_doc_list_processes_only_listed_docs(tmp_env, tmp_path, capsys):
     assert per.get(h1) == 2 and per.get(h2) == 2
 
 
+def test_doc_list_skips_doc_with_llm_answers_by_default(tmp_env, tmp_path, capsys):
+    """P0（2026-11-25 review）：store() 删了重插，补答正文与 answer_* 溯源会一起没——默认拒切。
+
+    docs/53 记录生产有 4,233 条模型补答；旧实现重切时不提示、不留存，定向补切一跑就永久丢失。
+    """
+    corpus, conn = tmp_env
+    h1, _ = _seed_doc(conn, corpus, "a.md", MD_A)
+    h2, _ = _seed_doc(conn, corpus, "b.md", MD_B)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    conn.execute("UPDATE questions SET a_text='模型补答正文', answer_source='llm', answer_model='m', "
+                 "answered_at='t' WHERE doc_hash=? AND seq=2", (h1,))
+    conn.commit()
+    capsys.readouterr()
+    lst = tmp_path / "docs.txt"
+    lst.write_text(f"{h1}\n{h2}\n", encoding="utf-8")
+
+    assert extract.main(["--db", str(config.DB_PATH), "--doc-list", str(lst)]) == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert out["docs"] == 1 and out["answer_provenance_skipped"] == 1
+    assert out["answer_provenance_lost"] == 0
+    row = conn.execute("SELECT a_text, answer_source FROM questions WHERE doc_hash=? AND seq=2",
+                       (h1,)).fetchone()
+    assert row["a_text"] == "模型补答正文" and row["answer_source"] == "llm"
+    # 被跳过的文档不能被改成 processing（保护在改状态之前生效）
+    assert conn.execute("SELECT status FROM source_documents WHERE doc_hash=?", (h1,)
+                        ).fetchone()[0] == "processed"
+
+    # 显式放弃补答才放行，并报出丢了多少行
+    assert extract.main(["--db", str(config.DB_PATH), "--doc-list", str(lst),
+                         "--allow-answer-loss"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["docs"] == 2 and out["answer_provenance_skipped"] == 0     # 清单内两篇都重切
+    assert out["answer_provenance_lost"] == 1
+    row = conn.execute("SELECT a_text, answer_source FROM questions WHERE doc_hash=? AND seq=2",
+                       (h1,)).fetchone()
+    assert row["answer_source"] == "" and row["a_text"] != "模型补答正文"
+    # plan 预览也要能看出风险面
+    assert extract.main(["--db", str(config.DB_PATH), "--plan"]) == 0
+    assert json.loads(capsys.readouterr().out)["answer_provenance_docs"] == 0
+
+
+def test_plan_reports_answer_provenance_docs(tmp_env, capsys):
+    """只读 --plan 把"带补答溯源的文档数"报出来，补切前先看风险面。"""
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "a.md", MD_A)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    conn.execute("UPDATE questions SET answer_source='llm_refused' WHERE doc_hash=? AND seq=1", (h,))
+    conn.commit()
+    capsys.readouterr()
+    assert extract.main(["--db", str(config.DB_PATH), "--plan"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["answer_provenance_docs"] == 1 and out["pool_after_gate"] == 1
+
+
 def test_many_read_errors_skip_purge(tmp_env, capsys):
     """报错文档超过 5% 阈值时也不能清理，避免把未处理部分误判为孤儿。"""
     corpus, conn = tmp_env

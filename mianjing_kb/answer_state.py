@@ -19,8 +19,11 @@
    （优先级最高，其所属文档的整体归类仍可并存）。
 
 用法：
-    python -m mianjing_kb.answer_state --db <kb.sqlite>           # 预览分布
-    python -m mianjing_kb.answer_state --db <kb.sqlite> --apply   # 写库
+    python -m mianjing_kb.answer_state --db <kb.sqlite>           # 预览分布（只读打开，不迁移不改库）
+    python -m mianjing_kb.answer_state --db <kb.sqlite> --only-missing --apply   # 只补空状态并写库
+    python -m mianjing_kb.answer_state --db <kb.sqlite> --apply   # 全库重算并写库（会改写历史状态，慎用）
+
+`extract` 重切过的文档，题行上的 answer_state 会被清空——重切后用 `--only-missing --apply` 补回。
 """
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ import argparse
 import json
 import sys
 from collections import Counter
+from contextlib import nullcontext
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -124,35 +128,47 @@ def main(argv=None) -> int:
     if not path.exists():
         print(json.dumps({"error": f"数据库不存在：{path}"}, ensure_ascii=False))
         return 2
-    conn = __import__("sqlite3").connect(str(path))
-    conn.row_factory = __import__("sqlite3").Row
+    apply = bool(args.apply)
+    # 预览一律以 mode=ro 打开：不迁移、不写 WAL、不抢写锁。旧实现预览也走 db.migrate()，
+    # 对回滚快照/旧备份"看一眼分布"就会把它升到最新 schema（评审 P1-1，2026-11-25）。
+    # 写库则先拿写锁再连接：迁移（db.connect 内）因此落在锁内，不会与别的写库工具撞车。
+    lock = nullcontext()
+    if apply:
+        lock = wlock.write_lock(
+            "kb" if path.resolve() == Path(config.DB_PATH).resolve() else "online",
+            tool="answer_state", build_dir=config.BUILD_DIR, wait_sec=30.0, target=path)
     try:
-        db.migrate(conn)
-        res = classify(conn, doc_coverage_min=args.doc_coverage_min,
-                       run_min_len=args.run_min_len)
-        if args.only_missing:
-            have = {r[0] for r in conn.execute(
-                "select qid from questions where coalesce(answer_state,'')<>''")}
-            res = dict(res)
-            res["state"] = {q: s for q, s in res["state"].items() if q not in have}
-            res["counts"] = dict(Counter(res["state"].values()))
-            res["total"] = len(res["state"])
-            res["empty"] = len(res["state"]) - res["counts"].get(OK, 0)
-        out = {"total": res["total"], "empty": res["empty"], "counts": res["counts"],
-               "doc_coverage_median": round(res["doc_coverage_median"], 3),
-               "doc_coverage_min": res["doc_coverage_min"],
-               "docs_with_empty": res["doc_coverage_empty_docs"], "apply": bool(args.apply),
-               "only_missing": bool(args.only_missing)}
-        if args.apply:
-            lock = "kb" if path.resolve() == Path(config.DB_PATH).resolve() else "online"
-            with wlock.write_lock(lock, tool="answer_state", build_dir=config.BUILD_DIR,
-                                  wait_sec=30.0, target=path):
-                with conn:
-                    out.update(backfill(conn, res))
-            out["after"] = summary(conn)["counts"]
-        print(json.dumps(out, ensure_ascii=False, indent=1))
-    finally:
-        conn.close()
+        with lock:
+            conn = db.connect(path, create=False, readonly=not apply)
+            try:
+                if apply:
+                    db.migrate(conn)          # 在写锁内迁移（create=False 不会自动迁移）
+                res = dict(classify(conn, doc_coverage_min=args.doc_coverage_min,
+                                    run_min_len=args.run_min_len))
+                if args.only_missing:
+                    have = {r[0] for r in conn.execute(
+                        "select qid from questions where coalesce(answer_state,'')<>''")}
+                    res["state"] = {q: s for q, s in res["state"].items() if q not in have}
+                    res["counts"] = dict(Counter(res["state"].values()))
+                    res["total"] = len(res["state"])
+                    res["empty"] = len(res["state"]) - res["counts"].get(OK, 0)
+                out = {"total": res["total"], "empty": res["empty"], "counts": res["counts"],
+                       "doc_coverage_median": round(res["doc_coverage_median"], 3),
+                       "doc_coverage_min": res["doc_coverage_min"],
+                       "docs_with_empty": res["doc_coverage_empty_docs"], "apply": apply,
+                       "only_missing": bool(args.only_missing)}
+                if apply:
+                    with conn:
+                        out.update(backfill(conn, res))
+                    out["after"] = summary(conn)["counts"]
+                print(json.dumps(out, ensure_ascii=False, indent=1))
+            finally:
+                conn.close()
+    except wlock.LockHeld as ex:
+        print(json.dumps({"verdict": "ABORT", "why": str(ex),
+                          "note": "另有工具在写这个库；answer_state 不与之并行，稍后重试"},
+                         ensure_ascii=False, indent=1))
+        return 2
     return 0
 
 
