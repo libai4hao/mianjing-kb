@@ -756,8 +756,8 @@ def g6b_golden(kb_conn) -> dict:
         """同族视为一致：产品级 topic 与所属组级 topic 只是粗细口径不同，不是标错。"""
         return topic_family_root(gold) == topic_family_root(pred)
 
+    # 严格同名口径（exact）就是主题准确率本身；同族宽松口径另算 family_acc
     n_exact = sum(1 for r in rows if (r["topic"] or "") == r["topic_gold"])
-    exact_acc = n_exact / n
     topic_acc = n_exact / n
     topic_lb = _wilson_lower(n_exact, n)
     qt = [r for r in rows if r["qtype_gold"]]
