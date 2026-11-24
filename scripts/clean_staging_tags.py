@@ -29,29 +29,34 @@ def clean(conn, apply: bool = False) -> dict:
     stop = vocab.tag_stopwords()
     rows = conn.execute("SELECT qid, tags FROM labels_staging "
                         "WHERE COALESCE(tags,'') != ''").fetchall()
-    changed = dropped_total = truncated_total = 0
+    changed = dropped_total = truncated_total = syn_total = dedup_total = 0
     for r in rows:
         qid, raw = r["qid"], r["tags"]
         try:
             tags = json.loads(raw) or []
         except (TypeError, ValueError):
             continue
-        kept = [t for t in (str(x).strip() for x in tags) if t and t not in stop]
-        dropped = len(tags) - len(kept)
+        # 复用产品口径：同义归一 / 去重 / 维度词（含大小写变体）/ 空值，避免脚本与线上两套逻辑
+        kept, syn, dropped = labelspec.normalize_tags(
+            tags, max_items=len(tags) + 1, stopwords=stop)
         cut = max(0, len(kept) - cap)
         kept = kept[:cap]
-        if not dropped and not cut:
+        dedup = max(0, len(tags) - dropped - len(kept) - cut)
+        if not (dropped or cut or syn or dedup):
             continue
         changed += 1
         dropped_total += dropped
         truncated_total += cut
+        syn_total += syn
+        dedup_total += dedup
         if apply:
             conn.execute("UPDATE labels_staging SET tags=? WHERE qid=?",
                          (json.dumps(kept, ensure_ascii=False) if kept else None, qid))
     if apply:
         conn.commit()
     return {"rows": len(rows), "changed": changed, "dropped_dimension": dropped_total,
-            "truncated": truncated_total, "cap": cap, "applied": apply}
+            "truncated": truncated_total, "synonym_hits": syn_total,
+            "deduped": dedup_total, "cap": cap, "applied": apply}
 
 
 def main(argv=None) -> int:

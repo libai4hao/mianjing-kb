@@ -98,6 +98,17 @@ def test_render_text_contains_sections(mini_env):
         assert section in text
 
 
+def test_render_text_surfaces_retryable_llm_error(mini_env):
+    """P1-2 的另一半：库里遗留的 llm_error 必须显式可见，不能被"补答/拒答"两列掩盖。"""
+    build = mini_env
+    con = kbdb.connect(build / "kb.sqlite")
+    con.execute("UPDATE questions SET a_text='', answer_source='llm_error' WHERE qid=1")
+    con.commit()
+    con.close()
+    text = ks.render_text(ks.collect())
+    assert "待重试 llm_error 1" in text
+
+
 def test_lock_summary_ignores_released_permanent_advisory_lock_file(mini_env):
     """wlock 文件永久保留；释放后不应继续显示为活跃锁。"""
     build = mini_env

@@ -978,6 +978,19 @@ def _propagate_by_hash(conn, hashes, *, overwrite: bool = False) -> dict:
                     (src_tags, src["qtype"], src["difficulty"], r["qid"]))
                 filled_tags += 1
                 changed_qids.append(r["qid"])
+        if filled_topic or overwritten or filled_tags:
+            # label_facts 是"跨重切存活"的打标事实源，必须跟着 topic/tags 一起走，
+            # 否则重修/重切后挂回来的还是传播前的旧标签（docs/51 §5）。
+            fields = ["topic=?"]
+            vals: list = [top]
+            if src is not None:
+                if src_tags:
+                    fields.append("tags=COALESCE(tags, ?)")
+                    vals.append(src_tags)
+                fields += ["qtype=COALESCE(qtype, ?)", "difficulty=COALESCE(difficulty, ?)"]
+                vals += [src["qtype"], src["difficulty"]]
+            vals.append(h)
+            conn.execute(f"UPDATE label_facts SET {', '.join(fields)} WHERE q_norm_hash=?", vals)
     return {"mode": "overwrite" if overwrite else "fill",
             "topic_filled": filled_topic, "topic_overwritten": overwritten,
             "tags_filled": filled_tags, "changed_qids": sorted(set(changed_qids))[:20]}
@@ -1070,6 +1083,15 @@ def merge(conn, drop_orphans: bool = False, hash_consistency: str = "fill") -> d
         "WHERE qid IN (SELECT qid FROM labels_staging "
         "              WHERE review_state IS NOT 'disagree' "
         "                AND review_state IS NOT 'pending')")
+    # 实际被写进去的行数：COALESCE 保留旧值（如已有 tags、空 topic）的行不算"改动"
+    kept_old = conn.execute(
+        "SELECT COUNT(*) FROM labels_staging s JOIN questions q ON q.qid=s.qid "
+        "WHERE s.review_state IS NOT 'disagree' AND s.review_state IS NOT 'pending' "
+        "  AND ((COALESCE(s.topic,'') != '' AND q.topic IS NOT s.topic) "
+        "    OR (s.qtype IS NOT NULL AND q.qtype IS NOT s.qtype) "
+        "    OR (s.difficulty IS NOT NULL AND q.difficulty IS NOT s.difficulty) "
+        "    OR (COALESCE(s.tags,'') NOT IN ('', '[]') AND q.tags IS NOT s.tags))"
+    ).fetchone()[0]
     conn.execute(
         "INSERT OR REPLACE INTO label_facts "
         "(q_norm_hash, topic, qtype, difficulty, tags, normalizer_version, q_norm_sample, "
@@ -1091,7 +1113,9 @@ def merge(conn, drop_orphans: bool = False, hash_consistency: str = "fill") -> d
     conn.commit()
     holds = conn.execute("SELECT COUNT(*) FROM labels_staging "
                          "WHERE review_state IN ('disagree','pending')").fetchone()[0]
-    out = {"ok": True, "merged": n, "n_review_hold": holds, "gate": g6["state"],
+    out = {"ok": True, "merged": n, "merged_changed": n - kept_old,
+           "merged_kept_existing": kept_old,
+           "n_review_hold": holds, "gate": g6["state"],
            "hash_consistency": consistency,
            "next_step": "python -m mianjing_kb.refresh --reembed"
                         "  # 检索库 topic 是快照，merge 只写 kb.sqlite（B2）"}

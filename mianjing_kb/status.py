@@ -400,8 +400,12 @@ def render_text(data: dict) -> str:
     if aux:
         i = next(i for i, x in enumerate(lines) if x.startswith("  答案来源 ")
                  or x == "[打标]")
-        lines.insert(i + 1, f"  补答 llm {_fmt(aux.get('llm', 0))}  "
-                            f"拒答 {_fmt(aux.get('llm_refused', 0))}")
+        parts = [f"补答 llm {_fmt(aux.get('llm', 0))}",
+                 f"拒答 {_fmt(aux.get('llm_refused', 0))}"]
+        # llm_error 是"调用失败、可重试"的存量（旧版本会把它写成终态），必须可见
+        if aux.get("llm_error"):
+            parts.append(f"待重试 llm_error {_fmt(aux.get('llm_error'))}")
+        lines.insert(i + 1, "  " + "  ".join(parts))
     if gates.get("stale_reasons"):
         lines.append("  过期原因：" + "；".join(gates["stale_reasons"]))
     if gates.get("gates"):

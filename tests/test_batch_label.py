@@ -201,6 +201,11 @@ def test_merge_propagates_topic_across_same_hash(mini_db, monkeypatch, tmp_path)
         "INSERT INTO labels_staging (qid, q_norm_hash, topic, qtype, difficulty, tags, provider, "
         "model, redacted, latency_ms, tokens, labeled_at) "
         "VALUES (1,'duphash','Java基础','八股',3,'[\"HashMap\"]','p','m',0,1,1,'now')")
+    # 传播前 label_facts 里是同 hash 的旧值（'其他'）：传播后必须跟着改，否则重切挂回旧标签
+    mini_db.execute(
+        "INSERT OR REPLACE INTO label_facts (q_norm_hash, topic, qtype, difficulty, tags, "
+        "normalizer_version, q_norm_sample, source, labeled_at, confidence, merged_at) "
+        "VALUES ('duphash','其他','八股',3,'[\"HashMap\"]','v1','什么是 HashMap？','model','now',NULL,'now')")
     mini_db.commit()
     out = bl.merge(mini_db)
     assert out["ok"] and out["merged"] == 1
@@ -209,6 +214,8 @@ def test_merge_propagates_topic_across_same_hash(mini_db, monkeypatch, tmp_path)
     topic2 = mini_db.execute("SELECT topic FROM questions WHERE qid=2").fetchone()[0]
     tags2 = mini_db.execute("SELECT tags FROM questions WHERE qid=2").fetchone()[0]
     assert topic2 == "Java基础" and tags2 == '["集合"]'   # HashMap 归一成词表主键
+    facts = mini_db.execute("SELECT topic, tags FROM label_facts WHERE q_norm_hash='duphash'").fetchone()
+    assert facts["topic"] == "Java基础"
 
 
 def test_merge_hash_consistency_does_not_overwrite_by_default(mini_db):
