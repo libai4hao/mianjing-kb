@@ -56,6 +56,21 @@ topic_aliases:
   求职与行为: HR与求职
   算法与数据结构: 算法
 
+# 主题粗粒度族（子 topic → 父 topic）。只用于**金标比对**（G6b），不改落库 topic。
+# 起因：合法 topic 既有产品级（RabbitMQ/Redis）又有一级组级（消息队列/缓存与中间件），
+# 同一道题标成"哪一级"都说得通——2026-11-24 60 条金标抽检里 31 处不一致有 10 处属这种
+# 粗细差异（RabbitMQ↔消息队列、Memcached↔缓存与中间件），按字面比对会把口径差异记成错标。
+topic_family:
+  RabbitMQ: 消息队列
+  Kafka: 消息队列
+  RocketMQ: 消息队列
+  ActiveMQ: 消息队列
+  消息队列: 缓存与中间件
+  Redis: 缓存与中间件
+  Memcached: 缓存与中间件
+  MySQL: 数据库
+  MyBatis: 数据库
+
 # 只作用在【文件名】上的岗位/技术栈词（不进 _is_topic_like：否则 "阿里笔试非技术岗" 这类
 # 来源目录会被当成主题词剔掉，collection 退化到上一级）。命中仍记 topic_source=l1_title。
 title_only_rules:

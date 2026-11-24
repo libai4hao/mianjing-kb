@@ -66,9 +66,40 @@ def topic_aliases() -> dict[str, str]:
 
 
 @lru_cache(maxsize=1)
+def topic_family() -> dict[str, str]:
+    """主题族谱（子 topic → 父 topic），只给 G6b 金标比对用，不改落库 topic。
+
+    合法 topic 同时含产品级（RabbitMQ/Redis）与组级（消息队列/缓存与中间件），
+    同一题标成哪一级都说得通；字面比对会把这种口径差异记成"标错"。
+    yaml 缺失/损坏 → 空表（退回字面比对）。
+    """
+    try:
+        import yaml
+        path = Path(config.TOPIC_RULES_FILE)
+        if not path.exists():
+            return {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        raw = data.get("topic_family") or {}
+        return {str(k).strip(): str(v).strip() for k, v in raw.items()
+                if str(k).strip() and str(v).strip()}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def topic_family_root(topic: str) -> str:
+    """沿族谱走到根（带环保护）；不在族谱里的 topic 返回自身。"""
+    fam = topic_family()
+    seen = set()
+    cur = (topic or "").strip()
+    while cur in fam and cur not in seen:
+        seen.add(cur)
+        cur = fam[cur]
+    return cur
+
+
+@lru_cache(maxsize=1)
 def tag_stopwords() -> frozenset[str]:
     """标签维度停用词：topic / 一级组名 / qtype / position。
-
     这些是**结构化字段的取值**，不该再出现在 tags 里（否则 tags 37.8% 是维度重复，
     既挤占细粒度关键词，又让检索同义膨胀）。实测 726 题 5,403 次标签里 2,044 次属此类。
     """
@@ -77,4 +108,8 @@ def tag_stopwords() -> frozenset[str]:
 
     topics = set(topic_vocab())
     groups = {g["level1"] for g in taxonomy.load()["groups"]}
-    return frozenset(topics | groups | set(qtypes()) | set(positions()) | {LEGACY_MARKER})
+    # 别名键也是维度写法（如 `求职与行为`→`HR与求职`），不归一就漏剔：
+    # 实测生产库残留 343 次维度词，其中 154+94 就是这类别名键旧写法。
+    aliases = set(topic_aliases())
+    return frozenset(topics | groups | aliases | set(qtypes()) | set(positions())
+                     | {LEGACY_MARKER})

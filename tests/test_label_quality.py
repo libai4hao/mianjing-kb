@@ -104,3 +104,34 @@ def test_pick_targets_skips_structural_hold_but_keeps_normal_short_question():
     assert got == [2, 3]
     assert [r["qid"] for r in stats["skipped_code_rows"]] == [1]
     assert stats["skipped_code_rows"][0]["hold_reason"] == "残缺"
+
+
+def _conn_with_tags(rows):
+    """带 tags 列的 staging（标签侧 WARN 用；rows: qid, text, topic, tags, state）。"""
+    conn = _conn([])
+    conn.execute("ALTER TABLE labels_staging ADD COLUMN tags TEXT")
+    for qid, text, topic, tags, state in rows:
+        conn.execute("INSERT INTO questions(qid, q_text, topic) VALUES(?,?,NULL)", (qid, text))
+        conn.execute("INSERT INTO labels_staging(qid, topic, qtype, difficulty, tags, review_state) "
+                     "VALUES(?,?, '八股', 2, ?, ?)", (qid, topic, tags, state))
+    return conn
+
+
+def test_quality_warns_low_vocab_hit():
+    """词表命中率 0（全是自由标签）→ WARN，不 FAIL（开放词表，低命中只提示词表/prompt 失效）。"""
+    rows = [(i, f"什么是第{i}个知识点?", "后端", '["随便写的词一","随便写的词二"]', "agree")
+            for i in range(1, 21)]
+    q = label_quality.assess(_conn_with_tags(rows))
+    assert q["state"] == "WARN" and q["ok"] is True
+    assert any("tag_vocab_hit" in w for w in q["detail"]["warns"])
+    assert q["detail"]["tag_metrics"]["vocab_hit_rate"] == 0.0
+
+
+def test_quality_warns_dimension_tags_backflow():
+    """tags 里出现维度词（topic 取值）→ 维度重复率 WARN，说明 stopwords 又漏了。"""
+    rows = [(i, f"什么是第{i}个知识点?", "后端",
+             '["其他","索引"]' if i == 1 else '["索引"]', "agree")
+            for i in range(1, 21)]
+    q = label_quality.assess(_conn_with_tags(rows))
+    assert q["state"] == "WARN" and "tag_dimension_dup" in " ".join(q["detail"]["warns"])
+    assert q["detail"]["tag_metrics"]["dimension_dup_rate"] > 0.02

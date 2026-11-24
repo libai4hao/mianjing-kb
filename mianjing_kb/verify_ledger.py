@@ -693,11 +693,14 @@ def g6b_golden(kb_conn) -> dict:
     从人工环节变自动门禁）。
 
     golden_labels 无表 → SKIP（金标未启用）；无行 → SKIP（还没做金标）。
-    与 staging 按 q_norm_hash 求交集后 **matched==0 或 matched<20 → WARN**（样本不足，
+    比对对象优先 staging（同批待 merge 标签），staging 无交集时**回落到 questions**
+    —— batch merge 后 staging 会被清空，若只认 staging，金标永远只能 WARN「无交集」，
+    等于门禁建好就失效；questions 才是最终真相。
+    与比对对象求交集后 **matched==0 或 matched<20 → WARN**（样本不足，
     未判，不挡 merge，但必须显式可见——SKIP 会被读成"通过"）；topic_acc < 0.8 → FAIL（阻断 merge）。
     qtype/difficulty 准确率只记录不设阈（docs/13 L6 旧口径 ≥70% 仅供参考）。
     detail 带 weak_topics（acc<0.8 的金标主题，批次三 --review 的复核目标）与
-    混淆矩阵 matrix[gold][pred]。"""
+    混淆矩阵 matrix[gold][pred]，并标 source=staging|questions。"""
     import sqlite3
     sql = ("SELECT g.topic_gold, s.topic FROM golden_labels g "
            "JOIN labels_staging s ON s.q_norm_hash=g.q_norm_hash")
@@ -710,20 +713,47 @@ def g6b_golden(kb_conn) -> dict:
         return _gate("G6b", "金标抽检", "硬", "SKIP", [],
                      {"golden": 0, "note": "golden_labels 无行——先 --golden-sample/--golden-load"}, sql)
     rows = kb_conn.execute(
-        "SELECT g.topic_gold, g.qtype_gold, g.difficulty_gold, s.topic, s.qtype, s.difficulty "
+        "SELECT g.q_norm_hash, g.topic_gold, g.qtype_gold, g.difficulty_gold, "
+        "       s.topic, s.qtype, s.difficulty "
         "FROM golden_labels g JOIN labels_staging s ON s.q_norm_hash=g.q_norm_hash").fetchall()
+    source = "staging"
+    if not rows:                 # merge 后 staging 清空 → 回落到生产库（同一个 hash 键）
+        try:
+            rows = kb_conn.execute(
+                "SELECT g.q_norm_hash, g.topic_gold, g.qtype_gold, g.difficulty_gold, "
+                "       q.topic, q.qtype, q.difficulty "
+                "FROM golden_labels g JOIN questions q ON q.q_norm_hash=g.q_norm_hash"
+            ).fetchall()
+            source = "questions"
+        except sqlite3.OperationalError:      # 老库无 q_norm_hash 列 → 保持原语义（无交集）
+            rows = []
+    # 同 hash 的多份拷贝（同一题出现在多篇源文档）算一次抽检：否则重复行把 n 放大、
+    # 让置信区间与准确率都失去统计意义（2026-11-24：60 条金标被 149 行拷贝撑到 149）。
+    # 每 hash 取一条；有 topic 的优先（拷贝间若仍有分歧，取有标签的那条）。
+    uniq: dict[str, object] = {}
+    for r in rows:
+        cur = uniq.get(r["q_norm_hash"])
+        if cur is None or (not cur["topic"] and r["topic"]):
+            uniq[r["q_norm_hash"]] = r
+    rows = list(uniq.values())
     n = len(rows)
     if n == 0:
         return _gate("G6b", "金标抽检", "硬", "WARN", [],
                      {"golden": n_gold, "matched": 0,
-                      "note": "金标与 staging 无交集（staging 已 merge 或非同批）——样本不足，未判"},
+                      "note": "金标与 staging/questions 均无交集——样本不足，未判"},
                      sql)
     if n < G6B_MIN_N:
         return _gate("G6b", "金标抽检", "硬", "WARN", [],
-                     {"golden": n_gold, "matched": n,
+                     {"golden": n_gold, "matched": n, "source": source,
                       "note": f"样本 {n} < {G6B_MIN_N} 不足以判准确率——样本不足，未判（不等于通过）"},
                      sql)
-    n_ok = sum(1 for r in rows if r["topic"] == r["topic_gold"])
+    from mianjing_kb.kb.vocab import topic_family_root
+
+    def _eq(gold, pred):
+        """同族视为一致：产品级 topic 与所属组级 topic 只是粗细口径不同，不是标错。"""
+        return topic_family_root(gold) == topic_family_root(pred)
+
+    n_ok = sum(1 for r in rows if _eq(r["topic_gold"], r["topic"]))
     topic_acc = n_ok / n
     topic_lb = _wilson_lower(n_ok, n)
     qt = [r for r in rows if r["qtype_gold"]]
@@ -733,7 +763,8 @@ def g6b_golden(kb_conn) -> dict:
     by_topic: dict[str, list[bool]] = {}
     matrix: dict[str, dict[str, int]] = {}
     for r in rows:
-        by_topic.setdefault(r["topic_gold"], []).append(r["topic"] == r["topic_gold"])
+        ok = _eq(r["topic_gold"], r["topic"])
+        by_topic.setdefault(r["topic_gold"], []).append(ok)
         matrix.setdefault(r["topic_gold"], {})
         matrix[r["topic_gold"]][r["topic"]] = matrix[r["topic_gold"]].get(r["topic"], 0) + 1
     weak = sorted(t for t, oks in by_topic.items()
@@ -744,7 +775,8 @@ def g6b_golden(kb_conn) -> dict:
         fails.append({"kind": "golden_topic_acc", "topic_acc": round(topic_acc, 4),
                       "threshold": 0.8, "weak_topics": weak})
     return _gate("G6b", "金标抽检", "硬", state, fails,
-                 {"golden": n_gold, "matched": n, "topic_acc": round(topic_acc, 4),
+                 {"golden": n_gold, "matched": n, "source": source,
+                  "topic_acc": round(topic_acc, 4),
                   "topic_acc_lower95": round(topic_lb, 4),
                   "weak_min_n": G6B_WEAK_MIN_N,
                   "qtype_acc": round(qtype_acc, 4) if qtype_acc is not None else None,

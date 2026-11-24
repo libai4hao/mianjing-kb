@@ -472,6 +472,43 @@ def test_g6b_warn_no_overlap(tmp_path):
     conn.close()
 
 
+def test_g6b_falls_back_to_questions_after_merge(tmp_path):
+    """merge 清空 staging 后，金标仍应按 questions 的最终标签判 —— 否则门禁建好即失效。"""
+    conn = _golden_db(tmp_path)
+    for i in range(50):
+        h = f"q{i}"
+        conn.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                     "VALUES (?,?,?, 'now')", (h, f"题{i}", "JVM"))
+        conn.execute("INSERT INTO questions(qid, doc_hash, seq, q_text, q_norm, simhash, "
+                     "span_start, span_end, q_norm_hash, topic, extracted_at) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                     (2000 + i, "d" * 16, i, f"题{i}", f"题{i}", 0, 0, 1, h, "JVM", "now"))
+    conn.commit()
+    g = vl.g6b_golden(conn)
+    assert g["state"] == "PASS" and g["detail"]["source"] == "questions"
+    assert g["detail"]["matched"] == 50
+    conn.execute("UPDATE questions SET topic='数据库' WHERE qid < 2012")
+    conn.commit()
+    g2 = vl.g6b_golden(conn)
+    assert g2["state"] == "FAIL" and g2["detail"]["topic_acc"] == 0.76
+    conn.close()
+
+
+def test_g6b_product_and_group_topic_count_as_equal(tmp_path):
+    """粗细口径不算错：gold=消息队列、pred=RabbitMQ（同族）→ 一致；不同族仍判错。"""
+    conn = _golden_db(tmp_path)
+    for i in range(50):
+        _pair(conn, i, gold="消息队列", pred="RabbitMQ")
+    conn.commit()
+    g = vl.g6b_golden(conn)
+    assert g["state"] == "PASS" and g["detail"]["topic_acc"] == 1.0
+    conn.execute("UPDATE labels_staging SET topic='操作系统' WHERE qid < 1020")
+    conn.commit()
+    g2 = vl.g6b_golden(conn)
+    assert g2["state"] == "FAIL" and g2["detail"]["topic_acc"] == 0.6
+    conn.close()
+
+
 def test_g6b_pass_and_fail(tmp_path):
     """50 matched：全对 PASS；12 题标错 → 0.76 FAIL + weak_topics + 混淆矩阵。"""
     conn = _golden_db(tmp_path)

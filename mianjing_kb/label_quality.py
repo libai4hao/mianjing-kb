@@ -8,16 +8,69 @@
 - disagree 行已在 staging 单独 hold，不参与门禁，也不阻塞其余行 merge；
 - other_topic_rate > 0.25（且批次 >= 20）：主题词表/上下文缺口，整批拒绝 merge；
 - other_topic_rate > 0.15：WARN，允许 merge 但必须人工抽查。
+- 标签侧两条软告警（2026-11-24 新增，只 WARN 不挡 merge）：
+  词表命中率 < 20%（批次 >= 20）、维度重复率 > 2%。前者是词表/prompt 失效的哨兵，
+  后者是维度词回流 tags 的回归哨兵（stopwords 生效后应为 0）。
 """
 from __future__ import annotations
 
+import json
+import sqlite3
+
 from mianjing_kb.chunker import is_code_fragment
-from mianjing_kb.kb.vocab import OTHER_TOPIC
+from mianjing_kb.kb.labelspec import recommended_tags, tag_synonyms
+from mianjing_kb.kb.vocab import OTHER_TOPIC, tag_stopwords
 from mianjing_kb.quality_rules import (
     code_fragment_reason,
     deterministic_quality_flags,
     manual_review_flags,
 )
+
+# 标签侧 WARN 阈值（软，只告警不挡 merge）——按 2026-11-24 生产实测标定：
+# 词表命中率 23.8%（开放词表，低命中是设计如此，判"掉到 20% 以下"= 词表/prompt 失效），
+# 维度重复率 0（stopwords 生效后应为 0，>2% 说明 prompt 又开始把 topic/组名塞进 tags）。
+VOCAB_HIT_WARN = 0.20
+DIM_DUP_WARN = 0.02
+
+
+def _tag_rates(conn) -> dict | None:
+    """从 staging 现有 tags 复算两个标签侧指标（不依赖打标时的瞬时统计）。
+
+    词表命中率 = 归一后落在 `recommended_tags()` 的标签占比；
+    维度重复率 = 归一后仍等于 topic/组名/qtype/岗位的标签占比。
+    staging 缺 tags 列的极简库（部分单测）返回 None，不参与判。
+    """
+    try:
+        rows = conn.execute(
+            "SELECT tags FROM labels_staging WHERE review_state IS NOT 'disagree'").fetchall()
+    except sqlite3.OperationalError:
+        return None
+    vocab = set(recommended_tags())
+    syn = tag_synonyms()
+    stop = tag_stopwords()
+    total = hit = dup = 0
+    for r in rows:
+        raw = r["tags"] if not isinstance(r, tuple) else r[0]
+        try:
+            arr = json.loads(raw) if raw else []
+        except ValueError:
+            arr = []
+        if not isinstance(arr, list):
+            continue
+        for t in arr:
+            t = str(t or "").strip()
+            if not t:
+                continue
+            total += 1
+            canon = syn.get(t.lower(), t)
+            if canon in vocab:
+                hit += 1
+            if t in stop or canon in stop:
+                dup += 1
+    if total == 0:
+        return None
+    return {"tags": total, "vocab_hit_rate": round(hit / total, 4),
+            "dimension_dup_rate": round(dup / total, 4)}
 
 
 def assess(conn, *, other_hard: float = 0.25, other_warn: float = 0.15,
@@ -61,19 +114,28 @@ def assess(conn, *, other_hard: float = 0.25, other_warn: float = 0.15,
         fails.append(f"other_topic_rate={other_rate:.2%}>{other_hard:.0%}")
     elif other_rate > other_warn:
         warns.append(f"other_topic_rate={other_rate:.2%}>{other_warn:.0%}")
+    rates = _tag_rates(conn)
+    if rates:
+        if n >= min_batch and rates["vocab_hit_rate"] < VOCAB_HIT_WARN:
+            warns.append(f"tag_vocab_hit={rates['vocab_hit_rate']:.2%}<{VOCAB_HIT_WARN:.0%}")
+        if rates["dimension_dup_rate"] > DIM_DUP_WARN:
+            warns.append(f"tag_dimension_dup={rates['dimension_dup_rate']:.2%}"
+                         f">{DIM_DUP_WARN:.0%}")
+    detail = {
+        "staged": n, "code_fragment": len(fragments),
+        "quality_hold": len(quality_holds),
+        "pending": len(pending), "other_topic": len(other),
+        "other_topic_rate": round(other_rate, 4),
+        "tag_metrics": rates,
+        "fragment_qids": fragments[:10],
+        "quality_hold_qids": [x["qid"] for x in quality_holds[:10]],
+        "quality_hold_reasons": quality_holds[:10],
+        "pending_qids": pending[:10],
+        "warns": warns,
+    }
     return {
         "ok": not fails,
         "state": "FAIL" if fails else ("WARN" if warns else "PASS"),
         "fails": fails,
-        "detail": {
-            "staged": n, "code_fragment": len(fragments),
-            "quality_hold": len(quality_holds),
-            "pending": len(pending), "other_topic": len(other),
-            "other_topic_rate": round(other_rate, 4),
-            "fragment_qids": fragments[:10],
-            "quality_hold_qids": [x["qid"] for x in quality_holds[:10]],
-            "quality_hold_reasons": quality_holds[:10],
-            "pending_qids": pending[:10],
-            "warns": warns,
-        },
+        "detail": detail,
     }
