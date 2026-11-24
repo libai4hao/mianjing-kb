@@ -49,6 +49,10 @@
 - **`answer_state --only-missing`**：发现全库重算式 `--apply` 会改写约 5 千行历史治理状态
   （ok 14,645→19,026 等），故只允许补空值；新增开关与哨兵测试
   `test_only_missing_keeps_historical_states`，生产已有状态一行不动。
+- **B 档已落生产**（`docs/56`）：42 篇 1,477 题（2.0 s）、新题判边界 +1,352 ok、补答 16 条、
+  `refresh --reembed` 21,643 题 / 21,643 向量（375.5 s，G1–G5+G8 PASS）、`verify_ledger` 全 PASS。
+  A+B 合计：19,913 → 21,643 题、去重题干 12,765、`label_facts` 仍 10,194/孤儿 0；
+  落库结果与 `docs/54` 影子逐项一致。当前待打标 1,546 条（B 1,365 + A 181）。
 
 ## 2026-11-23
 
