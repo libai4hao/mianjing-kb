@@ -64,6 +64,23 @@ def test_real_question_forms_without_question_mark_are_kept():
         assert chunker._has_question_intent(text) is True, text
 
 
+def test_unnumbered_quantity_and_comma_questions_start_new_blocks():
+    quantity_q = "Redis 最多可以保存多少个键"
+    comma_q = ("在基于 Spring Cloud 搭建的微服务系统中，当某个服务实例因为网络故障突然宕机时，"
+               "Nacos 注册中心如何及时发现并将其从健康列表中剔除")
+    assert chunker._is_standalone_question_intent(quantity_q)
+    assert chunker._is_standalone_question_intent(comma_q)
+    md = ("1. 什么是线程池？\n\n线程池用于复用线程。\n\n"
+          f"{quantity_q}\n\nRedis 是内存数据库。\n\n"
+          f"{comma_q}\n\nNacos 会更新健康实例列表。\n\n"
+          "2. 什么是 JVM？\n\nJVM 是 Java 虚拟机。\n")
+    items = chunker.chunk_v2(md)["items"]
+    assert [it["q"] for it in items] == [
+        "什么是线程池？", quantity_q, comma_q, "什么是 JVM？"]
+    assert items[1]["a"].lstrip().startswith("Redis 是内存数据库")
+    assert items[2]["a"].lstrip().startswith("Nacos 会更新健康实例列表")
+
+
 def test_numbered_answer_explanations_stay_in_parent_answer():
     md = ("1. 什么是线程池？\n\n线程池用于复用线程。\n\n"
           "最大连接数，表示同时最多能支持多少连接，如果连接数不够，后续要获取连接的线程会阻塞。\n\n"
@@ -71,6 +88,21 @@ def test_numbered_answer_explanations_stay_in_parent_answer():
     items = chunker.chunk_v2(md)["items"]
     assert [it["q"] for it in items] == ["什么是线程池？", "什么是 JVM？"]
     assert "最大连接数" in items[0]["a"]
+
+
+def test_unnumbered_answer_explanations_stay_in_parent_answer():
+    explanations = [
+        "如果这个 Bean 关联了 BeanPostProcessor 接口，如何调用",
+        "最大连接数，表示同时最多能支持多少连接，如果连接数不够，后续要获取连接的线程会阻塞。",
+        "服务发现-服务发现工具管理群集中的流程和服务如何查找和互相交谈。",
+        "最后，基于wait/notify 的特性，为什么适合实现生产者消费者的模型",
+    ]
+    md = ("1. 什么是线程池？\n\n线程池用于复用线程。\n\n"
+          + "\n\n".join(explanations)
+          + "\n\n2. 什么是 JVM？\n\nJVM 是 Java 虚拟机。\n")
+    items = chunker.chunk_v2(md)["items"]
+    assert [it["q"] for it in items] == ["什么是线程池？", "什么是 JVM？"]
+    assert all(text in items[0]["a"] for text in explanations)
 
 
 def test_numbered_bare_weak_word_stays_in_answer():

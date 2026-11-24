@@ -43,7 +43,14 @@
     空簇判定；默认 20 篇切题回归的两条过宽问句规则定点收紧，未重建基线。
   - 门禁：全量 pytest **987 passed / 5 skipped / 6 xfailed**（998 collected，93.34 s）；Ruff、compileall、wheel 通过；
     privacy_scan 307 文件 0 命中；默认 `chunk_regress --check` PASS（9898 题、空答案 1548、弱题 467、缺 0 篇）。
-    未执行生产重抽，未提交或推送；生产仍按 A 档增量，B 档单独评审，C 档暂不重切。
+    未执行生产重抽；该批次随后提交为 `4e042b8`，未推送；生产仍按 A 档增量，B 档单独评审，C 档暂不重切。
+- **独立复审补充修复**：普通 Ollama `chat()` 在服务端 JSON 配置开启时仍发送 `/no_think`，只有本次 JSON
+  调用可省略；`--doc-list` 兼容 UTF-8 BOM 空清单并在写操作前退出；旧 schema 的
+  `answer_state --only-missing` 预览不再查询缺失状态列。`chunker` 仅补无逗号数量问句和
+  “在……当……时，……”独立场景问句边界，继续排除说明句；两条真实样本恢复成题，默认 20 篇指标保持
+  9898 题 / 1548 空答案 / 467 弱题 / 缺 0 篇，未重建基线。
+  - 门禁：全量 pytest **993 passed / 5 skipped / 6 xfailed**（1004 collected，84.05 s）；Ruff、compileall、
+    wheel 通过；privacy_scan 307 文件 0 命中；`doc_audit` 64 份文档 0 问题。未执行生产重抽或生产写入，未推送。
 - **文档状态头门禁收尾**：补齐 docs/52、57、58、59 缺失的状态头；`doc_audit` 64 份文档 0 问题。
 
 ## 2026-11-24

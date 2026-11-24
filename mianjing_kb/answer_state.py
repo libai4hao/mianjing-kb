@@ -161,8 +161,11 @@ def main(argv=None) -> int:
                                     run_min_len=args.run_min_len))
                 database = _database_metrics(conn)
                 if args.only_missing:
-                    have = {r[0] for r in conn.execute(
+                    has_state = "answer_state" in {
+                        r[1] for r in conn.execute("PRAGMA table_info(questions)")}
+                    have = ({r[0] for r in conn.execute(
                         "select qid from questions where coalesce(answer_state,'')<>''")}
+                            if has_state else set())
                     res["state"] = {q: s for q, s in res["state"].items() if q not in have}
                     res["counts"] = dict(Counter(res["state"].values()))
                     res["total"] = len(res["state"])

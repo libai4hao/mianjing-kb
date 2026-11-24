@@ -133,6 +133,34 @@ class TestPreviewIsReadOnly:
         c.close()
 
 
+def test_only_missing_preview_accepts_legacy_schema_without_state_column(tmp_path, capsys):
+    import json
+
+    from mianjing_kb import answer_state
+    from mianjing_kb.kb import db as kbdb
+
+    path = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE schema_version (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+    for version, _sql in kbdb.MIGRATIONS:
+        if version < "018":
+            kbdb._apply_one(conn, version, _sql)
+    conn.execute("INSERT INTO questions (doc_hash, seq, q_text, a_text, span_start, span_end, "
+                 "q_norm, q_norm_hash, simhash, extracted_at) "
+                 "VALUES ('d', 1, '足够长的一道面试题是什么', '', 0, 1, 'n', 'h', 0, 'now')")
+    conn.commit()
+    conn.close()
+    before = path.read_bytes()
+
+    assert answer_state.main(["--db", str(path), "--only-missing"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["subset"]["total"] == 1
+    assert out["database"]["total"] == 1
+    assert out["database"]["nonempty_by_state"] == {}
+    assert path.read_bytes() == before
+
+
 def test_only_missing_reports_subset_and_database_scopes(tmp_path, monkeypatch, capsys):
     import json
     from mianjing_kb import answer_state

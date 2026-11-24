@@ -518,6 +518,26 @@ def strip_bold(s: str) -> str:
     return m.group(1).strip() if m else s
 
 
+def _is_standalone_question_intent(text: str) -> bool:
+    """独立问句补充：直接数量问法，或条件场景后接完整问句。"""
+    s = unicodedata.normalize("NFKC", strip_bold(str(text or "").strip()))
+    if not s or len(s) > 200 or s.endswith("。"):
+        return False
+    if (re.match(r'^(?:如果|最后|首先|其次|再次|然后|接着|当前|目前|这时|此时|因此|所以|'
+                 r'例如|比如|其中|通常|一般|作用|原理|实现方式|特点|优点|缺点|步骤|总结|注意|说明)', s)
+            or re.search(r'表示|也就是说|换言之|举例来说', s)):
+        return False
+    if (not re.search(r'[，,；;]', s)
+            and re.search(
+                r'(?:最多|最少|至少|至多|一共|总共|共)[^。！？!]{0,40}'
+                r'(?:多少(?:个|种|类|项|次|遍|轮|字节|位|条)|哪[一二三四五六七八九十0-9]+个(?:方面|问题|维度))',
+                s)):
+        return True
+    return bool(re.match(r'^在[^。！？!]{0,80}[，,]当[^。！？!]{0,100}时[，,]', s)
+                and re.search(r'如何|怎么|为什么|为何|哪个|哪种', s)
+                and not re.search(r'表示|说明|例如|比如|必须|需要|规定|相当于|首先|然后', s))
+
+
 def _has_question_intent(text: str) -> bool:
     """题干/任务语义：问词在行首或句尾疑问形态；英文类型名续段（class）？）不算。"""
     s = unicodedata.normalize("NFKC", strip_bold(str(text or "").strip()))
@@ -1222,7 +1242,8 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                     and (not inner.rstrip().endswith(("：", ":")) or fill_blank_question)
                     and not _is_codeish(inner))
             if standalone and (
-                    ((prev_blank or last_problem_mark) and _is_qline(inner))
+                    ((prev_blank or last_problem_mark)
+                     and (_is_qline(inner) or _is_standalone_question_intent(inner)))
                     or _is_strong_qline(inner)):
                 bounds.append({"line": i, "parts": [(None, _trim_question_text(inner))], "style": "问句"})
                 list_pending = False

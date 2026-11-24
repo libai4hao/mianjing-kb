@@ -541,6 +541,17 @@ def test_no_think_uses_config_json_mode_for_ollama(monkeypatch):
     assert calls[1]["response_format"] == {"type": "json_object"}
 
 
+def test_plain_ollama_chat_keeps_no_think_when_config_json_mode_enabled(monkeypatch):
+    from mianjing_kb import llm_client as lc
+    calls = []
+    monkeypatch.setattr(lc, "_post", lambda cfg, payload: calls.append(payload) or
+                        (200, {"choices": [{"message": {"content": "ok"}}], "usage": {}}))
+    cfg = resolve_config(env={"LLM_JSON_MODE": "1"})
+    chat(cfg, "s", "u", json_mode=False, retries=1)
+    assert calls[0]["messages"][1]["content"].endswith("/no_think")
+    assert "response_format" not in calls[0]
+
+
 def test_redact_local_absolute_paths_without_touching_urls(tmp_path):
     """ISSUE-05：本机绝对路径（Windows 盘符/UNC/POSIX home/WSL）外发前必须遮罩。
 

@@ -432,8 +432,8 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
     for attempt in range(1, retries + 1):
         if attempt > 1 and json_mode:
             sys_prompt = outbound_system + "\n只输出严格 JSON，不要任何其他文字、围栏或解释。"
-        # /no_think 是 Ollama 专用控制标记；chat_json 仍需关闭默认思考，只有服务端 JSON 模式可省略。
-        u_text = (outbound_user if cfg.get("json_mode") or not ollama_endpoint
+        # /no_think 是 Ollama 专用控制标记；只有本次 JSON 调用且服务端支持时可省略。
+        u_text = (outbound_user if (json_mode and cfg.get("json_mode")) or not ollama_endpoint
                   else outbound_user + "\n/no_think")
         payload = {
             "model": cfg["model"],

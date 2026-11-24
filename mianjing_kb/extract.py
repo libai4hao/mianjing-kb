@@ -480,7 +480,7 @@ def _filter_by_gate(pool, statuses, require_gate: bool):
 def _read_doc_list(path: str) -> set[str]:
     """定向补切清单：每行一个 doc_hash，空行与 # 注释忽略。"""
     out: set[str] = set()
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
         s = line.strip()
         if s and not s.startswith("#"):
             out.add(s)

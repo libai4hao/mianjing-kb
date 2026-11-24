@@ -383,11 +383,12 @@ def test_doc_list_empty_returns_usage_error_before_writes(tmp_env, tmp_path, cap
     assert conn.execute("SELECT status FROM source_documents WHERE doc_hash=?", (h,)).fetchone()[0] == "classified"
 
 
+@pytest.mark.parametrize("content", ["\ufeff# 空清单\n", "\ufeff"])
 @pytest.mark.parametrize("plan", [False, True])
-def test_empty_doc_list_does_not_create_missing_database(tmp_path, capsys, plan):
+def test_empty_doc_list_does_not_create_missing_database(tmp_path, capsys, plan, content):
     target = tmp_path / "missing" / "kb.sqlite"
     lst = tmp_path / "empty-docs.txt"
-    lst.write_text("# 空清单\n", encoding="utf-8")
+    lst.write_text(content, encoding="utf-8")
     argv = ["--db", str(target), "--doc-list", str(lst)]
     if plan:
         argv.append("--plan")
