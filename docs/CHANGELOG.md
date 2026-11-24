@@ -53,6 +53,15 @@
   `refresh --reembed` 21,643 题 / 21,643 向量（375.5 s，G1–G5+G8 PASS）、`verify_ledger` 全 PASS。
   A+B 合计：19,913 → 21,643 题、去重题干 12,765、`label_facts` 仍 10,194/孤儿 0；
   落库结果与 `docs/54` 影子逐项一致。当前待打标 1,546 条（B 1,365 + A 181）。
+- **新题打标落库 + 83 条终审处置**（`docs/57`）：1,490 条打标入 staging（1,910.8 s，failed 3、
+  `skipped_code` 53），复核 agree 29 / disagree 41；首次 merge 被质量门禁拦下
+  （`pending_review=42`）。83 条按"能落词表则 `suggest`、否则 `drop`"处置：24 条采纳建议、
+  59 条丢弃（42 pending 含 15 碎片 + 27 词表外 topic，17 disagree 建议 topic 不在词表）。
+  `--review-resolve` 后 `merge` PASS：merged 1,431、`n_review_hold 0`，顺带 `hash_consistency`
+  补齐 topic 33 / tags 31；`refresh --reembed` 357.9 s（G1–G5+G8 PASS，快照
+  `rollback/面经库-20261124-225456.db`），`verify_ledger` 全 PASS。
+  标签覆盖 17,424→18,793 行、tags 空 4,310→2,850、`label_facts` 10,194→11,075、
+  其他主题占比 4.18%、staging 清零。剩余未标：新题区间 106 行（碎片/drop/失败），老题存量 2,744 行。
 
 ## 2026-11-23
 
