@@ -39,16 +39,17 @@ def _now() -> str:
 
 
 def pick_targets(conn, limit: int = 0, states: tuple[str, ...] | None = None) -> list[tuple]:
-    """待补答：空答案、未留痕、非目录伪题。"""
+    """待补答：空答案、未留痕（或历史遗留的 llm_error）、非目录伪题。"""
     states = states or ("boundary_gap", "no_answer_source", "ok")
-    marks = ",".join("'%s'" % s for s in states)
+    marks = ",".join("?" * len(states))
     sql = ("SELECT qid, q_text FROM questions "
-           "WHERE TRIM(COALESCE(a_text,''))='' AND COALESCE(answer_source,'')='' "
+           "WHERE TRIM(COALESCE(a_text,''))='' "
+           f"AND (COALESCE(answer_source,'')='' OR COALESCE(answer_source,'')='llm_error') "
            f"AND COALESCE(answer_state,'') IN ({marks}) "
            "ORDER BY answer_state, qid")
     if limit:
         sql += f" LIMIT {int(limit)}"
-    return conn.execute(sql).fetchall()
+    return conn.execute(sql, states).fetchall()
 
 
 def stats(conn) -> dict:
@@ -58,7 +59,8 @@ def stats(conn) -> dict:
     by = {k or "(原文空)": v for k, v in rows}
     left = conn.execute(
         "SELECT COUNT(*) FROM questions WHERE TRIM(COALESCE(a_text,''))='' "
-        "AND COALESCE(answer_source,'')='' AND COALESCE(answer_state,'') "
+        "AND (COALESCE(answer_source,'')='' OR COALESCE(answer_source,'')='llm_error') "
+        "AND COALESCE(answer_state,'') "
         "IN ('boundary_gap','no_answer_source','ok')").fetchone()[0]
     return {"empty_by_source": by, "todo": left}
 
@@ -97,12 +99,15 @@ def run(conn, qids: list[tuple], *, concurrency: int = 2, dry_run: bool = False,
                 stats_out["refused"] += 1
             else:
                 stats_out["error"] += 1
-            if not dry_run:
+            if not dry_run and src in (REFUSED, "llm"):
+                # 只有"模型给出终态"才写库：llm 写正文，llm_refused 记拒答（下轮不再重试）
                 conn.execute(
                     "UPDATE questions SET a_text=?, answer_source=?, answer_model=?, answered_at=? "
                     "WHERE qid=?", (text, src, cfg.get("model"), _now(), q))
                 if i % 50 == 0:
                     conn.commit()
+            # llm_error（网络/服务异常）不落库：留空让下一轮还能重试，
+            # 否则一次 Ollama 掉线就把整批题记成"已完成"且永不重试（2026-11-24 code review P1-2）
             if i % 200 == 0:
                 print(json.dumps({"done": i, "of": len(todo), **{k: stats_out[k] for k in
                                   ("answered", "refused", "error")}}, ensure_ascii=False))
@@ -112,7 +117,8 @@ def run(conn, qids: list[tuple], *, concurrency: int = 2, dry_run: bool = False,
     stats_out["per_q_sec"] = round(stats_out["elapsed_sec"] / max(1, len(todo)), 2)
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
-        with open(out_dir / "backfill-log.jsonl", "w", encoding="utf-8", newline="\n") as fh:
+        # 追加写：断点续跑的多次记录不能互相覆盖（code review P2-8）
+        with open(out_dir / "backfill-log.jsonl", "a", encoding="utf-8", newline="\n") as fh:
             for r in log:
                 fh.write(json.dumps(r, ensure_ascii=False) + "\n")
     return stats_out

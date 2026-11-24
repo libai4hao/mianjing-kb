@@ -194,7 +194,7 @@ def test_merge_g6_gate_blocks_and_passes(mini_db, monkeypatch, tmp_path):
 
 
 def test_merge_propagates_topic_across_same_hash(mini_db, monkeypatch, tmp_path):
-    """同 q_norm_hash 的拷贝 merge 后统一 topic，空拷贝顺带补齐 tags（docs/51 §5）。"""
+    """同 q_norm_hash 的拷贝 merge 后补空 topic，空拷贝顺带补齐 tags（docs/51 §5）。"""
     mini_db.execute("UPDATE questions SET q_norm_hash='duphash' WHERE qid IN (1,2)")
     mini_db.commit()
     mini_db.execute(
@@ -204,10 +204,31 @@ def test_merge_propagates_topic_across_same_hash(mini_db, monkeypatch, tmp_path)
     mini_db.commit()
     out = bl.merge(mini_db)
     assert out["ok"] and out["merged"] == 1
-    assert out["hash_consistency"]["hash_rows_changed"] >= 1
+    assert out["hash_consistency"]["topic_filled"] >= 1
+    assert 2 in out["hash_consistency"]["changed_qids"]
     topic2 = mini_db.execute("SELECT topic FROM questions WHERE qid=2").fetchone()[0]
     tags2 = mini_db.execute("SELECT tags FROM questions WHERE qid=2").fetchone()[0]
-    assert topic2 == "Java基础" and tags2 == '["HashMap"]'
+    assert topic2 == "Java基础" and tags2 == '["集合"]'   # HashMap 归一成词表主键
+
+
+def test_merge_hash_consistency_does_not_overwrite_by_default(mini_db):
+    """默认 fill-only：已有且不同的 topic 不被多数值覆盖；显式 overwrite 才改（P1-3）。"""
+    mini_db.execute("UPDATE questions SET q_norm_hash='h2', topic=CASE qid "
+                    "WHEN 1 THEN 'Java基础' WHEN 2 THEN 'Redis' WHEN 3 THEN 'Java基础' "
+                    "ELSE topic END WHERE qid IN (1,2,3)")
+    mini_db.execute(
+        "INSERT INTO labels_staging (qid, q_norm_hash, topic, qtype, difficulty, tags, provider, "
+        "model, redacted, latency_ms, tokens, labeled_at) "
+        "VALUES (4,'hash4','算法','八股',3,'[\"排序\"]','p','m',0,1,1,'now')")
+    mini_db.commit()
+    out = bl.merge(mini_db)
+    assert out["ok"], out
+    assert out["hash_consistency"]["topic_overwritten"] == 0
+    assert mini_db.execute("SELECT topic FROM questions WHERE qid=2").fetchone()[0] == "Redis"
+    # 显式覆盖模式：2 份 Java基础 vs 1 份 Redis → 覆盖（内部函数直调，验证开关有效）
+    res = bl._propagate_by_hash(mini_db, ["h2"], overwrite=True)
+    assert res["topic_overwritten"] == 1
+    assert mini_db.execute("SELECT topic FROM questions WHERE qid=2").fetchone()[0] == "Java基础"
 
 
 def test_merge_blocked_on_bad_schema(mini_db):

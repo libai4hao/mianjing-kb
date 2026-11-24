@@ -922,16 +922,22 @@ def review_resolve(conn, spec: str) -> dict:
     return {"resolved": resolved, "unknown": unknown}
 
 
-def _propagate_by_hash(conn, hashes) -> dict:
+def _propagate_by_hash(conn, hashes, *, overwrite: bool = False) -> dict:
     """同一 q_norm_hash 的多份拷贝（同题出现在多篇源文档）落库后统一 topic。
 
     起因（docs/51 §5）：拷贝是逐 qid 独立打标的，4,556 组拷贝里 934 处 topic 互相矛盾，
-    检索侧同一道题出现两种主题，主题过滤会漏。merge 时把该 hash 的多数值推给所有拷贝，
-    平票不猜；顺带把空白拷贝的 tags/qtype/difficulty 从有值的兄弟行补齐（等于免费覆盖待打标）。
+    检索侧同一道题出现两种主题，主题过滤会漏。
+
+    默认 **fill-only**：只给空 topic / "其他" 的拷贝补多数值，不动已有且不同的 topic
+    —— 多数值不等于正确值（6 份错标压过 1 份对是真实可能的），覆盖式改写必须显式开
+    `overwrite=True`（CLI `--hash-consistency overwrite`）。平票一律不猜。
+    顺带把空白拷贝的 tags/qtype/difficulty 从有值的兄弟行补齐（tags 先按当前口径归一，
+    防止把旧行的维度词搬回来）。输出带 changed_qids，事后可核对。
     """
     from collections import Counter
 
-    changed = filled = 0
+    filled_topic = overwritten = filled_tags = 0
+    changed_qids: list[int] = []
     for h in hashes:
         rows = conn.execute("SELECT qid, topic, qtype, difficulty, tags FROM questions "
                             "WHERE q_norm_hash=?", (h,)).fetchall()
@@ -945,20 +951,39 @@ def _propagate_by_hash(conn, hashes) -> dict:
         if any(v >= n for t, v in counts.items() if t != top):   # 平票不在门禁里猜
             continue
         src = next((r for r in rows if r["topic"] == top and r["tags"]), None)
+        src_tags = None
+        if src is not None:
+            try:
+                src_tags = json.dumps(
+                    labelspec.normalize_tags(json.loads(src["tags"]),
+                                             stopwords=tag_stopwords())[0],
+                    ensure_ascii=False) if src["tags"] else None
+            except (TypeError, ValueError):
+                src_tags = src["tags"]
         for r in rows:
+            empty = not r["topic"] or r["topic"] == OTHER_TOPIC
             if r["topic"] != top:
-                conn.execute("UPDATE questions SET topic=? WHERE qid=?", (top, r["qid"]))
-                changed += 1
-            if src is not None and not r["tags"]:
+                if empty:
+                    conn.execute("UPDATE questions SET topic=? WHERE qid=?", (top, r["qid"]))
+                    filled_topic += 1
+                    changed_qids.append(r["qid"])
+                elif overwrite:
+                    conn.execute("UPDATE questions SET topic=? WHERE qid=?", (top, r["qid"]))
+                    overwritten += 1
+                    changed_qids.append(r["qid"])
+            if src_tags and not r["tags"]:
                 conn.execute(
                     "UPDATE questions SET tags=?, qtype=COALESCE(NULLIF(qtype,''), ?), "
                     "difficulty=COALESCE(difficulty, ?) WHERE qid=?",
-                    (src["tags"], src["qtype"], src["difficulty"], r["qid"]))
-                filled += 1
-    return {"hash_rows_changed": changed, "hash_rows_filled": filled}
+                    (src_tags, src["qtype"], src["difficulty"], r["qid"]))
+                filled_tags += 1
+                changed_qids.append(r["qid"])
+    return {"mode": "overwrite" if overwrite else "fill",
+            "topic_filled": filled_topic, "topic_overwritten": overwritten,
+            "tags_filled": filled_tags, "changed_qids": sorted(set(changed_qids))[:20]}
 
 
-def merge(conn, drop_orphans: bool = False) -> dict:
+def merge(conn, drop_orphans: bool = False, hash_consistency: str = "fill") -> dict:
     """G6 门禁复核 → FAIL 拒绝；PASS/WARN 放行（WARN=软门禁，提示人工抽查）。
 
     2026-11-19 审核修复（docs/项目审核报告/修复方案-2026-11-19.md）：
@@ -1059,7 +1084,8 @@ def merge(conn, drop_orphans: bool = False) -> dict:
         "SELECT DISTINCT q_norm_hash FROM labels_staging "
         "WHERE q_norm_hash IS NOT NULL AND q_norm_hash<>'' "
         "  AND review_state IS NOT 'disagree' AND review_state IS NOT 'pending'")]
-    consistency = _propagate_by_hash(conn, merged_hashes)
+    consistency = (_propagate_by_hash(conn, merged_hashes, overwrite=(hash_consistency == "overwrite"))
+                   if hash_consistency != "off" else {"mode": "off"})
     conn.execute("DELETE FROM labels_staging WHERE review_state IS NOT 'disagree' "
                  "AND review_state IS NOT 'pending'")
     conn.commit()
@@ -1094,6 +1120,9 @@ def main(argv=None) -> int:
     ap.add_argument("--merge", action="store_true", help="G6 复核 + merge 进 questions")
     ap.add_argument("--drop-orphans", action="store_true",
                     help="与 --merge 连用：清除 staging 孤儿行（qid 已失效/题干已变）后继续合并")
+    ap.add_argument("--hash-consistency", choices=("fill", "overwrite", "off"), default="fill",
+                    help="同 q_norm_hash 多拷贝落库后的主题处理：fill=只补空/其他（默认）、"
+                         "overwrite=多数值覆盖不一致的已有 topic、off=不做")
     # 批次二 G2（2026-11-19）：金标层——分层抽样出待人工标注清单 + 回灌落库
     ap.add_argument("--golden-sample", type=int, default=0,
                     help="从 staging 按 topic 分层抽 N 条 → build/golden_todo.json（人工填 gold）")
@@ -1235,7 +1264,8 @@ def main(argv=None) -> int:
             # merge 会写 questions/label_facts，属于不可重建的事实源 → 先热备份；
             # 已经在 main 入口持有 kb 写锁，这里不再重复加锁。
             db.backup_db(args.db)
-            out = merge(conn, drop_orphans=args.drop_orphans)
+            out = merge(conn, drop_orphans=args.drop_orphans,
+                        hash_consistency=args.hash_consistency)
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if out["ok"] else 1
         qids = None

@@ -56,3 +56,23 @@ def test_stats_reports_remaining(conn):
     s = ab.stats(conn)
     assert s["todo"] == 3                 # 1/4/2 仍待补；3 目录伪题不计
     assert s["empty_by_source"]["(原文空)"] >= 4
+
+
+def test_run_does_not_persist_llm_error(conn, monkeypatch):
+    """P1-2：单条调用失败不能把题记成终态，否则一次掉线就永久跳过（code review 2026-11-24）。"""
+    def boom(*a, **k):
+        raise RuntimeError("URLError: connection refused")
+    monkeypatch.setattr(ab.llm_client, "chat", boom)
+
+    res = ab.run(conn, [(1, "什么是 JVM 类加载？")], concurrency=1)
+    assert res["error"] == 1
+    row = conn.execute("SELECT a_text, answer_source FROM questions WHERE qid=1").fetchone()
+    assert row["answer_source"] == "" and row["a_text"] == ""
+    assert [q for q, _ in ab.pick_targets(conn)][0] == 1      # 仍可被下一轮选中
+
+
+def test_pick_targets_retries_legacy_llm_error(conn):
+    """历史遗留 llm_error 行（旧版本写进去的）也要能重试。"""
+    conn.execute("UPDATE questions SET answer_source='llm_error' WHERE qid=2")
+    conn.commit()
+    assert 2 in [q for q, _ in ab.pick_targets(conn)]

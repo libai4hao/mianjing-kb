@@ -76,6 +76,18 @@ def test_tag_stopwords_drop_dimension_duplicates():
     assert "tag_dimension_dropped:3" in spec["issues"]
 
 
+def test_tag_stopwords_drop_case_variants():
+    """停用词比较不区分大小写：词表是 Zookeeper/Memcached，模型常写 ZooKeeper/memcached。
+
+    code review P1-1：精确比对会漏剔，生产库实测残留 92 次这类写法。
+    """
+    spec = ls.validate_label({"topic": "Zookeeper", "qtype": "八股", "difficulty": 2,
+                              "tags": ["ZooKeeper", "memcached", "选主"]},
+                             vocab=("Zookeeper",), tag_stopwords=frozenset({"Zookeeper", "Memcached"}))
+    assert spec["tags"] == ["选主"]
+    assert spec["tag_dim_dropped"] == 2
+
+
 def test_validate_rejects_bad_qtype_and_difficulty():
     with pytest.raises(ValueError, match="qtype"):
         ls.validate_label({"topic": "JVM", "qtype": "玄学", "difficulty": 3})

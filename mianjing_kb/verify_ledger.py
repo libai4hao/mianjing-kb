@@ -717,6 +717,7 @@ def g6b_golden(kb_conn) -> dict:
         "       s.topic, s.qtype, s.difficulty "
         "FROM golden_labels g JOIN labels_staging s ON s.q_norm_hash=g.q_norm_hash").fetchall()
     source = "staging"
+    sql_source = sql
     if not rows:                 # merge 后 staging 清空 → 回落到生产库（同一个 hash 键）
         try:
             rows = kb_conn.execute(
@@ -725,6 +726,8 @@ def g6b_golden(kb_conn) -> dict:
                 "FROM golden_labels g JOIN questions q ON q.q_norm_hash=g.q_norm_hash"
             ).fetchall()
             source = "questions"
+            sql_source = ("SELECT g.topic_gold, q.topic FROM golden_labels g "
+                          "JOIN questions q ON q.q_norm_hash=g.q_norm_hash")
         except sqlite3.OperationalError:      # 老库无 q_norm_hash 列 → 保持原语义（无交集）
             rows = []
     # 同 hash 的多份拷贝（同一题出现在多篇源文档）算一次抽检：否则重复行把 n 放大、
@@ -753,20 +756,28 @@ def g6b_golden(kb_conn) -> dict:
         """同族视为一致：产品级 topic 与所属组级 topic 只是粗细口径不同，不是标错。"""
         return topic_family_root(gold) == topic_family_root(pred)
 
-    n_ok = sum(1 for r in rows if _eq(r["topic_gold"], r["topic"]))
-    topic_acc = n_ok / n
-    topic_lb = _wilson_lower(n_ok, n)
+    n_exact = sum(1 for r in rows if (r["topic"] or "") == r["topic_gold"])
+    exact_acc = n_exact / n
+    topic_acc = n_exact / n
+    topic_lb = _wilson_lower(n_exact, n)
     qt = [r for r in rows if r["qtype_gold"]]
     qtype_acc = (sum(1 for r in qt if r["qtype"] == r["qtype_gold"]) / len(qt)) if qt else None
     df = [r for r in rows if r["difficulty_gold"]]
     diff_acc = (sum(1 for r in df if r["difficulty"] == r["difficulty_gold"]) / len(df)) if df else None
     by_topic: dict[str, list[bool]] = {}
     matrix: dict[str, dict[str, int]] = {}
+    matrix_family: dict[str, dict[str, str]] = {}
     for r in rows:
         ok = _eq(r["topic_gold"], r["topic"])
-        by_topic.setdefault(r["topic_gold"], []).append(ok)
+        by_topic.setdefault(r["topic_gold"], []).append(
+            (r["topic"] or "") == r["topic_gold"])
         matrix.setdefault(r["topic_gold"], {})
         matrix[r["topic_gold"]][r["topic"]] = matrix[r["topic_gold"]].get(r["topic"], 0) + 1
+        # 矩阵里同一个 (gold,pred) 可能有的算对、有的算错（族谱只影响判定），单列标注同族关系
+        matrix_family.setdefault(r["topic_gold"], {})[r["topic"]] = (
+            "same_family" if ok else "different")
+    n_family = sum(1 for r in rows if _eq(r["topic_gold"], r["topic"]))
+    family_acc = n_family / n
     weak = sorted(t for t, oks in by_topic.items()
                   if len(oks) >= G6B_WEAK_MIN_N and sum(oks) / len(oks) < 0.8)
     fails, state = [], "PASS"
@@ -778,10 +789,13 @@ def g6b_golden(kb_conn) -> dict:
                  {"golden": n_gold, "matched": n, "source": source,
                   "topic_acc": round(topic_acc, 4),
                   "topic_acc_lower95": round(topic_lb, 4),
+                  "topic_acc_family": round(family_acc, 4),
+                  "topic_acc_family_note": "同族（产品级 vs 组级）也算对的口径，仅参考；门禁判 topic_acc",
                   "weak_min_n": G6B_WEAK_MIN_N,
                   "qtype_acc": round(qtype_acc, 4) if qtype_acc is not None else None,
                   "difficulty_acc": round(diff_acc, 4) if diff_acc is not None else None,
-                  "weak_topics": weak, "matrix": matrix}, sql)
+                  "weak_topics": weak, "matrix": matrix,
+                  "matrix_family": matrix_family}, sql_source)
 
 
 def g8_single_identity(out_conn) -> dict:

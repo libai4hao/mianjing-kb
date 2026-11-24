@@ -139,7 +139,9 @@ def normalize_tags(raw, *, max_items: int | None = None, max_len: int | None = N
     if not isinstance(raw, (list, tuple)):
         return [], 0, 0
     syn = tag_synonyms() if synonyms is None else synonyms
-    stop = set(stopwords or ())
+    # 停用词不区分大小写：词表里是 `Zookeeper`/`Memcached`，模型常写 `ZooKeeper`/`memcached`，
+    # 精确比对会漏剔（2026-11-24 生产库实测残留 92 次这种写法）。
+    stop = {str(s).strip().lower() for s in (stopwords or ())}
     out: list[str] = []
     hits = 0
     dropped = 0
@@ -153,7 +155,7 @@ def normalize_tags(raw, *, max_items: int | None = None, max_len: int | None = N
             hits += 1
             tag = canonical
         tag = tag[:cap_len]
-        if tag in stop:
+        if tag.lower() in stop:
             dropped += 1
             continue
         key = tag.lower()

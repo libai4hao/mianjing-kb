@@ -494,18 +494,20 @@ def test_g6b_falls_back_to_questions_after_merge(tmp_path):
     conn.close()
 
 
-def test_g6b_product_and_group_topic_count_as_equal(tmp_path):
-    """粗细口径不算错：gold=消息队列、pred=RabbitMQ（同族）→ 一致；不同族仍判错。"""
+def test_g6b_family_acc_is_reported_but_not_gated(tmp_path):
+    """粗细口径只作参考：gold=消息队列、pred=RabbitMQ 时 exact=0（门禁 FAIL），family=1.0。
+
+    2026-11-24 code review P2-5：族谱等价会把"粗粒度对"掩盖成"对"，
+    所以门禁只认字面准确率，family 口径单列在 detail 里供人判断。
+    """
     conn = _golden_db(tmp_path)
     for i in range(50):
         _pair(conn, i, gold="消息队列", pred="RabbitMQ")
     conn.commit()
     g = vl.g6b_golden(conn)
-    assert g["state"] == "PASS" and g["detail"]["topic_acc"] == 1.0
-    conn.execute("UPDATE labels_staging SET topic='操作系统' WHERE qid < 1020")
-    conn.commit()
-    g2 = vl.g6b_golden(conn)
-    assert g2["state"] == "FAIL" and g2["detail"]["topic_acc"] == 0.6
+    assert g["detail"]["topic_acc"] == 0.0
+    assert g["detail"]["topic_acc_family"] == 1.0
+    assert g["state"] == "FAIL"
     conn.close()
 
 

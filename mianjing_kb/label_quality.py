@@ -33,24 +33,22 @@ VOCAB_HIT_WARN = 0.20
 DIM_DUP_WARN = 0.02
 
 
-def _tag_rates(conn) -> dict | None:
-    """从 staging 现有 tags 复算两个标签侧指标（不依赖打标时的瞬时统计）。
+def _tag_rates(rows) -> dict | None:
+    """用 assess 已取到的行算两个标签侧指标（不另扫一遍 staging）。
 
     词表命中率 = 归一后落在 `recommended_tags()` 的标签占比；
     维度重复率 = 归一后仍等于 topic/组名/qtype/岗位的标签占比。
-    staging 缺 tags 列的极简库（部分单测）返回 None，不参与判。
+    停用词比较不区分大小写（词表是 Zookeeper/Memcached，模型常写 ZooKeeper/memcached）。
     """
-    try:
-        rows = conn.execute(
-            "SELECT tags FROM labels_staging WHERE review_state IS NOT 'disagree'").fetchall()
-    except sqlite3.OperationalError:
-        return None
     vocab = set(recommended_tags())
     syn = tag_synonyms()
-    stop = tag_stopwords()
+    stop = {str(s).strip().lower() for s in tag_stopwords()}
     total = hit = dup = 0
     for r in rows:
-        raw = r["tags"] if not isinstance(r, tuple) else r[0]
+        try:
+            raw = r["tags"]
+        except (IndexError, KeyError):
+            return None                     # 极简单测库没有 tags 列
         try:
             arr = json.loads(raw) if raw else []
         except ValueError:
@@ -65,7 +63,7 @@ def _tag_rates(conn) -> dict | None:
             canon = syn.get(t.lower(), t)
             if canon in vocab:
                 hit += 1
-            if t in stop or canon in stop:
+            if t.lower() in stop or canon.lower() in stop:
                 dup += 1
     if total == 0:
         return None
@@ -75,10 +73,16 @@ def _tag_rates(conn) -> dict | None:
 
 def assess(conn, *, other_hard: float = 0.25, other_warn: float = 0.15,
            min_batch: int = 20) -> dict:
-    rows = conn.execute(
-        "SELECT s.qid, s.topic, s.qtype, s.review_state, q.q_text, q.a_text "
-        "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
-        "WHERE s.review_state IS NOT 'disagree'").fetchall()
+    try:
+        rows = conn.execute(
+            "SELECT s.qid, s.topic, s.qtype, s.review_state, s.tags, q.q_text, q.a_text "
+            "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
+            "WHERE s.review_state IS NOT 'disagree'").fetchall()
+    except sqlite3.OperationalError:        # 极简单测库无 tags 列 → 退回不取 tags
+        rows = conn.execute(
+            "SELECT s.qid, s.topic, s.qtype, s.review_state, q.q_text, q.a_text "
+            "FROM labels_staging s JOIN questions q ON q.qid=s.qid "
+            "WHERE s.review_state IS NOT 'disagree'").fetchall()
     n = len(rows)
     if n == 0:
         # 全是孤儿行时（questions JOIN 为空）不在质量门禁里判，交给 merge 的孤儿逻辑，
@@ -114,7 +118,7 @@ def assess(conn, *, other_hard: float = 0.25, other_warn: float = 0.15,
         fails.append(f"other_topic_rate={other_rate:.2%}>{other_hard:.0%}")
     elif other_rate > other_warn:
         warns.append(f"other_topic_rate={other_rate:.2%}>{other_warn:.0%}")
-    rates = _tag_rates(conn)
+    rates = _tag_rates(rows)
     if rates:
         if n >= min_batch and rates["vocab_hit_rate"] < VOCAB_HIT_WARN:
             warns.append(f"tag_vocab_hit={rates['vocab_hit_rate']:.2%}<{VOCAB_HIT_WARN:.0%}")
