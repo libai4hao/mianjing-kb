@@ -36,6 +36,12 @@
   `integrity_check=ok`、逻辑指纹复原一致，生产指纹 `prod_untouched=true`。
   另记录一个操作陷阱：`verify_ledger` 会写生产 `build/verify_report.json`，影子库不能直接跑门禁，
   需先 `refresh` 出影子检索库。
+- **`extract --doc-list` 定向补切**（`docs/54`）：新增最小开关，只重切清单内 doc_hash，
+  未知 hash 计数不报错，并强制跳过孤儿清理（`purge_skipped="doc-list"`），避免误删未处理文档的题；
+  测试 `test_doc_list_processes_only_listed_docs`。
+  影子验证：A（生产 0 题）+B（无标签无补答）共 92 篇、1,789 题、2.5 s，
+  `label_facts` 零损失、补答 4,233/947 不变、去重题干 +917、旧题干仅消失 11 个。
+  C 档（有标签/补答的 683 篇、41,983 题）不动；落生产需连带 answer_state/打标/补答/`refresh --reembed`。
 
 ## 2026-11-23
 

@@ -345,6 +345,16 @@ def _filter_by_gate(pool, statuses, require_gate: bool):
     return kept, skipped
 
 
+def _read_doc_list(path: str) -> set[str]:
+    """定向补切清单：每行一个 doc_hash，空行与 # 注释忽略。"""
+    out: set[str] = set()
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s and not s.startswith("#"):
+            out.add(s)
+    return out
+
+
 def _run(args) -> int:
     read_only = bool(args.dry_run or args.plan or args.stats)
     conn = db.connect(args.db, create=not read_only, readonly=read_only)
@@ -364,12 +374,18 @@ def _run(args) -> int:
     pool, mapping = doc_pool(conn)
     pool_all = pool
     pool, gate_skipped = _filter_by_gate(pool, _gate_statuses(conn), args.require_gate)
+    doc_list_missing = 0
+    if getattr(args, "doc_list", None):
+        wanted = _read_doc_list(args.doc_list)
+        doc_list_missing = len(wanted - {h for h, _p in pool_all})
+        pool = [x for x in pool if x[0] in wanted]
     report_path = None if (args.plan or args.dry_run) else write_identity_report(mapping)
     if args.plan:
         print(json.dumps({
             "pool_docs": len(pool_all),
             "pool_after_gate": len(pool),
             "skipped_gate": gate_skipped,
+            "skipped_doc_list_missing": doc_list_missing,
             "md_mapped_sources": len(mapping.by_doc),
             "source_only": len(pool_all) - len(mapping.by_doc) - len(mapping.orphans),
             "orphan_md": len(mapping.orphans),
@@ -451,6 +467,8 @@ def _run(args) -> int:
         purge_skipped = None
         if args.incremental:
             purge_skipped = "incremental"
+        elif getattr(args, "doc_list", None):
+            purge_skipped = "doc-list"
         elif args.limit:
             purge_skipped = "limit"
         elif n_err > max(1, int(len(pool_all) * 0.05)):
@@ -470,6 +488,7 @@ def _run(args) -> int:
         "empty_preserved": n_empty_preserved, "errors": n_err,
         "incremental": args.incremental, "skipped_unchanged": skipped_unchanged,
         "skipped_gate": gate_skipped,
+        "skipped_doc_list_missing": doc_list_missing,
         "purged_orphan_docs": n_purged if not args.dry_run else 0,
         "purge_skipped": purge_skipped,
         "label_reattached": n_reattached if not args.dry_run else 0,
@@ -502,6 +521,9 @@ def main(argv=None) -> int:
                     help="T30：无 gate 结论的文档也跳过（默认只跳过已知 review/fail）")
     ap.add_argument("--allow-empty-overwrite", action="store_true",
                     help="允许 0 题结果覆盖已有旧题（默认保留旧题并告警）")
+    ap.add_argument("--doc-list",
+                    help="只处理清单里的 doc_hash（每行一个，# 开头为注释）；"
+                         "用于定向补切，自动跳过孤儿清理与全量统计口径")
     args = ap.parse_args(argv)
     if args.limit < 0:
         # Python 切片允许负数：--limit -1 会处理"除最后 1 件之外的整个池"（ISSUE-07）

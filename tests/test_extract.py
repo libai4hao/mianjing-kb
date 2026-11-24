@@ -316,6 +316,34 @@ def test_limit_skips_purge(tmp_env, capsys):
     assert len(rows) == 2 and all(r["questions_n"] == 2 for r in rows)
 
 
+def test_doc_list_processes_only_listed_docs(tmp_env, tmp_path, capsys):
+    """--doc-list 定向补切：只动清单里的 doc，别的不重切；孤儿清理必须跳过。"""
+    corpus, conn = tmp_env
+    h1, _ = _seed_doc(conn, corpus, "a.md", MD_A)
+    h2, _ = _seed_doc(conn, corpus, "b.md", MD_B)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    capsys.readouterr()
+    # a 的题先留一条"孤儿"哨兵，验证 doc-list 运行也不会删它
+    conn.execute(
+        "INSERT INTO questions (doc_hash, seq, q_text, a_text, span_start, span_end, "
+        "q_norm, q_norm_hash, simhash, extracted_at) VALUES (?, 1, 'x', '', 0, 1, 'x', 'x', 0, 'now')",
+        ("deadbeefdeadbeef",))
+    conn.commit()
+    lst = tmp_path / "docs.txt"
+    lst.write_text(f"# 只补 b\n{h2}\nnot-a-real-hash\n", encoding="utf-8")
+    assert extract.main(["--db", str(config.DB_PATH), "--doc-list", str(lst)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["docs"] == 1
+    assert out["purge_skipped"] == "doc-list"
+    assert out["purged_orphan_docs"] == 0
+    assert out["skipped_doc_list_missing"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash='deadbeefdeadbeef'"
+                        ).fetchone()[0] == 1
+    # 只重切了 b：b 仍是 2 题，a 的 2 题原样保留
+    per = dict(conn.execute("SELECT doc_hash, COUNT(*) FROM questions GROUP BY 1").fetchall())
+    assert per.get(h1) == 2 and per.get(h2) == 2
+
+
 def test_many_read_errors_skip_purge(tmp_env, capsys):
     """报错文档超过 5% 阈值时也不能清理，避免把未处理部分误判为孤儿。"""
     corpus, conn = tmp_env
