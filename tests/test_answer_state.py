@@ -56,3 +56,36 @@ class TestSummary:
         conn.execute("alter table questions add column answer_state text")
         conn.execute("update questions set answer_state='ok'")
         assert summary(conn)["counts"] == {"ok": 1}
+
+
+class TestOnlyMissing:
+    def test_only_missing_keeps_historical_states(self, tmp_path, monkeypatch):
+        """生产历史状态（含 qsalvage 修正）不能被全库重算改写；--only-missing 只补空值。"""
+        import sqlite3
+
+        from mianjing_kb import answer_state
+        from mianjing_kb.kb import config, db as kbdb
+
+        monkeypatch.setattr(config, "BUILD_DIR", tmp_path / "build")
+        (tmp_path / "build").mkdir()
+        p = tmp_path / "kb.sqlite"
+        conn = sqlite3.connect(str(p))
+        conn.row_factory = sqlite3.Row
+        kbdb.migrate(conn)
+        conn.execute(
+            "insert into questions (qid, doc_hash, seq, q_text, a_text, span_start, span_end, "
+            "q_norm, q_norm_hash, simhash, extracted_at, answer_state) "
+            "values (1,'d',1,'有答案的题','答案',0,1,'有答案的题','h1',0,'now','toc_noise')")   # 历史状态与重算口径不一致
+        conn.execute(
+            "insert into questions (qid, doc_hash, seq, q_text, a_text, span_start, span_end, "
+            "q_norm, q_norm_hash, simhash, extracted_at) "
+            "values (2,'d',2,'空答案题','',0,1,'空答案题','h2',0,'now')")                      # 未判，应被补上
+        conn.commit()
+        conn.close()
+
+        assert answer_state.main(["--db", str(p), "--only-missing", "--apply"]) == 0
+        c = sqlite3.connect(str(p))
+        rows = dict(c.execute("select qid, answer_state from questions").fetchall())
+        c.close()
+        assert rows[1] == "toc_noise"
+        assert rows[2] in ("boundary_gap", "no_answer_source", "toc_noise")

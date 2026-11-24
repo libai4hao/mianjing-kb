@@ -42,6 +42,13 @@
   影子验证：A（生产 0 题）+B（无标签无补答）共 92 篇、1,789 题、2.5 s，
   `label_facts` 零损失、补答 4,233/947 不变、去重题干 +917、旧题干仅消失 11 个。
   C 档（有标签/补答的 683 篇、41,983 题）不动；落生产需连带 answer_state/打标/补答/`refresh --reembed`。
+- **A 档已落生产 + 补答 + 检索库重建**（`docs/55`）：先双库 backup API 快照，再
+  `extract --doc-list` 50 篇 312 题（0.7 s）、新题判边界（ok 148 / no_answer 154 / boundary 10）、
+  `answer_backfill` 补答 43 条 / 拒 20 条（34.7 s，qwen3-4b）、`refresh --reembed` 20,225 题 + 20,225 向量
+  （442.6 s，G1–G5+G8 PASS，旧库留 `rollback/面经库-20261124-210551.db`）、`verify_ledger` 全 PASS。
+- **`answer_state --only-missing`**：发现全库重算式 `--apply` 会改写约 5 千行历史治理状态
+  （ok 14,645→19,026 等），故只允许补空值；新增开关与哨兵测试
+  `test_only_missing_keeps_historical_states`，生产已有状态一行不动。
 
 ## 2026-11-23
 

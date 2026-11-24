@@ -115,6 +115,9 @@ def main(argv=None) -> int:
     ap.add_argument("--apply", action="store_true", help="写库（默认只预览）")
     ap.add_argument("--doc-coverage-min", type=float, default=0.5)
     ap.add_argument("--run-min-len", type=int, default=8)
+    ap.add_argument("--only-missing", action="store_true",
+                    help="只给 answer_state 为空的行补判；已有状态一律不动"
+                         "（生产状态含历史治理/人工修正，全库重算会改写数千行）")
     args = ap.parse_args(argv)
 
     path = Path(args.db)
@@ -127,10 +130,19 @@ def main(argv=None) -> int:
         db.migrate(conn)
         res = classify(conn, doc_coverage_min=args.doc_coverage_min,
                        run_min_len=args.run_min_len)
+        if args.only_missing:
+            have = {r[0] for r in conn.execute(
+                "select qid from questions where coalesce(answer_state,'')<>''")}
+            res = dict(res)
+            res["state"] = {q: s for q, s in res["state"].items() if q not in have}
+            res["counts"] = dict(Counter(res["state"].values()))
+            res["total"] = len(res["state"])
+            res["empty"] = len(res["state"]) - res["counts"].get(OK, 0)
         out = {"total": res["total"], "empty": res["empty"], "counts": res["counts"],
                "doc_coverage_median": round(res["doc_coverage_median"], 3),
                "doc_coverage_min": res["doc_coverage_min"],
-               "docs_with_empty": res["doc_coverage_empty_docs"], "apply": bool(args.apply)}
+               "docs_with_empty": res["doc_coverage_empty_docs"], "apply": bool(args.apply),
+               "only_missing": bool(args.only_missing)}
         if args.apply:
             lock = "kb" if path.resolve() == Path(config.DB_PATH).resolve() else "online"
             with wlock.write_lock(lock, tool="answer_state", build_dir=config.BUILD_DIR,
