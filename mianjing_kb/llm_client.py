@@ -37,7 +37,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -246,41 +246,68 @@ _RE_LOCAL_PATH = re.compile(
     r"""(?:[A-Za-z]:\\[^\s<>"'，,。；;、）)】]+"""
     r"""|\\\\[^\s\\/]+\\[^\s\\/]+\\[^\s<>"'，,。；;、）)】]+"""
     r"""|/(?:home|Users|mnt/[a-z]/Users)/[^\s<>"'，,。；;、）)】]+)""")
-# 技术文档 URL 是题干上下文，保留 host/path；只清洗 userinfo 和敏感 query。
-_RE_URL = re.compile(r"https?://[^\s，。；）)】]+")
+# 技术文档 URL 是题干上下文，保留 host/path；只清洗 userinfo、敏感 query 与 fragment。
+_RE_URL = re.compile(r"https?://[^\s，。；）)】]+", re.I)
 _RE_SENSITIVE_QUERY = re.compile(
-    r"(?i)^(?:access[_-]?token|token|api[_-]?key|apikey|key|secret|sign|signature|"
+    r"(?i)^(?:access[_-]?token|oauth[_-]?token|id[_-]?token|refresh[_-]?token|"
+    r"client[_-]?secret|token|api[_-]?key|apikey|key|secret|sign|signature|"
     r"auth|authorization|password|passwd|pwd|session|sessionid|sig|x-amz-signature)$"
 )
+_RE_URL_PARAM = re.compile(r"(?i)(^|&amp;|[&;])([^=&#;]+)=([^&#;]*)")
+_RE_ADJACENT_URL = re.compile(r"(?<=[,;])(?=https?://)", re.I)
 _URL_SECRET_MARK = "REDACTED"
 
 
+def _sanitize_params(raw: str) -> tuple[str, bool]:
+    changed = False
+
+    def _replace(match: re.Match) -> str:
+        nonlocal changed
+        if not _RE_SENSITIVE_QUERY.match(unquote_plus(match.group(2))):
+            return match.group(0)
+        changed = True
+        return f"{match.group(1)}{match.group(2)}={_URL_SECRET_MARK}"
+
+    return _RE_URL_PARAM.sub(_replace, raw), changed
+
+
 def _sanitize_url(raw: str) -> tuple[str, bool]:
-    """保留技术 URL，但去掉 user:pass@ 与 token/signature 等敏感 query。"""
+    """保留技术 URL，但去掉 userinfo 与 query/fragment 中的敏感参数。"""
+    chunks = _RE_ADJACENT_URL.split(raw)
+    if len(chunks) > 1:
+        cleaned = []
+        changed = False
+        for chunk in chunks:
+            clean, hit = _sanitize_url(chunk)
+            cleaned.append(clean)
+            changed = changed or hit
+        return "".join(cleaned), changed
     try:
         parts = urlsplit(raw)
     except ValueError:
-        return raw, False
+        return "[URL]", True
     changed = False
     netloc = parts.netloc
     if "@" in netloc:
         netloc = netloc.rsplit("@", 1)[1]       # 去掉 userinfo，保留 host:port
         changed = True
-    pairs = parse_qsl(parts.query, keep_blank_values=True)
-    query = parts.query
-    if pairs:
-        kept = []
-        for k, v in pairs:
-            if _RE_SENSITIVE_QUERY.match(k):
-                kept.append((k, _URL_SECRET_MARK))
-                changed = True
-            else:
-                kept.append((k, v))
-        if changed:
-            query = urlencode(kept, doseq=True)
+    query, query_changed = _sanitize_params(parts.query)
+    changed = changed or query_changed
+    fragment = parts.fragment
+    prefix, separator, params = fragment.partition("?")
+    clean_prefix, prefix_changed = _sanitize_params(prefix)
+    fragment_changed = prefix_changed
+    if separator:
+        clean_params, params_changed = _sanitize_params(params)
+        fragment_changed = prefix_changed or params_changed
+        if fragment_changed:
+            fragment = clean_prefix + separator + clean_params
+    else:
+        fragment = clean_prefix
+    changed = changed or fragment_changed
     if not changed:
         return raw, False
-    clean = urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+    clean = urlunsplit((parts.scheme, netloc, parts.path, query, fragment))
     return clean, True
 
 
@@ -348,7 +375,7 @@ def redact(text: str) -> tuple[str, bool]:
         return clean
 
     # 2026-11-20：URL 不再整体遮罩——技术题常带文档/仓库链接，整段删掉会丢上下文；
-    # 只清洗 userinfo 与 token/signature 等敏感 query，host/path 保留。
+    # 只清洗 userinfo 与 query/fragment 中的敏感参数，host/path 保留。
     text = _RE_URL.sub(_url_sub, text)
     return text, hit
 

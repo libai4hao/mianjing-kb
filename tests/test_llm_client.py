@@ -183,6 +183,53 @@ def test_redact_url_keeps_path_but_strips_credentials_and_token():
     assert "https://blog.example.com/post?x=a%2Fb" in t
 
 
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("https://host/docs#access_token=abc&token_type=Bearer",
+     "https://host/docs#access_token=REDACTED&token_type=Bearer"),
+    ("https://host/docs#/callback?signature=abc&state=ok",
+     "https://host/docs#/callback?signature=REDACTED&state=ok"),
+    ("https://host/docs#token=abc&x=a%2Fb",
+     "https://host/docs#token=REDACTED&x=a%2Fb"),
+    ("https://host/docs#oauth_token=abc&x=1",
+     "https://host/docs#oauth_token=REDACTED&x=1"),
+    ("https://host/docs?x=1;token=abc",
+     "https://host/docs?x=1;token=REDACTED"),
+    ("https://host/docs?x=1&amp;token=abc&amp;y=2",
+     "https://host/docs?x=1&amp;token=REDACTED&amp;y=2"),
+    ("https://host/a,b?token=abc",
+     "https://host/a,b?token=REDACTED"),
+    ("https://host/?;token=abc",
+     "https://host/?;token=REDACTED"),
+    ("https://host/docs#token=abc?x=1",
+     "https://host/docs#token=REDACTED?x=1"),
+])
+def test_redact_url_strips_sensitive_fragment_params(raw, expected):
+    clean, hit = redact(raw)
+    assert hit
+    assert clean == expected
+
+
+def test_redact_url_matches_case_insensitive_scheme():
+    clean, hit = redact("HTTPS://host/docs#token=abc")
+    assert hit
+    assert "token=abc" not in clean and "token=REDACTED" in clean
+
+
+def test_redact_malformed_url_does_not_return_secret_verbatim():
+    assert redact("https://[bad]/?token=abc") == ("[URL]", True)
+
+
+def test_redact_urls_separated_by_ascii_comma():
+    clean, hit = redact("https://a/?x=1,https://u:p@b/?token=s")
+    assert hit
+    assert clean == "https://a/?x=1,https://b/?token=REDACTED"
+
+
+def test_redact_url_preserves_non_sensitive_fragment():
+    raw = "https://host/docs#installation?x=a%2Fb"
+    assert redact(raw) == (raw, False)
+
+
 # ---------------- chat：重试退避 / 4xx 快速失败 ----------------
 def _fake_post_factory(script):
     """script = [(status, resp), ...]，耗尽后抛 AssertionError。"""

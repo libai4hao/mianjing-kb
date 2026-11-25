@@ -52,6 +52,19 @@
   - 门禁：全量 pytest **993 passed / 5 skipped / 6 xfailed**（1004 collected，84.05 s）；Ruff、compileall、
     wheel 通过；privacy_scan 307 文件 0 命中；`doc_audit` 64 份文档 0 问题。未执行生产重抽或生产写入，未推送。
 - **文档状态头门禁收尾**：补齐 docs/52、57、58、59 缺失的状态头；`doc_audit` 64 份文档 0 问题。
+- **canonical 自动链式误合治理**（`docs/60` §4）：`question_freq.cluster()` 从 DSU 传递闭包改为
+  代表题星形挂靠，成员必须直接与中心达到 Jaccard 阈值；剩余成员重新选中心。`report` 暴露代表题，
+  canonical 标题/ID 粘性/topic/witness 与增量吸附口径对齐；审计改判星形不变量，高相似跨簇不再单独
+  判 FAIL。无 schema 或 CLI 变更，生产派生表未重建。同步修正 G9 已实现、A/B 档已上线、C 档未执行，
+  以及 canonical 稳定键与 refresh rollback 快照保留 3 份等过期口径。
+  - 门禁：canonical/共用聚类/审计定向 **44 passed**；全量 pytest **1000 passed / 5 skipped / 6 xfailed**
+    （1011 collected，86.28 s）；Ruff、compileall、wheel、privacy_scan、`doc_audit`、`chunk_regress --check`
+    均通过。未执行生产重抽、生产 canonical 重建或推送。
+- **LLM URL fragment 脱敏**：`_sanitize_url()` 将敏感参数清洗扩展到 fragment，覆盖
+  `#access_token=...` 与 `#/callback?signature=...`；普通 fragment 保持原样。聚焦复审后补齐
+  大写 scheme、非法 URL、OAuth 键、相邻 URL、合法逗号路径、`;`/`&amp;` 与 fragment `?` 前缀等边界。
+  LLM 客户端 **92 passed**，全量 pytest **1013 passed / 5 skipped / 6 xfailed**（1024 collected，89.79 s）；
+  Ruff、compileall、wheel、privacy_scan、`doc_audit`、`chunk_regress --check` 均通过。
 
 ## 2026-11-24
 
