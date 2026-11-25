@@ -49,6 +49,19 @@ S3 真章节标题是硬边界：结束答案、重置题号，leftovers(章节�
 S4 行内粘连层级题号拆虚拟行：前缀留父答案，新题从编号处开始，span 精确回溯。
 S5 强证据题干续行（（implements）/class）？）从答案区收回题干，a_segs 同步裁剪。
 
+精度闸（2026-11-25，tests/test_chunker_precision_rules.py；只降级无提问语义的成题路径）
+------------------------------------------------------------------------------
+P1 句中问号算显式问句（“线程池原理？各个参数的作用”）；问号前 <5 词字且无疑问代词的
+   感叹式问号（“单点故障？不存在的”）不算；目录点线行不算。
+P2 问号后的“答案：/答：/解析：”尾巴从题干摘出，放到答案区首行。
+P3 陈述句不当标题题：无问号、≥18 词字、句读收尾的长句，且无强问词/任务引导词。
+P4 结构标签与代码形态标题（问题解答/小结/题目描述、`<servlet>`、`size()`）不成题。
+P5 “回答…为什么”框架语包裹的叙述句不是问句。
+P6 无提问语义的编号陈述句留在父题答案（文档尚无任何题、试卷型文档、显式 Markdown
+   编号标题除外；句中出现问词/任务词不算陈述句）。
+P7 标题行无句读收尾 + 空行 + 下一行是 ≤10 字问句尾巴 → 合并判定（硬换行截断的标题问句）。
+P8 题号带数量单位（“6.32位系统…”）按题号识别；题干去行尾全角页码。
+
 chunk_v2(md_text) —— 切题器 v2 规范（2026-11-17 拍板，放宽判题信号 + 自检）
 ------------------------------------------------------------------
 什么算一题（满足任一，不要求有题号）：
@@ -73,6 +86,10 @@ render(md_text)：两步输出（第一步纯文本清单 ≤12 字/行，第二
 --------------------
 - 空行后跳号且无问号的行按答案列表处理（并入当前题块），极端样本可能漏题；
   漏题内容仍在题块 a_text 内、源 span 可回溯，不会丢弃。
+- 精度闸降级的内容去向不同：编号陈述句（P6）留在父题答案，仍可检索；陈述句标题、
+  结构标签、框架问句（P3–P5）进 leftovers(why=未识别正文)，不再进入任何题块——
+  这是有意的精度取舍，由 coverage 与 0 题文档数监控，极端样本（整篇是知识罗列的
+  专题笔记）会 0 题。
 - 无编号标题产出 qid=None 的"标题"块；正文型文档（如实操篇）会大量出现。
 - 数字+小数（"1.5 倍"）用负向断言排除，但"1. 5 种"这类带空格的仍按题号对待。
 """
@@ -102,6 +119,8 @@ RE_GLUED = re.compile(r'(?:^|[\u4e00-\u9fff。？?!，,、；;：:\s])(\d{1,3})\
 # ---- v2 信号 ----
 RE_INTERROGATIVE = re.compile(r'什么是|如何|为什么|区别|谈谈|介绍|说说|有没有|怎么办|怎么实现')
 RE_QEND = re.compile(r'[?？]\s*$')
+# 句中问号：问号后还跟着正文（两段式题干 / 题干后的括注）。
+RE_INLINE_QMARK = re.compile(r'[\u4e00-\u9fffA-Za-z0-9）)」”]\s*[?？]\s*[\u4e00-\u9fffA-Za-z（(]')
 RE_KPOINT = re.compile(r'^\s*(?:#{1,6}\s*)?(?:知识点|考点|面试点)[:：]\s*(.+?)\s*$')
 # 推广行：强特征（链接/二维码/领取方式）直接剔除；弱词（招聘/广告/公众号…）只在不
 # 像题目时才剔除，避免把「如何设计广告投放系统」「招聘系统怎么设计？」当广告。
@@ -565,6 +584,12 @@ def _has_question_intent(text: str) -> bool:
         return True
     if task_signal or fill_blank_signal:
         return True
+    # 句中问号（“作用是什么？若一个类没有声明构造方法…”“…实现原理？（高频问题）”）
+    # 与句尾问号同义：编号行即使没有空行前置也是新题，否则整行被并入上一题答案。
+    # “单点故障？不存在的！…”是感叹不是提问（_is_rhetorical_qmark）。
+    if (RE_INLINE_QMARK.search(s) and not RE_TOC_DOTS.search(s)
+            and not _is_rhetorical_qmark(s)):
+        return True
     if (len(s) <= 160 and not s.endswith("。")
             and not re.search(r'[，,；;]', s)
             and re.search(r'如何|怎么|为什么|为何|哪个|哪种', s)
@@ -582,6 +607,123 @@ def _has_question_intent(text: str) -> bool:
             and re.match(r"^(?:以下|下列|哪(?:一|个|些|项)|哪个|哪些|何者|若|假设|已知|给定)", s)):
         return True
     return bool(re.match(r"^你(?:知道|了解|熟悉).{0,16}(?:哪些|什么|多少|如何|怎么)", s))
+
+
+def _cjk_len(s: str) -> int:
+    """汉字数 + 英文词数：英文类名/关键字不能把短题干撑成“长句”。"""
+    cjk = len(CJK.findall(s))
+    return cjk + len(re.findall(r"[A-Za-z_][A-Za-z_0-9.]*", s))
+
+
+def _is_statement_like(s: str) -> bool:
+    """陈述句形态（行内无问号时才有意义）：带句读的长句，或以句号/分号收尾的长句。
+
+    题干是短语或问句；解释性正文才是“逗号 ≥1 且 ≥18 词字”或“句号收尾且 ≥18 词字”
+    的句子。短题干不受影响：“阐述静态变量和实例变量的区别。”“Redis 的两种持久化方式。”
+    """
+    s = strip_bold((s or "").strip())
+    if re.search(r"[?？]", s):
+        return False
+    return _cjk_len(s) >= 18 and (bool(re.search(r"[\u4e00-\u9fff][，,]", s))
+                                  or bool(re.search(r"[。；;！!]\s*$", s)))
+
+
+def _is_weak_evidence_sentence(s: str) -> bool:
+    """句读长句，且提问证据薄弱：只有名词型问词散落句中，或 ≥3 个逗号的长句。"""
+    if not _is_statement_like(s):
+        return False
+    # 疑问代词（是什么/如何/为什么/有哪些…）在句中也是提问证据：题干常是
+    # “话题 + 逗号 + 为什么…”（“142 为什么引入偏向锁、轻量级锁，介绍下升级流程”）。
+    # 只有名词型问词（原理/作用/区别/机制…）散落在句读长句里，或 ≥3 个逗号的
+    # 长句，才按陈述句处理。
+    if RE_TASK_DIRECTIVE.match(s):
+        return False
+    if RE_STRONG_QWORD.search(s) and not (
+            re.search(r"[。；;！!]\s*$", s)
+            and len(re.findall(r"[\u4e00-\u9fff][，,]", s)) >= 3):
+        return False
+    return True
+
+
+# 题干任务引导词：“简单描述 A、B 的区别，对数据…”带再多句读也是题。
+RE_TASK_DIRECTIVE = re.compile(
+    r"^(?:请问|请|简单描述|简要描述|简单介绍|简要介绍|简述|描述|阐述|说明一下|说明|谈谈|说说|"
+    r"介绍下|介绍一下|介绍|解释下|解释一下|解释|讲讲|讲一下|聊聊)")
+
+
+RE_STRONG_QWORD = re.compile(
+    r"是什么|什么是|如何|怎么|为什么|为何|哪些|哪几|哪个|哪种|有什么|有何|什么时候|何时|是否|能否|可否|吗")
+
+RE_LEAD_NOISE = re.compile(
+    r"^(?:(?:Q|问|题目|问题)\s*[：:]|\d{1,3}\s*[.、．)）\]]"
+    r"|那么|那|请问|试问|但是|但|并且|且|还|也|又|则|比如说|比如|而"
+    r"|[\s“\"「『‘'(（\[\*_>·•\-]+)+")
+RE_INTER8 = re.compile(RE_INTERROGATIVE.pattern)
+RE_FRAME_HEAD = re.compile(r"^(?:#|//|/\*)|^(?:回答|解释|说明|理解|讨论|知道|清楚|明白|分析|判断|考虑|思考|搞懂|弄清|了解)")
+
+
+def _is_framed_question(s: str) -> bool:
+    """问词不在行首、而是被“回答/解释/讨论…为什么”这类框架语包裹 → 不是在提问。
+
+    行首的引号、`Q:`/`问：` 标签、题号、括号、语气词（那/那么/请问）都算行首
+    （`[4. 如何规避…]`、`“为什么…”`、`那如何避免单点呢？`）；带问号的行一律不算。
+    """
+    if re.search(r"[?？]", s):
+        return False
+    t = RE_LEAD_NOISE.sub("", s)
+    m = RE_INTER8.search(t[:8])
+    if not m or m.start() == 0:
+        return False
+    head = t[:m.start()]
+    if not RE_FRAME_HEAD.match(head):
+        return False
+    return _cjk_len(s) >= 14 and bool(re.search(r"[，,。；;]", s))
+
+
+def _qmark_head(s: str, m: "re.Match") -> str:
+    """RE_INLINE_QMARK 的匹配从问号前一个字符起：这里取问号之前的整段文本。"""
+    return s[:m.start() + re.search(r"[?？]", m.group(0)).start()]
+
+
+def _is_rhetorical_qmark(s: str) -> bool:
+    """句中问号前没有提问实体（“单点故障？不存在的！”）：感叹/反问语气，不是在出题。
+
+    句尾问号（“懂了吗？”）不在此列；问号前 ≥5 个词字（“线程池原理？各个参数的作用。”）
+    或带疑问代词的也不算。
+    """
+    m = RE_INLINE_QMARK.search(s)
+    if not m or RE_QEND.search(s):
+        return False
+    # “SpringMVC 流程？答：…”是问答同行：问号后紧跟答案引导，问号前就是题干。
+    qpos = m.start() + re.search(r"[?？]", m.group(0)).start()
+    if RE_ANSWER_LEAD.match(s[qpos + 1:].lstrip()):
+        return False
+    head = _qmark_head(s, m)
+    return _cjk_len(head) < 5 and not RE_STRONG_QWORD.search(head)
+
+
+def _heading_probe(lines: List[str], i: int, qtext: str) -> str:
+    """标题行被硬换行截断、问句尾巴落在下一行时，用“本行 + 下一行”判定标题语义。
+
+    `#### 29.1 面试官：那么，前面有提到三级缓存，三级缓存的作用` + 空行 + `是什么？`：
+    只看本行是带句读的陈述句，接上下一行才是题。本行已有句读收尾的不探。
+    """
+    if RE_WRAP_TERMINAL.search(qtext):
+        return qtext
+    j = i + 1
+    while j < len(lines) and not lines[j].strip():
+        j += 1
+    if j >= len(lines):
+        return qtext
+    nxt = strip_bold(lines[j].strip())
+    # 只认“尾巴碎片”（是什么？/而不是红黑树？）；独立成句的问句（“什么是缓存穿透？”）
+    # 是下一题，不能探进来——否则 `#### 缓存穿透` 这类标签标题会被探针抬成空答案题。
+    if (len(nxt) <= 10 and not nxt.startswith(("#", "|", ">", "![", "```"))
+            and not RE_LIST_ITEM.match(nxt) and not RE_ANSWER_LEAD.match(nxt)
+            and not RE_STRONG_QSTART.match(nxt) and not RE_QUESTION_INTENT.match(nxt)
+            and (_is_qline(nxt) or _has_question_intent(nxt))):
+        return qtext + nxt
+    return qtext
 
 
 def _is_qline(s: str) -> bool:
@@ -612,6 +754,11 @@ def _is_qline(s: str) -> bool:
     # `Redis 是内存数据库` 是陈述句；`ReadWriteLock 是什么` 仍是问句。
     if re.match(r'^[A-Za-z][A-Za-z0-9_\s]*是(?!什么|否)', s):
         return False
+    if _is_framed_question(s):
+        # 叙述句常以句号收尾（“…第二个就是，不同方法的优劣是什么。”）：句尾的名词型问词
+        # 是转述，不是提问；题干不会以句号收尾。
+        return (bool(RE_QUESTION_SUFFIX.search(s) or RE_NE_QUESTION.search(s))
+                and not s.rstrip().endswith("。"))
     return (RE_INTERROGATIVE.search(s[:8]) is not None
             or RE_QUESTION_SUFFIX.search(s) is not None
             or RE_NE_QUESTION.search(s) is not None)
@@ -740,11 +887,18 @@ def _is_question_heading(s: str) -> bool:
     if _is_qline(s) or RE_KPOINT.match(s):
         return True
     # 编号标题里问号在句中（`接口是否可继承（extends）接口？抽象类是否可实现`）也是题。
+    # “单点故障？不存在的！…”：问号前没有提问实体，是感叹语气，不是标题问句。
+    if _is_rhetorical_qmark(s):
+        return False
     if re.search(r'[?？]', s) and len(s) <= 160:
         return True
     if len(s) > 60:
         return False
     if re.match(r'^(?:简单总结|总结一下|简单来说|也就是说|需要注意)', s):
+        return False
+    # 陈述句闸：行里没有问号、却是带句读的长句（“…这种方式虽然没有客户端发现的缺点，
+    # 但是它的缺点是保证Router的高可用。”），句中的 原理/作用/如何 只是叙述用词，不是题。
+    if _is_weak_evidence_sentence(s):
         return False
     if s.endswith("。") and not re.search(r'[?？]', s):
         return (len(s) <= 35 and bool(re.search(
@@ -767,6 +921,10 @@ def _heading_questionish(qtext: str) -> bool:
     s = unicodedata.normalize("NFKC", qtext or "").strip()
     if not s:
         return False
+    # 文档骨架标签（“问题解答”“4 小结”“题目描述”）与代码形态标题（“</servlet>”“min()”）
+    # 会被下面的短名词短语闸放进题池；它们是结构，不是题。
+    if _is_structural_label(s):
+        return False
     # 技能罗列列表项（“熟悉如何优化 Java 代码…”）是简历/学习建议，不是题。
     if re.match(r"^(?:熟悉|了解|掌握|精通|具备)", s) and not s.rstrip().endswith(("?", "？")):
         return False
@@ -780,6 +938,69 @@ def _heading_questionish(qtext: str) -> bool:
 
 
 _QNORM_CLEAN = re.compile(r"[^\u4e00-\u9fa5a-z0-9]+")
+# 结构/流程标签与代码形态标题：成题语义为空。
+RE_STRUCT_LABEL = re.compile(
+    r"^(?:问题解答|问题分析|问题拆解|解题思路|思路分析|题目描述|题目分析|复杂度分析|小结|总结|概述|"
+    r"简介|前言|面试准备|工作感悟|参考答案|题解|解题|目录|致谢|参考资料|扩展阅读|版权声明|"
+    r"原文链接|答案解析|答案|解析|示例代码|代码示例|代码|示例|备注|学习说明)[：:]?$")
+RE_STRUCT_NUM_PREFIX = re.compile(r"^[\d.、．\s]+")
+
+
+def _is_structural_label(s: str) -> bool:
+    s = RE_STRUCT_NUM_PREFIX.sub("", strip_bold(s or "").strip())
+    if s.startswith("<"):
+        return True
+    if re.fullmatch(r"[A-Za-z_][\w.*<>]*\([^()\u4e00-\u9fff]*\)", s):
+        return True
+    return bool(RE_STRUCT_LABEL.match(s))
+
+
+# 面经叙事标记：叙述句里出现，试卷/题库的题干里基本不出现（有提问语义的行已先排除）。
+RE_NARRATIVE_BODY = re.compile(
+    r"面试官|自我介绍|然后|接着|完了|之后|先是|上来|问我|问了|聊了|聊了聊|HR|hr|打电话|接电话|"
+    r"开始提问|群面|单面|二面|一面|三面|终面|笔试完|面试完|面试的时候|面试时")
+
+
+# 句中任务/出题引导词：不在行首也算题干（“最后我来问你…，如何用天平最快…”
+# “（机器学习理论）请描述 K-means 的原理…”“一道算法题: 给三个数 N,S,T…”）。
+RE_TASK_MID = re.compile(
+    r"(?:^|[，,。：:；;\s）)】])(?:请问|请|简述|简要描述|简要介绍|简单介绍|描述|阐述|说明|谈谈|说说|"
+    r"介绍|解释|讲讲|讲一下|讲下|聊聊|列举|列出|写出|写一个|实现一个|设计一个|计算|求出|求|任举|"
+    r"举例|有没有|还有没有|给你|给定|已知|假设|假如|若|要求|给|"
+    r"实现(?!了|的|过|原|类|机|方式)|解决|找出|填写|写代码|开发[一⼀]?个)"
+    r"|进行(?:排序|反转|交换|合并|遍历|去重)")
+
+
+def _is_declarative_item(qtext: str) -> bool:
+    """无提问语义的编号陈述句（“3. PriorityBlockingQueue：支持优先级排序的无界阻塞队列。”）。
+
+    面经/笔记里的编号多为叙述、步骤、知识罗列；题库里的编号题干要么带问句/任务语义，
+    要么是不带句读的短短语（“Redis 的两种持久化方式。”）。句号/分号收尾的句子、
+    多逗号的长句、带面经叙事标记的逗号句按答案列表处理，留在父题答案里。
+    单逗号的无语义短句不拦：试卷题干常是这个形态（“排名前 4 个国内视频网站，国外最好的
+    视频网站”）。选择题/填空（空括号、下划线）与题型前缀（“场景题：”）不算陈述句。
+    """
+    s = strip_bold((qtext or "").strip())
+    if len(s) < 10 or re.search(r"[?？]", s) or s.rstrip().endswith(("：", ":")):
+        return False
+    if (_has_question_intent(s) or _is_question_heading(s)
+            or re.search(r"[（(]\s*[）)]|_{2,}", s)
+            or re.match(r"^(?:场景题|算法题|笔试题|手写题|编程题|设计题|项目题|追问|问答题|简答题"
+                        r"|选择题|填空题|判断题|论述题|计算题|案例分析)", s)):
+        return False
+    if RE_STRONG_QWORD.search(s) or RE_TASK_MID.search(s):
+        return False
+    if re.search(r"[。；;！!]\s*$", s):
+        return _cjk_len(s) >= 12
+    commas = len(re.findall(r"[，,]", s))
+    return _cjk_len(s) >= 14 and (commas >= 2 or (commas == 1 and bool(RE_NARRATIVE_BODY.search(s))))
+
+
+RE_DEC_UNIT = re.compile(
+    r'^\s*(?:#{1,6}\s+)?(\d{1,3})\s*[.、．](\d{2,}(?=[位个年人倍万亿条张种次台端口届期]))(.*)$')
+RE_BLANK_OR_OPTION = re.compile(r'[（(]\s*[）)]|_{3,}|^\s*(?:#\s*)?[A-D][、.．]\s*\S')
+RE_TOC_DOTS = re.compile(r"(?:\.{4,}|…{2,}|·{4,})")
+RE_TOC_PAGE_TAIL = re.compile(r'(?<=[\u4e00-\u9fff])[０-９]{2,4}\s*$')
 
 
 def _qnorm_len(s: str) -> int:
@@ -836,6 +1057,11 @@ def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
     nested = _match_nested_number(line)
     if nested and (re.search(r'[?？]', nested[1]) or len(nested[1]) >= 4):
         return nested[0], nested[1], "题号"
+    # `6.32位系统上有什么细微差别？`：6. 后接两位以上数字 + 量词，是题号而不是小数
+    # （版本号/倍数的各位数不会是“32位”“10个”），不能被 RE_DECIMAL 吞掉。
+    dm = RE_DEC_UNIT.match(line)
+    if dm:
+        return int(dm.group(1)), (dm.group(2) + dm.group(3)).strip(), "题号"
     if RE_DECIMAL.match(line):
         return None
     # 中文逗号题号：`54，jsp静态包含和动态包含的区别`
@@ -1038,10 +1264,15 @@ def _reclaim_stem_continuation(q_text: str, a_text: str, a_segs: list | None):
     return " ".join(parts), new_answer, new_segs
 
 
+RE_WRAP_TERMINAL = re.compile(r"[。！？!?；;：:”』」）)】>\]]\s*$")
 def chunk(md_text: str, *, split_long: bool = True) -> Dict:
     lines, starts = _split_inline_hierarchical_lines(md_text)
     n = len(lines)
     total = starts[n]
+    # 试卷/真题型文档：空括号、下划线、A-D 选项行密集，编号行默认是题。
+    exam_mode = sum(1 for ln in lines if RE_BLANK_OR_OPTION.search(ln)) >= 8
+    # 句中问号行被摘掉的尾巴（行号 → 文本），组块时放回答案区首行。
+    inline_tails: Dict[int, str] = {}
 
     # ---- 第一遍：行分类 ----
     kinds: List[str] = ["text"] * n
@@ -1255,6 +1486,19 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         qtext = re.sub(r'^\d{1,3}\s*[，,]\s*', '', qtext)
         qtext = qtext.replace("**", "").strip().lstrip("、，,。；;：:")
         qtext = _strip_explanation_tail(qtext)
+        # 漏网目录行（“…并解释含义１１０”“…等操作１９０”）：全角页码不是题干。
+        qtext = RE_TOC_PAGE_TAIL.sub("", qtext).strip()
+        # “查看文件内容有哪些命令？答案：…”：问号后是答案引导，不是题干。只切
+        # “答案：/答：/解析：”开头的尾巴；其余尾巴常是同一行的第二个问句
+        # （“Math.round(11.5) 等于多少？Math.round(-11.5) 等于多少”），必须留在题干。
+        m_iq = RE_INLINE_QMARK.search(qtext)
+        if m_iq and not RE_TOC_DOTS.search(qtext):
+            m_cut = re.match(r"^(.{1,120}?[?？])\s*(.{4,})$", qtext)
+            if m_cut:
+                tail = m_cut.group(2).strip()
+                if re.match(r"^(?:参考答案|答案|解析|答)\s*[：:]", tail):
+                    inline_tails[i] = tail
+                    qtext = m_cut.group(1)
         if style == "题号" and not qtext:
             j = i + 1
             while j < n and not lines[j].strip():
@@ -1303,7 +1547,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             # 提问语义的标题（“什么是 JVM？”）才作为标题题块。
             if (_is_codeish(qtext)
                     or re.match(r'^(?:有一点|注意|总结|如下|以下|主要|首先|其次|最后)', qtext)
-                    or not _is_question_heading(qtext)):
+                    or not _is_question_heading(_heading_probe(lines, i, qtext))):
                 # review2：真章节标题是硬边界——结束当前答案、重置题号，
                 # 并进 leftovers(章节标题) 参与 coverage 扣除；答案小节标题仍留答案区。
                 if (s.startswith("# ") or _looks_section_line(qtext)
@@ -1343,6 +1587,29 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             qtext.strip()))
         # review2：明确问句/任务语义优先于题号连续性（跨章节跳号不再吞题）。
         explicit_question = _has_question_intent(qtext)
+        probe_qtext = _heading_probe(lines, i, qtext)
+        if probe_qtext != qtext and _has_question_intent(probe_qtext):
+            explicit_question = True
+        # 编号陈述句不是题（“3. PriorityBlockingQueue：支持优先级排序的无界阻塞队列。”
+        # “1、这是我人生第一场群面，真的慌…”）：无提问语义的陈述句按答案列表处理，
+        # 留在父题答案里。试卷型文档的编号默认是题（题干常是无问词的陈述），不拦。
+        # 文档还没有任何题时不拦：此时没有父题可挂，降级 = 整篇 0 题、正文进 leftovers
+        # （华为/百度编程题真题整篇丢失）。
+        if (not md_num_heading and not exam_mode and bounds
+                and _is_declarative_item(qtext)):
+            kinds[i] = "list"
+            # 沿用原有的“父题下重启编号 = 答案列表”判定：已在列表里或题号不大于父题
+            # （`## 2、题` 下的 `1、…2、…3、…`）保持列表态，否则逐行独立判定。
+            list_active = bool(list_active or (last_qid is not None and prev_blank
+                                               and qid is not None and qid <= last_qid))
+            # 题号照常推进：后续同层级的无语义编号行按“父题下重启编号”留在答案里，
+            # 不会因为本题不成题而顺延编号级联成题（`九、跳表`）。
+            if qid is not None and (last_qid is None or qid > last_qid):
+                last_qid = qid
+            list_pending = False
+            prev_blank = False
+            last_problem_mark = False
+            continue
         # F4b（金标 075 分⻚/分段）：qnorm<6 且冒号结尾的顺延编号标题
         # （“## 2. 区别 ：”）是答案小节标签，不是题——留在父题答案，否则
         # 碎片题偷走答案后半。_is_question_heading 会因“区别”关键词放行，
@@ -1379,7 +1646,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
                     adv = int(m.group(1))
             if adv is not None and (last_qid is None or adv > last_qid):
                 last_qid = adv
-            heading_q = _heading_questionish(qtext)
+            heading_q = _heading_questionish(_heading_probe(lines, i, qtext))
             strong_q = bool(heading_q and (
                     RE_QEND.search(qtext) or _has_question_intent(qtext)
                     or RE_QUESTION_SUFFIX.search(qtext)
@@ -1607,6 +1874,10 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         # 行级原文偏移：a_text 剔掉噪声行后长度会变，span 必须按"行 → 原文"映射（不能累计长度）
         a_segs = [(starts[j], starts[j + 1] if j + 1 < n else total) for j in inc_idx]
         a_text = "".join(inc).rstrip("\n")
+        tail = inline_tails.get(i)
+        if tail:
+            a_text = tail + "\n" + a_text
+            a_segs.insert(0, (starts[i], starts[i + 1]))
         # review2：强证据题干续行从答案区收回题干（a_segs 同步裁剪）。
         if bd["parts"]:
             rq, a_text, a_segs = _reclaim_stem_continuation(bd["parts"][-1][1], a_text, a_segs)
