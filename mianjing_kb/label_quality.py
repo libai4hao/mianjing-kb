@@ -72,7 +72,8 @@ def _tag_rates(rows) -> dict | None:
 
 
 def assess(conn, *, other_hard: float = 0.25, other_warn: float = 0.15,
-           min_batch: int = 20) -> dict:
+           min_batch: int = 20, strict: bool = False) -> dict:
+    """评估 staging 质量；strict=True 时小批次也执行其他主题硬阈值，默认仍只 WARN。"""
     try:
         rows = conn.execute(
             "SELECT s.qid, s.topic, s.qtype, s.review_state, s.tags, q.q_text, q.a_text "
@@ -114,7 +115,7 @@ def assess(conn, *, other_hard: float = 0.25, other_warn: float = 0.15,
         fails.append(f"quality_hold={len(quality_holds)}")
     if pending:
         fails.append(f"pending_review={len(pending)}")
-    if n >= min_batch and other_rate > other_hard:
+    if (n >= min_batch or strict) and other_rate > other_hard:
         fails.append(f"other_topic_rate={other_rate:.2%}>{other_hard:.0%}")
     elif other_rate > other_warn:
         warns.append(f"other_topic_rate={other_rate:.2%}>{other_warn:.0%}")

@@ -34,6 +34,7 @@ import random
 import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 
@@ -117,10 +118,16 @@ def pick_targets(conn, limit: int = 0, qids: list[int] | None = None,
     qids 指定时只打这批题（样本集回归用），按 qid 稳定排序。
     skip_code：默认跳过代码行/代码碎片及确定性残缺/错配/多题混杂，防坏样本送进 LLM。
     """
-    if int(limit) < 0:
+    limit = int(limit)
+    if limit < 0:
         raise ValueError("limit 必须大于等于 0（0 表示不限制）")
-    sql = ("SELECT q.qid, q.q_text, q.a_text, q.q_norm_hash FROM questions q "
-           "LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash "
+    sql = ("SELECT q.qid, q.q_text, q.a_text, q.q_norm_hash, sd.file_name, "
+           "sd.topic AS source_topic, "
+           "(SELECT p.q_text FROM questions p WHERE p.doc_hash=q.doc_hash "
+           " AND p.seq<q.seq ORDER BY p.seq DESC LIMIT 1) AS prev_q_text, "
+           "(SELECT n.q_text FROM questions n WHERE n.doc_hash=q.doc_hash "
+           " AND n.seq>q.seq ORDER BY n.seq LIMIT 1) AS next_q_text "
+           "FROM questions q LEFT JOIN source_documents sd ON sd.doc_hash=q.doc_hash "
            f"WHERE {TODO_PREDICATE} ")
     if qids:
         sql += "AND q.qid IN (" + ",".join(str(int(x)) for x in qids) + ") "
@@ -128,29 +135,36 @@ def pick_targets(conn, limit: int = 0, qids: list[int] | None = None,
     else:
         sql += ("ORDER BY (sd.topic IS NULL OR sd.topic='' OR sd.topic='综合' "
                 "OR sd.topic='未分类') DESC, q.qid")
-    rows = [dict(r) for r in conn.execute(sql).fetchall()]
-    if skip_code:
-        skipped, kept = [], []
-        for r in rows:
-            q_text = r.get("q_text") or ""
-            a_text = r.get("a_text") or ""
-            code_reason = code_fragment_reason(q_text)
-            flags = deterministic_quality_flags(q_text, a_text)
-            if code_reason:
-                flags.add("代码片段")
-            hold_reason = code_reason or ";".join(sorted(manual_review_flags(flags)))
-            if is_code_fragment(q_text) or hold_reason:
-                skipped.append({**r, "hold_reason": hold_reason or "legacy_code_fragment"})
-            else:
-                kept.append(r)
-        if stats is not None:
-            stats["skipped_code"] = len(skipped)
-            stats["skipped_code_rows"] = [
-                {"qid": r["qid"], "q_text": r["q_text"],
-                 "hold_reason": r.get("hold_reason")} for r in skipped]
-        rows = kept
-    if limit:
-        rows = rows[:int(limit)]
+    if limit and not skip_code:
+        sql += " LIMIT ?"
+    cursor = conn.execute(sql, (limit,)) if limit and not skip_code else conn.execute(sql)
+    rows, skipped = [], []
+    while True:
+        batch = cursor.fetchmany(500)
+        if not batch:
+            break
+        for raw in batch:
+            row = dict(raw)
+            if skip_code:
+                q_text = row.get("q_text") or ""
+                a_text = row.get("a_text") or ""
+                code_reason = code_fragment_reason(q_text)
+                flags = deterministic_quality_flags(q_text, a_text)
+                if code_reason:
+                    flags.add("代码片段")
+                hold_reason = code_reason or ";".join(sorted(manual_review_flags(flags)))
+                if is_code_fragment(q_text) or hold_reason:
+                    if stats is not None:
+                        skipped.append({"qid": row["qid"], "q_text": q_text,
+                                        "hold_reason": hold_reason or "legacy_code_fragment"})
+                    continue
+            if not limit or len(rows) < limit:
+                rows.append(row)
+        if limit and len(rows) >= limit and (not skip_code or stats is None):
+            break
+    if skip_code and stats is not None:
+        stats["skipped_code"] = len(skipped)
+        stats["skipped_code_rows"] = skipped
     return rows
 
 
@@ -168,9 +182,28 @@ def label_one(cfg: dict, q: dict, tax: dict | None = None) -> dict:
     tax = tax or taxonomy.load()
     vocab = topic_vocab()
     system = build_system_prompt(vocab, tax)
-    text = f"{q['q_text'][:300]}\n{q['a_text'][:300]}"
-    clean, hit = redact(text)
-    r = chat_json(cfg, system, f"题目与答案片段：\n{clean}", max_tokens=200)
+    hit = False
+
+    def clean_field(value, limit):
+        nonlocal hit
+        clean, field_hit = redact(str(value))
+        hit = hit or field_hit
+        return clean[:limit]
+
+    text = f"{clean_field(q['q_text'], 300)}\n{clean_field(q['a_text'], 300)}"
+    context = []
+    if q.get("file_name"):
+        context.append(f"来源文件：{clean_field(q['file_name'], 120)}")
+    if q.get("source_topic"):
+        context.append(f"来源主题：{clean_field(q['source_topic'], 40)}")
+    if q.get("prev_q_text"):
+        context.append(f"前一题：{clean_field(q['prev_q_text'], 160)}")
+    if q.get("next_q_text"):
+        context.append(f"后一题：{clean_field(q['next_q_text'], 160)}")
+    if context:
+        text = ("上下文（仅辅助理解当前题，勿标注相邻题）：\n" + "\n".join(context)
+                + "\n当前题目与答案片段：\n" + text)
+    r = chat_json(cfg, system, text if context else f"题目与答案片段：\n{text}", max_tokens=200)
     obj = r.get("obj")
     if obj is None:
         raise RuntimeError("JSON 解析失败")
@@ -356,6 +389,7 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
     `label_fn` 可替换单题打标实现（离线规则/手动印入的测试用）；缺省走 LLM。
     标签配置表（taxonomy）在这里一次性加载，避免每题查库。
     """
+    run_id = datetime.now().strftime("%Y%m%dT%H%M%S-%f")
     stats: dict = {}
     targets = pick_targets(conn, limit, qids=qids, skip_code=skip_code, stats=stats)
     skipped_code = stats.get("skipped_code", 0)
@@ -367,12 +401,15 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
     trace_path = failed_path.parent / "label_trace.jsonl"
     skipped_path = failed_path.parent / "label_skipped_code.jsonl"
     if skipped_rows:
-        with skipped_path.open("w", encoding="utf-8") as fh:
+        with skipped_path.open("a", encoding="utf-8") as fh:
             for r in skipped_rows:
-                preview, _ = redact((r["q_text"] or "")[:300])
+                preview, _ = redact(r["q_text"] or "")
+                preview = preview[:300]
                 fh.write(json.dumps({
                     "qid": r["qid"], "q_text": preview,
                     "reason": "code_fragment",
+                    "hold_reason": r.get("hold_reason"),
+                    "run_id": run_id,
                     "at": datetime.now().strftime(NOW_FMT),
                 }, ensure_ascii=False) + "\n")
     tax = taxonomy.load(conn)
@@ -413,7 +450,8 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
             pending[pool.submit(_worker, q)] = q
             submitted += 1
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with ExitStack() as logs, ThreadPoolExecutor(max_workers=max_workers) as pool:
+        failed_fh = trace_fh = None
         submit_available(pool)
         while pending:
             finished, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
@@ -423,23 +461,27 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
                 if exc is not None:
                     failed.append({"qid": q["qid"], "err_type": type(exc).__name__,
                                    "err": f"{type(exc).__name__}: {str(exc)[:160]}",
-                                   "model": cfg["model"],
+                                   "model": cfg["model"], "run_id": run_id,
                                    "at": datetime.now().strftime(NOW_FMT)})
-                    with failed_path.open("a", encoding="utf-8") as fh:
-                        fh.write(json.dumps(failed[-1], ensure_ascii=False) + "\n")
+                    if failed_fh is None:
+                        failed_fh = logs.enter_context(failed_path.open("a", encoding="utf-8"))
+                    failed_fh.write(json.dumps(failed[-1], ensure_ascii=False) + "\n")
+                    failed_fh.flush()
                     continue
                 issues = row.pop("_issues", []) or []
                 raw = row.pop("_raw_response", "") or ""
                 raw, _ = redact(raw)
                 for iss in issues:
                     issue_counts[iss] = issue_counts.get(iss, 0) + 1
-                with trace_path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps({
-                        "qid": row["qid"], "model": row.get("model"),
-                        "review_state": row.get("review_state"),
-                        "issues": issues, "raw_response": raw,
-                        "at": row.get("labeled_at"),
-                    }, ensure_ascii=False) + "\n")
+                if trace_fh is None:
+                    trace_fh = logs.enter_context(trace_path.open("a", encoding="utf-8"))
+                trace_fh.write(json.dumps({
+                    "qid": row["qid"], "model": row.get("model"),
+                    "review_state": row.get("review_state"),
+                    "issues": issues, "raw_response": raw,
+                    "run_id": run_id, "at": row.get("labeled_at"),
+                }, ensure_ascii=False) + "\n")
+                trace_fh.flush()
                 done.append(row)
                 tokens_total += row["tokens"]
                 in_total += row.get("prompt_tokens") or 0
@@ -454,7 +496,7 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
     if done and not dry_run:
         write_staging(conn, done)
     failed_csv, failed_qids = (write_failed_csv(failed_path) if failed else (None, 0))
-    return {"todo": len(todo), "labeled": len(done), "failed": len(failed),
+    return {"run_id": run_id, "todo": len(todo), "labeled": len(done), "failed": len(failed),
             "skipped_code": skipped_code,
             "issues": issue_counts,
             "tokens": tokens_total,
@@ -1004,7 +1046,8 @@ def _propagate_by_hash(conn, hashes, *, overwrite: bool = False) -> dict:
             "tags_filled": filled_tags, "changed_qids": sorted(set(changed_qids))[:20]}
 
 
-def merge(conn, drop_orphans: bool = False, hash_consistency: str = "fill") -> dict:
+def merge(conn, drop_orphans: bool = False, hash_consistency: str = "fill",
+          strict_quality: bool = False) -> dict:
     """G6 门禁复核 → FAIL 拒绝；PASS/WARN 放行（WARN=软门禁，提示人工抽查）。
 
     2026-11-19 审核修复（docs/项目审核报告/修复方案-2026-11-19.md）：
@@ -1041,7 +1084,7 @@ def merge(conn, drop_orphans: bool = False, hash_consistency: str = "fill") -> d
                 "note": f"金标抽检准确率 <0.8（G6b FAIL，弱项主题：{weak}），"
                         "staging 保留未 merge——--eval 看混淆矩阵，修标签或补金标后重试"}
     from mianjing_kb.label_quality import assess as quality_assess
-    quality = quality_assess(conn)
+    quality = quality_assess(conn, strict=strict_quality)
     if not quality["ok"]:
         return {"ok": False, "gate": "LABEL_QUALITY", "detail": quality["detail"],
                 "fails": quality["fails"],
@@ -1154,6 +1197,8 @@ def main(argv=None) -> int:
     ap.add_argument("--budget", type=float, default=10.0, help="预算封顶 ¥（超了自动停，docs/15 §3.5）")
     ap.add_argument("--sample", type=int, default=0, help="从 staging 随机抽 N 条打印（人工抽查）")
     ap.add_argument("--merge", action="store_true", help="G6 复核 + merge 进 questions")
+    ap.add_argument("--strict-quality", action="store_true",
+                    help="与 --merge 连用：小批次也执行其他主题硬阈值（默认仅 WARN）")
     ap.add_argument("--drop-orphans", action="store_true",
                     help="与 --merge 连用：清除 staging 孤儿行（qid 已失效/题干已变）后继续合并")
     ap.add_argument("--hash-consistency", choices=("fill", "overwrite", "off"), default="fill",
@@ -1303,7 +1348,8 @@ def main(argv=None) -> int:
             # 已经在 main 入口持有 kb 写锁，这里不再重复加锁。
             db.backup_db(args.db)
             out = merge(conn, drop_orphans=args.drop_orphans,
-                        hash_consistency=args.hash_consistency)
+                        hash_consistency=args.hash_consistency,
+                        strict_quality=args.strict_quality)
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if out["ok"] else 1
         qids = None

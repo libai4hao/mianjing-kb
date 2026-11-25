@@ -37,6 +37,25 @@ def test_cli_flags_provider_concurrency_resume(tmp_path, monkeypatch, capsys):
     assert seen == {"provider": "local", "concurrency": "2"}
 
 
+def test_cli_strict_quality_is_forwarded_to_merge(tmp_path, monkeypatch, capsys):
+    from mianjing_kb.kb import db as kbdb
+
+    seen = {}
+
+    def fake_merge(conn, **kwargs):
+        seen.update(kwargs)
+        return {"ok": True}
+
+    db_path = tmp_path / "kb.sqlite"
+    kbdb.connect(db_path).close()
+    monkeypatch.setattr(bl, "resolve_config", lambda: CFG)
+    monkeypatch.setattr(bl, "merge", fake_merge)
+    monkeypatch.setattr(kbdb, "backup_db", lambda *_: None)
+    rc = bl.main(["--merge", "--strict-quality", "--db", str(db_path)])
+    assert rc == 0 and seen["strict_quality"] is True
+    assert '"ok": true' in capsys.readouterr().out
+
+
 def _fake_label(obj=None, fail_qids=()):
     """返回 label_one 替身：fail_qids 中的题抛异常，其余返回固定打标（含 T21 新维度）。"""
     def fake(cfg, q):
@@ -93,6 +112,23 @@ def test_pick_targets_only_empty_topic(mini_db):
     assert [t["qid"] for t in targets] == [1, 2, 3]      # qid=4 已有 MySQL 主题
 
 
+def test_pick_targets_includes_source_and_neighbor_context_for_qid_subset(mini_db):
+    _add_question(mini_db, 5, "前一道产品题？")
+    _add_question(mini_db, 6, "后一道产品题？")
+    mini_db.execute("UPDATE questions SET doc_hash='hdoc', seq=CASE qid "
+                    "WHEN 2 THEN 2 WHEN 5 THEN 1 ELSE 3 END WHERE qid IN (2,5,6)")
+    mini_db.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, src_path, batch_id, "
+        "first_seen_at, last_seen_at, topic) VALUES "
+        "('hdoc','h','产品案例.md','产品案例.md','b','now','now','产品运营')")
+    mini_db.commit()
+    target = bl.pick_targets(mini_db, qids=[2])[0]
+    assert target["file_name"] == "产品案例.md"
+    assert target["source_topic"] == "产品运营"
+    assert target["prev_q_text"] == "前一道产品题？"
+    assert target["next_q_text"] == "后一道产品题？"
+
+
 def test_run_batch_writes_staging_and_resume(mini_db, monkeypatch, tmp_path):
     monkeypatch.setattr(bl, "label_one", _fake_label())
     out = bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
@@ -124,6 +160,64 @@ def test_run_batch_failed_not_blocking(mini_db, monkeypatch, tmp_path):
     out = bl.run_batch(CFG, mini_db, failed_path=fp)
     assert out["labeled"] == 2 and out["failed"] == 1
     assert "qid" in fp.read_text(encoding="utf-8")
+
+
+def test_run_batch_reuses_log_handles_and_redacts_trace(mini_db, monkeypatch, tmp_path):
+    def fake(cfg, q):
+        if q["qid"] == 2:
+            raise RuntimeError("失败")
+        row = _fake_label()(cfg, q)
+        row["_raw_response"] = "电话 13812345678"  # privacy-scan: allow 合成号码
+        row["_issues"] = ["topic_out_of_vocab:PHP"]
+        return row
+
+    opened = []
+    real_open = Path.open
+
+    def tracking_open(path, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if mode == "a" and path.name in ("f.jsonl", "label_trace.jsonl"):
+            opened.append(path.name)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(bl, "label_one", fake)
+    monkeypatch.setattr(Path, "open", tracking_open)
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    assert opened.count("f.jsonl") == 1
+    assert opened.count("label_trace.jsonl") == 1
+    trace = (tmp_path / "label_trace.jsonl").read_text(encoding="utf-8")
+    assert "13812345678" not in trace and "[联系方式]" in trace  # privacy-scan: allow 合成号码
+    assert "topic_out_of_vocab:PHP" in trace
+
+
+def test_run_batch_empty_does_not_create_logs(mini_db, monkeypatch, tmp_path):
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    failed_path = tmp_path / "f.jsonl"
+    bl.run_batch(CFG, mini_db, failed_path=failed_path)
+    failed_path.unlink(missing_ok=True)
+    (tmp_path / "label_trace.jsonl").unlink(missing_ok=True)
+    out = bl.run_batch(CFG, mini_db, failed_path=failed_path)
+    assert out["todo"] == 0 and out["labeled"] == 0
+    assert not failed_path.exists()
+    assert not (tmp_path / "label_trace.jsonl").exists()
+
+
+def test_run_batch_does_not_open_unused_trace_when_all_fail(mini_db, monkeypatch, tmp_path):
+    trace_path = tmp_path / "label_trace.jsonl"
+    trace_path.mkdir()
+    monkeypatch.setattr(bl, "label_one", _fake_label(fail_qids={1, 2, 3}))
+    out = bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    assert out["failed"] == 3 and out["labeled"] == 0
+    assert trace_path.is_dir()
+
+
+def test_run_batch_does_not_open_unused_failed_log_when_all_succeed(mini_db, monkeypatch, tmp_path):
+    failed_path = tmp_path / "f.jsonl"
+    failed_path.mkdir()
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    out = bl.run_batch(CFG, mini_db, failed_path=failed_path)
+    assert out["failed"] == 0 and out["labeled"] == 3
+    assert failed_path.is_dir()
 
 
 def test_failed_csv_is_human_todo(mini_db, monkeypatch, tmp_path):
@@ -191,6 +285,16 @@ def test_merge_g6_gate_blocks_and_passes(mini_db, monkeypatch, tmp_path):
     # staging 空 → 再 merge 报 G6 SKIP 拒绝
     out2 = bl.merge(mini_db)
     assert not out2["ok"] and out2["gate"] == "SKIP"
+
+
+def test_merge_strict_quality_blocks_small_all_other_batch(mini_db, monkeypatch, tmp_path):
+    monkeypatch.setattr(bl, "label_one", _fake_label({"topic": "其他"}))
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    strict = bl.merge(mini_db, strict_quality=True)
+    assert not strict["ok"] and strict["gate"] == "LABEL_QUALITY"
+    assert any("other_topic_rate" in f for f in strict["fails"])
+    assert mini_db.execute("SELECT COUNT(*) FROM labels_staging").fetchone()[0] == 3
+    assert bl.merge(mini_db)["ok"] is True
 
 
 def test_merge_propagates_topic_across_same_hash(mini_db, monkeypatch, tmp_path):
@@ -407,6 +511,50 @@ def test_redact_integration_in_label_one(monkeypatch):
     assert "13812345678" not in sent["user"]                       # privacy-scan: allow
     assert "[联系方式]" in sent["user"]
     assert row["prompt_tokens"] == 7 and row["completion_tokens"] == 3   # F5 透传拆分计数
+
+
+def test_label_one_sends_redacted_source_context_without_labeling_neighbors(monkeypatch):
+    sent = {}
+
+    def fake_chat_json(cfg, system, user, **kw):
+        sent["user"] = user
+        return {"obj": {"topic": "产品运营", "qtype": "场景", "difficulty": 2, "tags": []},
+                "latency_ms": 5, "tokens": 10}
+
+    monkeypatch.setattr(bl, "chat_json", fake_chat_json)
+    bl.label_one(CFG, {"qid": 9, "q_text": "当前产品题？", "a_text": "当前答案",
+                       "file_name": "产品案例.md", "source_topic": "产品运营",
+                       "prev_q_text": "上一题电话 13812345678",  # privacy-scan: allow 合成号码
+                       "next_q_text": "下一题"})
+    user = sent["user"]
+    assert "产品案例.md" in user and "产品运营" in user
+    assert "上一题" in user and "下一题" in user and "当前产品题？" in user
+    assert "勿标注相邻题" in user
+    assert "13812345678" not in user and "[联系方式]" in user  # privacy-scan: allow 合成号码
+
+
+@pytest.mark.parametrize(("field", "width"), [
+    ("q_text", 300), ("a_text", 300), ("file_name", 120),
+    ("source_topic", 40), ("prev_q_text", 160), ("next_q_text", 160),
+])
+def test_label_one_redacts_complete_field_before_truncation(monkeypatch, field, width):
+    sent = {}
+    phone = "13812345678"  # privacy-scan: allow 合成号码
+
+    def fake_chat_json(cfg, system, user, **kw):
+        sent["user"] = user
+        return {"obj": {"topic": "产品运营", "qtype": "场景", "difficulty": 2, "tags": []},
+                "latency_ms": 5, "tokens": 10}
+
+    monkeypatch.setattr(bl, "chat_json", fake_chat_json)
+    q = {"qid": 9, "q_text": "当前题？", "a_text": "当前答案",
+         "file_name": "产品案例.md", "source_topic": "产品运营",
+         "prev_q_text": "前一题", "next_q_text": "后一题"}
+    q[field] = "x" * (width - 11) + " " + phone
+    row = bl.label_one(CFG, q)
+    assert row["redacted"] == 1
+    assert "[联系方式]" in sent["user"]
+    assert phone not in sent["user"] and phone[:10] not in sent["user"]  # privacy-scan: allow
 
 
 # ---- 批次二 G2：金标抽样/录入（docs/项目审核报告/修复方案-2026-11-19.md §八）----
@@ -664,6 +812,27 @@ def test_run_batch_records_skipped_code_qids(mini_db, monkeypatch, tmp_path):
     rows = [json.loads(x) for x in lines if x.strip()]
     assert [r["qid"] for r in rows] == [5]
     assert rows[0]["reason"] == "code_fragment"
+    first_run_id = rows[0]["run_id"]
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    lines = (tmp_path / "label_skipped_code.jsonl").read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(x) for x in lines if x.strip()]
+    assert [r["qid"] for r in rows] == [5, 5]
+    assert rows[1]["run_id"] != first_run_id
+    assert rows[1]["hold_reason"] == rows[0]["hold_reason"]
+
+
+def test_run_batch_redacts_skipped_preview_before_truncation(mini_db, monkeypatch, tmp_path):
+    phone = "13812345678"  # privacy-scan: allow 合成号码
+    prefix = "#include <stdio.h> "
+    q_text = prefix + "x" * (300 - len(prefix) - 11) + " " + phone
+    _add_question(mini_db, 5, q_text)
+    mini_db.commit()
+    monkeypatch.setattr(bl, "label_one", _fake_label())
+    bl.run_batch(CFG, mini_db, failed_path=tmp_path / "f.jsonl")
+    row = json.loads((tmp_path / "label_skipped_code.jsonl").read_text(encoding="utf-8"))
+    assert row["qid"] == 5
+    assert "[联系方式]" in row["q_text"]
+    assert phone not in row["q_text"] and phone[:10] not in row["q_text"]  # privacy-scan: allow
 
 
 def test_merge_blocks_pending_rows(mini_db, monkeypatch, tmp_path):
@@ -764,7 +933,7 @@ def test_merge_change_count_matches_update_expression(mini_db, monkeypatch, fiel
     monkeypatch.setattr(verify_ledger, "g6_label", lambda conn: {"state": "PASS", "fails": []})
     monkeypatch.setattr(verify_ledger, "g6b_golden", lambda conn: {"state": "PASS", "detail": {}})
     monkeypatch.setattr(label_quality, "assess",
-                        lambda conn: {"ok": True, "state": "PASS", "detail": {}})
+                        lambda conn, **_: {"ok": True, "state": "PASS", "detail": {}})
     mini_db.execute(f"UPDATE questions SET {field}=? WHERE qid=1", (before,))
     values = {"topic": "", "qtype": "八股", "difficulty": None, "tags": "[]",
               "position": None, "quality": None, "canonical_q": ""}

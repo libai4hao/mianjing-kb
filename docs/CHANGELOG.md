@@ -65,6 +65,13 @@
   大写 scheme、非法 URL、OAuth 键、相邻 URL、合法逗号路径、`;`/`&amp;` 与 fragment `?` 前缀等边界。
   LLM 客户端 **92 passed**，全量 pytest **1013 passed / 5 skipped / 6 xfailed**（1024 collected，89.79 s）；
   Ruff、compileall、wheel、privacy_scan、`doc_audit`、`chunk_regress --check` 均通过。
+- **`batch_label` 剩余 CR-06/08/09/10/11 收口**：新增 opt-in `--strict-quality`，默认 merge 口径不变；
+  候选用 `fetchmany` 流式扫描并在无过滤时保留 SQL `LIMIT`，启用过滤时维持完整 skip 统计；跳过清单改
+  append 且带 `run_id/hold_reason`；prompt 增加有界来源与相邻题上下文，各字段先完整脱敏再截断；
+  失败/trace 日志按首次写入懒打开并复用句柄、逐条 flush，trace raw 写盘前脱敏。无 schema 或数据迁移，
+  CR-07 语义评测仍待金标/人工抽样。独立复审后聚焦回归 **102 passed**，相关回归 **213 passed**，
+  全量 pytest **1031 passed / 5 skipped / 6 xfailed**；Ruff、compileall、wheel、privacy_scan、`doc_audit`、
+  `chunk_regress --check` 均通过。未执行生产写入、真实模型批次或全库重抽。
 
 ## 2026-11-24
 
