@@ -6,6 +6,7 @@
                           （distinct collection；collection 为空回退 doc_hash，Q-2 2026-11-19）
   - question_variants    一行 = 该题的一个变体（源 doc_hash + seq），FK 级联
 聚类复用 report.build_clusters（2-gram 倒排 + Jaccard 精确判定，P1-4 同款）；
+自动并簇采用代表题星形挂靠，每个成员必须直接与代表题达标，禁止传递闭包误合。
 单件簇也落库——canonical 是全量唯一题登记簿，不只存重复簇。
 
 全量重建的边界（2026-11-19 修复）：
@@ -190,8 +191,11 @@ def build_rows(qs: list[dict], clusters: list[dict],
     used: set[str] = set()
     claimed: dict[str, str] = {}
     for c in clusters:
-        norms = Counter(qs[i]["q_norm"] for i in c["members"])
-        best = max(norms, key=lambda n: (norms[n], len(n)))
+        if "representative" in c:
+            best = c["representative"]
+        else:
+            norms = Counter(qs[i]["q_norm"] for i in c["members"])
+            best = max(norms, key=lambda n: (norms[n], len(n)))
         old_ids: Counter[str] = Counter()
         for i in c["members"]:
             old = sticky.get(_qkey(qs[i]))

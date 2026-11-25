@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""canonical 正向审计测试：契约召回、链式传递、改写证据、候选带。"""
+"""canonical 星形审计测试：代表题直连、合法低相似对、改写证据、候选带。"""
 from mianjing_kb import canonical as cn
 from mianjing_kb import canonical_audit as ca
 
@@ -23,24 +23,39 @@ def _dataset() -> list[dict]:
             _q(BAND_A, "h6"), _q(BAND_B, "h7")]
 
 
-def test_audit_counts_positive_merges_and_chain():
+def test_audit_counts_positive_merges_and_legal_star():
     data = ca.audit_questions(_dataset())
     assert data["questions"] == 7 and data["clusters"] == 4
     assert data["merged_away"] == 3
-    # 契约召回：>=0.7 的 3 对（JVM 同文、A-B、B-C）全部同簇，0 跨簇
+    # >=0.7 的 3 对（JVM 同文、A-B、B-C）全部同簇，0 跨簇
     assert data["pairs_jaccard_ge_jac"] == 3
     assert data["pairs_ge_jac_same_cluster"] == 3
     assert data["pairs_ge_jac_cross_cluster"] == 0
     assert data["violators"] == []
-    # 链式传递：A-C 0.611 靠 B 被带进同簇
+    # A-C 0.611 虽低，但 A、C 都直接相似于代表题 B，属于合法星形
     assert data["pairs_within_cluster"] == 4
     assert data["pairs_within_below_jac"] == 1
     assert data["chain_samples"][0]["jac"] == 0.611
+    assert data["pairs_member_below_anchor"] == 0
+    assert data["star_violation_samples"] == []
     # 改写证据：MySQL 三题两两文本都不同（3 对），不因字面差异被拆
     assert data["pairs_within_paraphrase"] == 3
     assert data["rewrite_samples"]
     # 候选带：0.65–0.7 只计数、不合并
     assert data["pairs_in_band"] == 1
+
+
+def test_audit_allows_high_similarity_pairs_across_competing_stars():
+    tail = "为什么mysql索引使用b+树"
+    qs = _dataset()[:5] + [_q(tail, "h8")]
+    assert cn.similarity(C, tail) >= cn.ATTACH_JAC
+    assert cn.similarity(A, tail) < cn.ATTACH_JAC
+    data = ca.audit_questions(qs)
+    assert data["pairs_ge_jac_cross_cluster"] == 1
+    assert data["violators"]
+    assert data["pairs_member_below_anchor"] == 0
+    assert data["star_violation_samples"] == []
+    assert "PASS" in ca.render_md(data)
 
 
 def test_audit_samples_are_deterministic_thresholds():
@@ -51,13 +66,28 @@ def test_audit_samples_are_deterministic_thresholds():
     assert cn.CANDIDATE_JAC <= cn.similarity(BAND_A, BAND_B) < cn.ATTACH_JAC
 
 
-def test_render_md_flags_cross_cluster_violation():
+def test_render_md_does_not_fail_on_competing_stars():
     data = {"db": "x.db", "questions": 2, "clusters": 2, "merged_away": 0,
             "multi_doc_clusters": 0, "cluster_size_dist": {"1": 2},
             "pairs_within_cluster": 0, "pairs_within_below_jac": 0,
             "pairs_within_paraphrase": 0, "pairs_jaccard_ge_jac": 1,
             "pairs_ge_jac_same_cluster": 0, "pairs_ge_jac_cross_cluster": 1,
+            "pairs_member_below_anchor": 0, "star_violation_samples": [],
             "pairs_in_band": 0, "rewrite_samples": [], "chain_samples": [],
             "violators": [{"jac": 0.8, "a": "x", "b": "y"}], "band": 0.65}
     md = ca.render_md(data)
-    assert "0/1" in md and "FAIL" in md and "漏合样例" in md
+    assert "0/1" in md and "PASS" in md and "星形竞争" in md
+
+
+def test_render_md_flags_star_anchor_violation():
+    data = {"db": "x.db", "questions": 2, "clusters": 1, "merged_away": 1,
+            "multi_doc_clusters": 0, "cluster_size_dist": {"2": 1},
+            "pairs_within_cluster": 1, "pairs_within_below_jac": 1,
+            "pairs_within_paraphrase": 1, "pairs_jaccard_ge_jac": 0,
+            "pairs_ge_jac_same_cluster": 0, "pairs_ge_jac_cross_cluster": 0,
+            "pairs_member_below_anchor": 1,
+            "star_violation_samples": [{"jac": 0.5, "representative": "x", "member": "y"}],
+            "pairs_in_band": 0, "rewrite_samples": [], "chain_samples": [],
+            "violators": [], "band": 0.65}
+    md = ca.render_md(data)
+    assert "FAIL" in md and "星形违规样例" in md

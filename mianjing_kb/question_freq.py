@@ -5,7 +5,7 @@
   ① 抽取文本（pdf 走 pymupdf、docx 走 zip+XML、doc 走 Word COM）
   ② 切题：优先按题号标记（1. / 1、/ （1） / Q1 / 第1题 / 【1】）切块，
      块内取到第一个问号为止；无题号时按"含疑问词"的行兜底
-  ③ 归一化 + 2-gram 倒排（前缀过滤）找近重复，并查集合并；SimHash 仅保留作辅助特征
+  ③ 归一化 + 2-gram 倒排（前缀过滤）找近重复，按代表题星形挂靠；SimHash 仅保留作辅助特征
   ④ 按"出现的文档数"排序输出 CSV / Markdown
 
 用法：
@@ -18,6 +18,7 @@ import argparse
 import atexit
 import csv
 import hashlib
+import heapq
 import math
 import os
 import re
@@ -463,11 +464,11 @@ def _prefix_len(size: int, min_jac: float) -> int:
 
 
 def cluster(items: list[tuple[str, int]], max_dist: int = 24, min_jac: float = 0.75) -> DSU:
-    """按 2-gram 倒排索引 + 前缀过滤聚类；Jaccard 阈值是精确的，不再依赖 SimHash 分带。
+    """按 2-gram 倒排索引 + 前缀过滤聚类，以代表题为中心做星形挂靠。
 
+    每个成员必须直接与代表题达到 `min_jac`，不再把 A~B、B~C 传递成 A/B/C 同簇。
     `max_dist` 为兼容旧调用保留但不再参与判定：SimHash 只是近似召回，20bit 差异的
-    同义改写会被 16bit LSH 漏掉，而 `--dist` 也不是有效的 Jaccard 阈值。这里先对
-    归一化后的唯一文本建倒排，再用前缀过滤生成候选，最后按完整 Jaccard 精确复核。
+    同义改写会被 16bit LSH 漏掉，而 `--dist` 也不是有效的 Jaccard 阈值。
     """
     unique: dict[str, list[int]] = {}
     for idx, (text, _h) in enumerate(items):
@@ -491,30 +492,65 @@ def cluster(items: list[tuple[str, int]], max_dist: int = 24, min_jac: float = 0
         for g in sorted(s, key=lambda x: rank[x])[:k]:
             postings[g].append(idx)
 
-    udsu = DSU(len(texts))
+    neighbors = [set() for _ in texts]
+    edges: set[tuple[int, int]] = set()
+    components = DSU(len(texts))
     for cands in postings.values():
         if len(cands) < 2:
             continue
         for i in range(len(cands)):
             for j in range(i + 1, len(cands)):
                 a, b = cands[i], cands[j]
-                if udsu.find(a) == udsu.find(b):
+                edge = (a, b) if a < b else (b, a)
+                if edge in edges:
                     continue
                 if jaccard(gsets[a], gsets[b]) < min_jac:
                     continue
                 if short_latin_conflict(texts[a], texts[b]):   # F6：短题实体不同不并
                     continue
-                udsu.union(a, b)
+                edges.add(edge)
+                neighbors[a].add(b)
+                neighbors[b].add(a)
+                components.union(a, b)
 
-    # 唯一文本的簇扩展到原实例：同一文本的多次出现必然同簇，不参与 N×M 比对。
+    weights = [len(idxs) for idxs in unique.values()]
+    by_component: dict[int, list[int]] = defaultdict(list)
+    for i in range(len(texts)):
+        by_component[components.find(i)].append(i)
+
+    stars: list[list[int]] = []
+    for component in by_component.values():
+        if len(component) == 1:
+            stars.append(component)
+            continue
+        remaining = set(component)
+        scores = {i: sum(weights[j] for j in neighbors[i]) for i in component}
+        heap = [(-scores[i], -weights[i], -len(texts[i]), i) for i in component]
+        heapq.heapify(heap)
+        while remaining:
+            # 懒删堆项：只有仍未被挂靠且覆盖数最新的节点能成为代表题。
+            while heap:
+                neg_score, _neg_weight, _neg_len, hub = heapq.heappop(heap)
+                if hub in remaining and -neg_score == scores[hub]:
+                    break
+            attached = neighbors[hub] & remaining
+            removed = {hub, *attached}
+            remaining.difference_update(removed)
+            for node in removed:
+                for other in neighbors[node]:
+                    if other in remaining:
+                        scores[other] -= weights[node]
+                        heapq.heappush(heap, (-scores[other], -weights[other],
+                                              -len(texts[other]), other))
+            stars.append([hub, *sorted(attached)])
+
+    # 唯一文本的簇扩展到原实例；DSU 根即代表题，供 report/canonical/audit 共用。
     full = DSU(len(items))
-    groups: dict[int, list[int]] = defaultdict(list)
-    for u_idx, idxs in enumerate(unique.values()):
-        groups[udsu.find(u_idx)].extend(idxs)
-    for idxs in groups.values():
-        rep = idxs[0]
-        for idx in idxs[1:]:
-            full.union(rep, idx)
+    for star in stars:
+        rep = unique[texts[star[0]]][0]
+        for u_idx in star:
+            for idx in unique[texts[u_idx]]:
+                full.union(rep, idx)
     return full
 
 
@@ -613,12 +649,10 @@ def main(argv=None) -> int:
         docs: set[str] = set()
         kind_docs = defaultdict(set)
         total = 0
-        best = occ[idxs[0]][0]
+        best = occ[gid][0]
         for i in idxs:
             docs |= occ[i][3]
             total += occ[i][4]
-            if len(occ[i][0]) > len(best):
-                best = occ[i][0]
         for d in docs:
             kind_docs[kind_of(Path(d))].add(d)
         collections = {col_by_rel.get(d, "") or f"doc:{d}" for d in docs}
@@ -666,7 +700,7 @@ def main(argv=None) -> int:
             f"- 聚成 {len(agg)} 个题簇，其中 ≥2 个来源集（collection）重复的 "
             f"{sum(1 for r in agg if r['n_collections'] >= 2)} 个",
             "",
-            "| # | 来源集 | 出现文档 | 出现次数 | 面试 | 笔试 | 题目（最长变体，截断） |",
+            "| # | 来源集 | 出现文档 | 出现次数 | 面试 | 笔试 | 题目（代表题，截断） |",
             "|---|---|---|---|---|---|---|",
         ]
         for rank, row in enumerate(top[:60], 1):

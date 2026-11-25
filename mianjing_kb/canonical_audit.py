@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""canonical 正向审计：按 Jaccard 契约核对"该合的能合"。
+"""canonical 星形审计：核对自动并簇没有通过中间题传递误合。
 
-`canonical` 的合并契约是 2-gram Jaccard >= `ATTACH_JAC`（默认 0.7）。小规模测试里
-0 合并只说明"没有重复件、不误合"，不能说明"有重复件时会合"。本模块把这件事做成可复跑的审计：
+`canonical` 的自动合并契约是 2-gram Jaccard >= `ATTACH_JAC`（默认 0.7），且每个成员
+必须直接与代表题达标。高相似题对分属不同星形簇可能是中心竞争，不再单独判为漏合。
 
-  1. 契约召回：全量枚举 jaccard>=阈值 的题对，看是否都落在同一簇（跨簇 = 漏合）
-  2. 链式副作用：同簇内 jaccard<阈值 的对（A~B、B~C 传递合簇）有多少
+  1. 星形不变量：成员与代表题直连，低于阈值即 FAIL
+  2. 合法低相似对：同簇非代表题之间可以低于阈值，单独计数
   3. 改写证据：同簇且 `q_norm` 不同的对数 + 样例（"换了说法仍合上"的实证）
   4. 候选带：jaccard 落在 [band, 阈值) 的题对数量（全量重建不登记人工候选，只作计数）
+  5. 高相似跨簇：保留计数与样例，供人工判断是否存在值得合并的中心竞争
 
 用法：
     python -m mianjing_kb.canonical_audit --db build/kb.sqlite
@@ -36,14 +37,17 @@ def _ro_uri(path: Path) -> str:
 
 def _within_stats(qs: list[dict], clusters: list[dict], grams: dict,
                   jac: float, samples: int) -> dict:
-    """同簇成对统计：总对数、低于阈值的链式对、归一化文本不同的改写对。"""
-    pairs = below = paraphrase = 0
+    """同簇成对统计，并单独校验每个成员与代表题的直连关系。"""
+    pairs = below = paraphrase = anchor_below = anchor_checks = 0
     rewrite_samples: list[dict] = []
     chain_samples: list[dict] = []
+    star_violation_samples: list[dict] = []
     sampled_rewrite: set[int] = set()
     sampled_chain: set[int] = set()
     for ci, c in enumerate(clusters):
         ms = c["members"]
+        anchor = c.get("representative_index")
+        anchor_checks += max(0, len(ms) - 1)
         for x in range(len(ms)):
             for y in range(x + 1, len(ms)):
                 i, j = ms[x], ms[y]
@@ -51,7 +55,15 @@ def _within_stats(qs: list[dict], clusters: list[dict], grams: dict,
                 pairs += 1
                 if same < jac:
                     below += 1
-                    if len(chain_samples) < samples and ci not in sampled_chain:
+                    if anchor in (i, j):
+                        anchor_below += 1
+                        member = j if i == anchor else i
+                        if len(star_violation_samples) < samples:
+                            star_violation_samples.append({
+                                "jac": round(same, 3),
+                                "representative": qs[anchor]["q_text"][:80],
+                                "member": qs[member]["q_text"][:80]})
+                    elif len(chain_samples) < samples and ci not in sampled_chain:
                         sampled_chain.add(ci)
                         chain_samples.append({"jac": round(same, 3), "a": qs[i]["q_text"][:80],
                                               "b": qs[j]["q_text"][:80]})
@@ -64,7 +76,9 @@ def _within_stats(qs: list[dict], clusters: list[dict], grams: dict,
                         rewrite_samples.append({"jac": round(same, 3), "a": qs[i]["q_text"][:80],
                                                 "b": qs[j]["q_text"][:80]})
     return {"pairs": pairs, "below": below, "paraphrase": paraphrase,
-            "rewrite_samples": rewrite_samples, "chain_samples": chain_samples}
+            "anchor_checks": anchor_checks, "anchor_below": anchor_below,
+            "rewrite_samples": rewrite_samples, "chain_samples": chain_samples,
+            "star_violation_samples": star_violation_samples}
 
 
 def _enumerate_pairs(qs: list[dict], grams: dict, owner: dict,
@@ -152,6 +166,8 @@ def audit_questions(qs: list[dict], jac: float = cn.ATTACH_JAC,
         "pairs_within_cluster": inside["pairs"],
         "pairs_within_below_jac": inside["below"],
         "pairs_within_paraphrase": inside["paraphrase"],
+        "member_anchor_checks": inside["anchor_checks"],
+        "pairs_member_below_anchor": inside["anchor_below"],
         "candidate_comparisons": enum["compared"],
         "pairs_jaccard_ge_jac": enum["high"],
         "pairs_ge_jac_same_cluster": enum["high_same"],
@@ -161,6 +177,7 @@ def audit_questions(qs: list[dict], jac: float = cn.ATTACH_JAC,
         "pairs_in_band": enum["band"],
         "rewrite_samples": inside["rewrite_samples"],
         "chain_samples": inside["chain_samples"],
+        "star_violation_samples": inside["star_violation_samples"],
         "violators": enum["violators"],
     }
 
@@ -181,18 +198,21 @@ def audit_db(db_path: Path, jac: float = cn.ATTACH_JAC,
 
 
 def render_md(data: dict) -> str:
-    ok = data["pairs_ge_jac_cross_cluster"] == 0
+    anchor_below = data.get("pairs_member_below_anchor", data["pairs_ge_jac_cross_cluster"])
+    ok = anchor_below == 0
     lines = [
-        "# canonical 正向合并审计", "",
+        "# canonical 星形挂靠审计", "",
         f"- 库：`{data.get('db', '')}`",
         f"- 题 {data['questions']} → 簇 {data['clusters']}（合并掉 {data['merged_away']}，"
         f"跨文档簇 {data['multi_doc_clusters']}）",
-        f"- 契约召回（jaccard≥阈值 的题对是否同簇）："
+        f"- 星形不变量（成员直接相似于代表题）：**{anchor_below}** 个违规"
+        f" → {'PASS' if ok else 'FAIL'}",
+        f"- jaccard≥阈值 的题对同簇："
         f"**{data['pairs_ge_jac_same_cluster']}/{data['pairs_jaccard_ge_jac']}**"
-        f"（跨簇 {data['pairs_ge_jac_cross_cluster']}）→ {'PASS' if ok else 'FAIL'}",
+        f"（跨簇 {data['pairs_ge_jac_cross_cluster']}；跨簇可能是星形中心竞争）",
         f"- 其中被 F6 短题拉丁实体闸门挡下的对：{data.get('pairs_gated_by_short_latin', 0)}"
         "（实体不同，属于契约的显式例外）",
-        f"- 同簇但 jaccard 低于阈值（链式传递）：{data['pairs_within_below_jac']}"
+        f"- 同簇非代表题对 jaccard 低于阈值（合法星形）：{data['pairs_within_below_jac']}"
         f"/{data['pairs_within_cluster']}",
         f"- 同簇且归一化文本不同（换说法仍合）：{data['pairs_within_paraphrase']}",
         f"- 候选带 [{data.get('band', cn.CANDIDATE_JAC)}, 阈值)：{data['pairs_in_band']} 对（全量只拆不合）",
@@ -204,9 +224,14 @@ def render_md(data: dict) -> str:
             lines.append(f"- jac={s['jac']}：`{s['a']}` ↔ `{s['b']}`")
         lines.append("")
     if data["chain_samples"]:
-        lines += ["## 链式传递样例（同簇但低于阈值）", ""]
+        lines += ["## 同簇非代表题低相似样例（合法星形）", ""]
         for s in data["chain_samples"]:
             lines.append(f"- jac={s['jac']}：`{s['a']}` ↔ `{s['b']}`")
+        lines.append("")
+    if data.get("star_violation_samples"):
+        lines += ["## 星形违规样例（成员未直连代表题）", ""]
+        for s in data["star_violation_samples"]:
+            lines.append(f"- jac={s['jac']}：代表题 `{s['representative']}` ↔ 成员 `{s['member']}`")
         lines.append("")
     if data.get("gated_samples"):
         lines += ["## F6 闸门样例（jaccard 达标但实体不同，故意拆开）", ""]
@@ -214,7 +239,7 @@ def render_md(data: dict) -> str:
             lines.append(f"- jac={s['jac']}：`{s['a']}` ↔ `{s['b']}`")
         lines.append("")
     if data["violators"]:
-        lines += ["## 漏合样例（jaccard 达标却不同簇）", ""]
+        lines += ["## 高相似跨簇样例（星形竞争，不单独判失败）", ""]
         for s in data["violators"]:
             lines.append(f"- jac={s['jac']}：`{s['a']}` ↔ `{s['b']}`")
         lines.append("")

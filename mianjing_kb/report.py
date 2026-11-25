@@ -46,31 +46,29 @@ def load_questions(conn) -> list[dict]:
 
 
 def build_clusters(qs: list[dict], max_dist: int, min_jac: float):
-    """返回簇列表：每簇 {members, docs, sample, variants, qtype}，按文档数降序。"""
+    """返回星形簇列表：每簇 {members, representative, docs, sample, variants, qtype}。"""
     items = [(q["q_norm"], q["simhash_u"]) for q in qs]
     dsu = cluster(items, max_dist, min_jac)
     groups: dict[int, list[int]] = defaultdict(list)
     for i in range(len(qs)):
         groups[dsu.find(i)].append(i)
     clusters = []
-    for members in groups.values():
+    for representative_index, members in groups.items():
         docs = {qs[i]["doc_hash"] for i in members}
         # 见证数口径（Q-2）：distinct collection；空 collection 回退自身 doc_hash
         witnesses = {qs[i].get("collection") or "doc:" + qs[i]["doc_hash"] for i in members}
         norms = {qs[i]["q_norm"] for i in members}
-        # 样例题：取最常见 norm 里最长的原文
-        by_norm: dict[str, list[int]] = defaultdict(list)
-        for i in members:
-            by_norm[qs[i]["q_norm"]].append(i)
-        best_norm = max(by_norm, key=lambda n: (len(by_norm[n]), len(n)))
+        representative = qs[representative_index]["q_norm"]
         qtypes = [qs[i]["qtype"] for i in members]
         clusters.append({
             "members": members,
+            "representative_index": representative_index,
+            "representative": representative,
             "n_docs": len(docs),
             "n_collections": len(witnesses),
             "witness": len(witnesses),
             "doc_hashes": sorted(docs),
-            "sample": qs[by_norm[best_norm][0]]["q_text"],
+            "sample": qs[representative_index]["q_text"],
             "n_variants": len(norms),
             "variants": sorted(norms),
             "qtype": max(set(qtypes), key=qtypes.count),

@@ -399,6 +399,46 @@ def test_paraphrase_variants_merge_across_docs(mini_db, capsys):
     assert cluster["witness"] == 2                      # c8 + c9 两个来源
 
 
+def test_full_rebuild_splits_transitive_tail_and_uses_star_anchor(mini_db):
+    texts = ["mysql索引为什么用b+树不用b树", "mysql索引为什么用b+树",
+             "为什么mysql索引用b+树", "为什么mysql索引使用b+树"]
+    for i, text in enumerate(texts):
+        _add_source_and_question(mini_db, f"hs{i}", 1, text, f"hs{i}:star",
+                                 topic="MySQL", collection=f"cs{i}")
+    assert cn.main([]) == 0
+
+    cids = {r["q_key"]: r["canonical_id"] for r in mini_db.execute(
+        "SELECT q_key, canonical_id FROM question_variants WHERE q_key LIKE 'hs%:star'")}
+    assert cids["hs0:star"] == cids["hs1:star"] == cids["hs2:star"]
+    assert cids["hs3:star"] != cids["hs0:star"]
+    title = mini_db.execute(
+        "SELECT title_norm FROM canonical_questions WHERE canonical_id=?",
+        (cids["hs0:star"],)).fetchone()[0]
+    assert title == texts[1]
+
+
+def test_incremental_keeps_existing_anchor_without_transitive_attach(mini_db):
+    cn.main([])
+    texts = ["mysql索引为什么用b+树不用b树", "mysql索引为什么用b+树",
+             "为什么mysql索引用b+树", "为什么mysql索引使用b+树"]
+    for i, text in enumerate(texts):
+        _add_source_and_question(mini_db, f"hi{i}", 1, text, f"hi{i}:star",
+                                 topic="MySQL", collection=f"ci{i}")
+    assert cn.main(["--incremental", "--batch-id", "t-star"]) == 0
+
+    cids = {r["q_key"]: r["canonical_id"] for r in mini_db.execute(
+        "SELECT q_key, canonical_id FROM question_variants WHERE q_key LIKE 'hi%:star'")}
+    assert cids["hi0:star"] == cids["hi1:star"]
+    assert cids["hi2:star"] == cids["hi3:star"]
+    assert cids["hi0:star"] != cids["hi2:star"]
+    norms = {f"hi{i}:star": text for i, text in enumerate(texts)}
+    for first, second in (("hi0:star", "hi1:star"), ("hi2:star", "hi3:star")):
+        title = mini_db.execute(
+            "SELECT title_norm FROM canonical_questions WHERE canonical_id=?",
+            (cids[first],)).fetchone()[0]
+        assert cn.similarity(title, norms[second]) >= cn.ATTACH_JAC
+
+
 def test_near_miss_band_variants_stay_split(mini_db, capsys):
     """口径边界（不是 bug）：字面差异大到 jaccard 落在 0.65–0.7 的改写会被拆开。
 

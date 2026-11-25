@@ -27,3 +27,16 @@ def test_near_dup_rewrite_merges():
           _q("mysql索引为什么采用b+树", "b")]
     clusters = build_clusters(qs, max_dist=24, min_jac=0.7)
     assert len([c for c in clusters if c["n_docs"] >= 2]) == 1
+
+
+def test_cluster_exposes_the_representative_anchor():
+    texts = ["mysql索引为什么用b+树不用b树", "mysql索引为什么用b+树",
+             "为什么mysql索引用b+树", "为什么mysql索引使用b+树"]
+    qs = [_q(text, f"d{i}") for i, text in enumerate(texts)]
+    clusters = build_clusters(qs, max_dist=24, min_jac=0.7)
+    anchor = next(c for c in clusters if 0 in c["members"])
+    assert anchor["representative"] == texts[1]
+    assert anchor["representative_index"] == 1
+    assert anchor["sample"] == texts[1]
+    assert anchor["members"] == [0, 1, 2]
+    assert sum(1 for c in clusters if 3 in c["members"]) == 1

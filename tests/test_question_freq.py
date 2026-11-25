@@ -121,3 +121,40 @@ def test_cluster_uses_jaccard_not_simhash_hamming():
     assert hamming(items[0][1], items[1][1]) > 24
     dsu = cluster(items, max_dist=24, min_jac=0.9)
     assert dsu.find(0) == dsu.find(1)
+
+
+def test_cluster_uses_representative_star_not_transitive_closure():
+    texts = [
+        "mysql索引为什么用b+树不用b树",
+        "mysql索引为什么用b+树",
+        "为什么mysql索引用b+树",
+        "为什么mysql索引使用b+树",
+    ]
+    assert jaccard(grams(texts[0]), grams(texts[1])) >= 0.7
+    assert jaccard(grams(texts[1]), grams(texts[2])) >= 0.7
+    assert jaccard(grams(texts[2]), grams(texts[3])) >= 0.7
+    assert jaccard(grams(texts[0]), grams(texts[3])) < 0.7
+
+    dsu = cluster([(text, 0) for text in texts], max_dist=24, min_jac=0.7)
+    assert dsu.find(0) == dsu.find(1) == dsu.find(2)
+    assert dsu.find(3) != dsu.find(0)
+    assert texts[dsu.find(0)] == texts[1]
+    for i in (0, 2):
+        assert jaccard(grams(texts[i]), grams(texts[1])) >= 0.7
+
+
+def test_cluster_star_invariant_holds_for_input_order_and_duplicates():
+    from itertools import permutations
+
+    texts = ["mysql索引为什么用b+树不用b树", "mysql索引为什么用b+树",
+             "为什么mysql索引用b+树", "为什么mysql索引使用b+树"]
+    for order in permutations(texts):
+        items = [(text, 0) for text in order] + [(order[0], 0)]
+        dsu = cluster(items, max_dist=24, min_jac=0.7)
+        groups = {}
+        for i in range(len(items)):
+            groups.setdefault(dsu.find(i), []).append(i)
+        assert len(groups) == 2
+        for representative, members in groups.items():
+            for i in members:
+                assert jaccard(grams(items[representative][0]), grams(items[i][0])) >= 0.7
