@@ -2,9 +2,9 @@
  "docs": 20,
  "missing": 0,
  "total": {
-  "questions": 9858,
-  "empty_answers": 1524,
-  "weak_questions": 477,
+  "questions": 9851,
+  "empty_answers": 1555,
+  "weak_questions": 465,
   "probe": 28
  },
  "per_doc": {
@@ -29,7 +29,7 @@
   "ba0bcd6afd3c0b77": {
    "questions": 72,
    "empty_answers": 13,
-   "weak_questions": 10,
+   "weak_questions": 11,
    "probe": 3
   },
   "18d7763a36a7083b": {
@@ -57,39 +57,39 @@
    "probe": 0
   },
   "541e8a8a2bcd0318": {
-   "questions": 1316,
-   "empty_answers": 274,
-   "weak_questions": 82,
+   "questions": 1326,
+   "empty_answers": 284,
+   "weak_questions": 83,
    "probe": 3
   },
   "74976f50a5f7b858": {
-   "questions": 1316,
-   "empty_answers": 274,
-   "weak_questions": 82,
+   "questions": 1326,
+   "empty_answers": 284,
+   "weak_questions": 83,
    "probe": 3
   },
   "ffb5d631ecbee8b6": {
-   "questions": 1154,
-   "empty_answers": 162,
-   "weak_questions": 47,
+   "questions": 1136,
+   "empty_answers": 165,
+   "weak_questions": 46,
    "probe": 1
   },
   "34cf2454aebfe34d": {
-   "questions": 2290,
-   "empty_answers": 211,
-   "weak_questions": 103,
+   "questions": 2278,
+   "empty_answers": 213,
+   "weak_questions": 96,
    "probe": 3
   },
   "87e8e690abd166d4": {
-   "questions": 232,
-   "empty_answers": 42,
-   "weak_questions": 22,
+   "questions": 227,
+   "empty_answers": 40,
+   "weak_questions": 23,
    "probe": 1
   },
   "496d8f48fc88c61a": {
-   "questions": 800,
-   "empty_answers": 89,
-   "weak_questions": 48,
+   "questions": 802,
+   "empty_answers": 93,
+   "weak_questions": 41,
    "probe": 2
   },
   "26a37758676a1a4d": {
@@ -99,33 +99,33 @@
    "probe": 1
   },
   "2d0a05966f6ab922": {
-   "questions": 620,
-   "empty_answers": 247,
-   "weak_questions": 33,
+   "questions": 623,
+   "empty_answers": 249,
+   "weak_questions": 35,
    "probe": 1
   },
   "d85bda695f8470f7": {
-   "questions": 814,
-   "empty_answers": 36,
-   "weak_questions": 7,
+   "questions": 822,
+   "empty_answers": 39,
+   "weak_questions": 6,
    "probe": 2
   },
   "3da09be76d8cb124": {
    "questions": 224,
    "empty_answers": 35,
-   "weak_questions": 0,
+   "weak_questions": 1,
    "probe": 3
   },
   "1239c157c5f26cf6": {
-   "questions": 219,
+   "questions": 218,
    "empty_answers": 9,
-   "weak_questions": 2,
+   "weak_questions": 1,
    "probe": 2
   },
   "65c8c775b1c6f540": {
-   "questions": 489,
-   "empty_answers": 59,
-   "weak_questions": 17,
+   "questions": 485,
+   "empty_answers": 58,
+   "weak_questions": 15,
    "probe": 3
   }
  }
