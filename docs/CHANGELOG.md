@@ -31,6 +31,15 @@
     `q_tail_free`（多问句/示例）；归因见 `docs/61` §8.3。
   - 新增 `tests/test_chunk_diag.py`（4 条）。门禁仍为：ruff 通过、pytest 通过、
     `chunk_regress --check` FAIL（仅空答案超容差，基线未重建）。
+- **回归基线与生产影子复核**（`docs/62`，T37/T41/T20）：
+  - T37：`chunk_regress --make` 重建 `eval/chunk_regress/baseline.json`（9851 题 / 1555 空答案 / 465 弱题 / 28 探针），
+    `--check` 转 PASS。
+  - T41：生产备份 + 影子库 `--allow-empty-overwrite` 重抽 1430 篇（不带 `--allow-state-loss`）。
+    题干 hash 只消失 0.4%、`label_facts` 孤儿 0.3%，但 784 篇被 `unmatched_governed_questions` 拦下；
+    结论仍不切换，前置为分级状态损失策略 + 题量差异溯源 + 盲评。
+  - T20：`batch_label` 新增 `--golden-export N` / `--golden-out`（从 `questions` 按 topic×qtype 分层扩金标，
+    staging 已清空时可用），产出 500 条待填清单；`tests/test_golden_export.py` 2 条。
+  - `docs/33`、`docs/README`（新增 62）、`docs/61` §5/§8 同步。
 
 ## 2026-11-25
 

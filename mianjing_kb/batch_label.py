@@ -695,6 +695,66 @@ def golden_sample(conn, n: int) -> dict:
     return {"sampled": len(items), "strata": len(strata), "path": str(path), "items": items}
 
 
+def golden_export(conn, n: int, out=None, seed: int = 42) -> dict:
+    """批次二 G2 补口：从 questions 按 (topic, qtype) 分层轮转抽 N 条 → golden_todo 清单。
+
+    与 `golden_sample` 的区别：那个从 `labels_staging` 抽，而 staging 在 `--merge` 之后
+    就被清空——打标已经合并进库时它抽不出东西。这里直接读 `questions` 的当前标签，
+    所以扩金标不受 staging 状态影响。已进 `golden_labels` 的题干（按 `q_norm_hash`）
+    跳过，避免重复标注；`source_dir` 记 md_rel 首层目录，便于按来源分布核对。
+    """
+    rows = conn.execute(
+        "SELECT q.qid, q.q_norm_hash, q.topic, q.qtype, q.difficulty, q.tags, "
+        "       q.q_text, q.a_text, p.md_rel "
+        "FROM questions q LEFT JOIN document_products p ON p.doc_hash = q.doc_hash "
+        "WHERE q.q_norm_hash IS NOT NULL AND q.q_norm_hash != '' "
+        "  AND NOT EXISTS (SELECT 1 FROM golden_labels g WHERE g.q_norm_hash = q.q_norm_hash)"
+    ).fetchall()
+    strata: dict[tuple, list[dict]] = {}
+    for r in rows:
+        d = dict(r)
+        rel = d.pop("md_rel", "") or ""
+        d["source_dir"] = rel.split("/")[0] if rel else ""
+        strata.setdefault((d["topic"] or "", d["qtype"] or ""), []).append(d)
+    rng = random.Random(seed)
+    keys = list(strata)
+    rng.shuffle(keys)
+    for k in keys:
+        rng.shuffle(strata[k])
+    picked: list[dict] = []
+    i = 0
+    while len(picked) < n and any(strata[k] for k in keys):
+        k = keys[i % len(keys)]
+        if strata[k]:
+            picked.append(strata[k].pop())
+        i += 1
+    items = [{"qid": it["qid"], "q_norm_hash": it["q_norm_hash"],
+              "q_text": (it["q_text"] or "")[:300], "a_text": (it["a_text"] or "")[:300],
+              "source_dir": it["source_dir"],
+              "current": {"topic": it["topic"], "qtype": it["qtype"],
+                          "difficulty": it["difficulty"], "tags": it["tags"]},
+              "topic_gold": "", "qtype_gold": "", "difficulty_gold": None}
+             for it in picked]
+    path = (Path(out) if out else Path(config.BUILD_DIR) / "golden_todo.json")
+    if path.exists():            # 与 golden_sample 同一条守卫：已有未回灌清单不覆盖
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(old, dict) and old.get("items"):
+                return {"ok": False, "path": str(path),
+                        "note": f"已存在待回灌金标文件（{len(old['items'])} 条）——先 "
+                                "--golden-load 回灌，或改名该文件后重抽"}
+        except Exception:  # noqa: BLE001 —— 损坏文件不挡重抽
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dirs: dict[str, int] = {}
+    for it in items:
+        dirs[it["source_dir"]] = dirs.get(it["source_dir"], 0) + 1
+    _atomic_write_text(path, json.dumps({"sampled": len(items), "items": items},
+                                        ensure_ascii=False, indent=1))
+    return {"sampled": len(items), "strata": len(strata), "path": str(path),
+            "source_dirs": dirs, "items": items}
+
+
 def golden_load(conn, path, annotator: str = "human") -> dict:
     """批次二 G2：读回填好的 golden_todo.json → golden_labels（非法整批拒绝）。
 
@@ -1207,6 +1267,11 @@ def main(argv=None) -> int:
     # 批次二 G2（2026-11-19）：金标层——分层抽样出待人工标注清单 + 回灌落库
     ap.add_argument("--golden-sample", type=int, default=0,
                     help="从 staging 按 topic 分层抽 N 条 → build/golden_todo.json（人工填 gold）")
+    ap.add_argument("--golden-export", type=int, default=0,
+                    help="从 questions 按 topic×qtype 分层抽 N 条已打标题 → golden_todo.json"
+                         "（打标已 merge、staging 已清空时扩金标用）")
+    ap.add_argument("--golden-out", default="",
+                    help="--golden-export 的清单输出路径（默认 build/golden_todo.json）")
     ap.add_argument("--golden-load", default="",
                     help="回灌填好的 golden_todo.json → golden_labels（非法项整批拒绝）")
     ap.add_argument("--annotator", default="human", help="金标标注人（--golden-load 用）")
@@ -1255,7 +1320,7 @@ def main(argv=None) -> int:
     )
     read_action = bool(
         args.check or args.sample or args.eval or args.review_list
-        or args.golden_sample or args.manual_template
+        or args.golden_sample or args.golden_export or args.manual_template
         or (args.manual_import and args.manual_dry_run) or args.dry_run
     )
     needs_write = write_action or not read_action
@@ -1316,6 +1381,11 @@ def main(argv=None) -> int:
             return 0
         if args.golden_sample:
             out = golden_sample(conn, args.golden_sample)
+            out.pop("items", None)           # 清单在文件里，控制台只报摘要
+            print(json.dumps(out, ensure_ascii=False, indent=1))
+            return 0 if out.get("ok", True) else 1
+        if args.golden_export:
+            out = golden_export(conn, args.golden_export, out=args.golden_out or None)
             out.pop("items", None)           # 清单在文件里，控制台只报摘要
             print(json.dumps(out, ensure_ascii=False, indent=1))
             return 0 if out.get("ok", True) else 1
