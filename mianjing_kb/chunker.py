@@ -999,6 +999,30 @@ def _is_declarative_item(qtext: str) -> bool:
 RE_DEC_UNIT = re.compile(
     r'^\s*(?:#{1,6}\s+)?(\d{1,3})\s*[.、．](\d{2,}(?=[位个年人倍万亿条张种次台端口届期]))(.*)$')
 RE_BLANK_OR_OPTION = re.compile(r'[（(]\s*[）)]|_{3,}|^\s*(?:#\s*)?[A-D][、.．]\s*\S')
+# 编程题题库的题面结构：题干（常为陈述句）+ 示例/输入描述/输出描述。命中说明本文档的
+# 编号陈述句是题而不是答案列表（`峰值元素是指其值大于左右相邻的元素。`）。
+RE_CODING_HEAD = re.compile(
+    r'^(?:#{1,6}\s*)?(?:[一二三四五六七八九十\d]+\s*[.、．]?\s*)?'
+    r'(?:编程题|上机题|机试题|算法题|题目描述|编程实现)\s*[：:]?$')
+RE_CODING_SAMPLE = re.compile(
+    r'^(?:示例|样例)\s*(?:[一二三四五六七八九十\d]+)\s*(?:[：:]|[）)]|$)|'
+    r'^(?:输入描述|输出描述|输入格式|输出格式|数据范围|输入样例|输出样例)\s*[：:]?$')
+RE_CODING_TITLE = re.compile(r'LeetCode|剑指\s*Offer|算法面试题库|算法面试题|编程题库|上机笔试|在线编程|编程题')
+
+
+def _is_coding_doc(lines: List[str]) -> bool:
+    """编程题题库：编程题型标题 + 编号示例 / 输入输出描述。
+
+    `示例：java -Xmx3550m …` 这类命令示例、`示例一：在 Users 表中…` 这类讲解
+    不算——只认“示例+编号”“输入/输出描述”与编程题型标题，避免误关其他文档的
+    编号陈述句闸。
+    """
+    norm = [unicodedata.normalize("NFKC", ln.strip()) for ln in lines]
+    if RE_CODING_TITLE.search("\n".join(norm[:6])):
+        return True
+    heads = sum(1 for ln in norm if RE_CODING_HEAD.match(ln))
+    samples = sum(1 for ln in norm if RE_CODING_SAMPLE.match(ln))
+    return (heads >= 1 and samples >= 1) or heads >= 2 or samples >= 3
 RE_TOC_DOTS = re.compile(r"(?:\.{4,}|…{2,}|·{4,})")
 RE_TOC_PAGE_TAIL = re.compile(r'(?<=[\u4e00-\u9fff])[０-９]{2,4}\s*$')
 
@@ -1271,6 +1295,9 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
     total = starts[n]
     # 试卷/真题型文档：空括号、下划线、A-D 选项行密集，编号行默认是题。
     exam_mode = sum(1 for ln in lines if RE_BLANK_OR_OPTION.search(ln)) >= 8
+    # T38（docs/61）：编程题题库的陈述句题干后紧跟 示例/输入描述/输出描述，这类文档的
+    # 编号陈述句是题，不能按答案列表降级。
+    coding_exam = _is_coding_doc(lines)
     # 句中问号行被摘掉的尾巴（行号 → 文本），组块时放回答案区首行。
     inline_tails: Dict[int, str] = {}
 
@@ -1595,7 +1622,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
         # 留在父题答案里。试卷型文档的编号默认是题（题干常是无问词的陈述），不拦。
         # 文档还没有任何题时不拦：此时没有父题可挂，降级 = 整篇 0 题、正文进 leftovers
         # （华为/百度编程题真题整篇丢失）。
-        if (not md_num_heading and not exam_mode and bounds
+        if (not md_num_heading and not exam_mode and not coding_exam and bounds
                 and _is_declarative_item(qtext)):
             kinds[i] = "list"
             # 沿用原有的“父题下重启编号 = 答案列表”判定：已在列表里或题号不大于父题
@@ -2149,6 +2176,14 @@ def chunk_v2(md_text: str) -> Dict:
             continue
         cleaned.append(it)
     items = cleaned
+
+    # T39（docs/61）：目录行漏网的全角页码尾巴在出口统一去掉。同一题带/不带页码会被
+    # 当成两道题（`简述…含义１１０` 与正文的 `简述…含义`），去尾后由下面的去重收敛。
+    # 只在剩余题干仍够长时去，避免把以数字结尾的真题干截断成碎片。
+    for it in items:
+        q2 = RE_TOC_PAGE_TAIL.sub("", it["q"]).strip()
+        if q2 != it["q"] and len(q2) >= 6:
+            it["q"] = q2
 
     # 同一文档内完全重复的题干（网页标题与正文题号重复）只做保守合并：
     # 空答案 / 极短答案被更完整答案替换；两条都有实质答案时都保留，
