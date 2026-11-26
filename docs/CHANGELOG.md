@@ -20,6 +20,18 @@
     回归基线未重建。处置与推荐方案见 `待办清单` T37–T42。
   - `docs/33` 同步；`docs/README` 索引新增 61。
 
+- **切题精度闸第三轮**（`docs/61` §8，T38/T39/T40/T42）：
+  - P6 增加文档级编程题判定 `_is_coding_doc()`（短标题 + 样例块 + 标题词，NFKC 归一，命中 48 篇），
+    命中文档不启用“编号陈述句”闸；`chunk_v2` 出口统一去全角页码尾（去尾后长度 ≥6 才替换）。
+    全量：题 +10、生产题 lost −8、弱题 5.42% → 5.45%。
+  - 新增 `mianjing_kb/chunk_diag.py`（`python -m mianjing_kb.chunk_diag`）作为只读诊断 CLI：
+    `diag / recall / regress-diff / ablate / self-check`，去掉会话目录硬编码路径，基线版本改用
+    `--baseline-rev` / `--baseline-file`；`ablate` 增加“编程题模式”开关。
+  - 指标口径：`q_tail_answer` 拆成 `q_tail_label`（尾巴带答案标记，真缺陷）与
+    `q_tail_free`（多问句/示例）；归因见 `docs/61` §8.3。
+  - 新增 `tests/test_chunk_diag.py`（4 条）。门禁仍为：ruff 通过、pytest 通过、
+    `chunk_regress --check` FAIL（仅空答案超容差，基线未重建）。
+
 ## 2026-11-25
 
 - **外部 review ISSUE-01～07 复核与定点修复**（`docs/60`）：外部补丁基线 `05fa028` 与当前
