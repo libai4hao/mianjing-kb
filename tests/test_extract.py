@@ -748,6 +748,53 @@ def test_store_allows_unmatched_source_answer_and_derived_state(tmp_env):
 
 
 @pytest.mark.parametrize("field,value", [
+    ("answer_state", "boundary_gap"),
+    ("answered_at", "2026-11-26T12:00:00"),
+])
+def test_store_allows_unmatched_recomputable_state_with_audit(tmp_env, field, value):
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "recomputable.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "recomputable.md")
+    extract.store(conn, h, rows)
+    old = conn.execute("SELECT qid FROM questions WHERE doc_hash=? AND seq=1", (h,)).fetchone()
+    conn.execute(f"UPDATE questions SET {field}=? WHERE qid=?", (value, old["qid"]))
+    conn.commit()
+    changed = [dict(r) for r in rows]
+    changed[0]["q_norm_hash"] = "changed-recomputable-hash"
+    report = {}
+
+    extract.store(conn, h, changed, loss_report=report)
+
+    assert report["count"] == 0 and report["provenance_count"] == 0
+    assert report["recomputable_state_count"] == 1
+    assert report["recomputable_state_qids"] == [old["qid"]]
+    assert report["recomputable_state_fields"] == {field: [old["qid"]]}
+    row = conn.execute(
+        f"SELECT {field} FROM questions WHERE doc_hash=? AND q_norm_hash=?",
+        (h, "changed-recomputable-hash")).fetchone()
+    assert row[field] is None
+
+
+@pytest.mark.parametrize("source,model", [("", "m"), ("llm", "")])
+def test_store_refuses_answered_at_with_answer_provenance(tmp_env, source, model):
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "provenance.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "provenance.md")
+    extract.store(conn, h, rows)
+    old = conn.execute("SELECT qid FROM questions WHERE doc_hash=? AND seq=1", (h,)).fetchone()
+    conn.execute(
+        "UPDATE questions SET answer_source=?, answer_model=?, answered_at='t' WHERE qid=?",
+        (source, model, old["qid"]))
+    conn.commit()
+    changed = [dict(r) for r in rows]
+    changed[0]["q_norm_hash"] = "changed-provenance-hash"
+
+    with pytest.raises(extract.StateLossError) as exc:
+        extract.store(conn, h, changed)
+    assert exc.value.details["provenance_qids"] == [old["qid"]]
+
+
+@pytest.mark.parametrize("field,value", [
     ("topic", "Redis"),
     ("qtype", "算法"),
     ("difficulty", 4),
@@ -878,6 +925,23 @@ def test_purge_orphans_refuses_governed_rows_without_explicit_authorization(tmp_
     assert extract.purge_orphans(conn, set(), allow_state_loss=True) == 1
 
 
+def test_purge_orphans_allows_recomputable_state_with_audit(tmp_env):
+    _corpus, conn = tmp_env
+    cur = conn.execute(
+        "INSERT INTO questions (doc_hash, seq, q_text, a_text, qtype, answer_state, answered_at, "
+        "q_norm, q_norm_hash, simhash, span_start, span_end, extracted_at) "
+        "VALUES ('stale-soft',1,'旧题','', '八股','boundary_gap','t','旧题','old-soft-hash',0,0,1,'now')")
+    conn.commit()
+    report = {}
+
+    assert extract.purge_orphans(conn, set(), loss_report=report) == 1
+    assert report["recomputable_state_count"] == 1
+    assert report["recomputable_state_qids"] == [cur.lastrowid]
+    assert report["recomputable_state_fields"] == {
+        "answer_state": [cur.lastrowid], "answered_at": [cur.lastrowid]}
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash='stale-soft'").fetchone()[0] == 0
+
+
 def test_purge_orphans_refuses_fact_shared_only_by_multiple_stale_docs(tmp_env):
     from mianjing_kb.extract import StateLossError
 
@@ -933,6 +997,43 @@ def test_main_reports_structured_state_loss_and_returns_nonzero(tmp_env, monkeyp
     assert out["state_loss_blocked"] == 0 and out["answer_provenance_lost"] == 1
 
 
+def test_main_reports_recomputable_state_reset_without_override(tmp_env, monkeypatch, capsys):
+    corpus, conn = tmp_env
+    h, p = _seed_doc(conn, corpus, "reset.md", MD_A)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    rows = extract.extract_doc(h, p)
+    old = conn.execute("SELECT qid FROM questions WHERE doc_hash=? AND seq=1", (h,)).fetchone()
+    conn.execute(
+        "UPDATE questions SET answer_state='boundary_gap', answered_at='t' WHERE qid=?",
+        (old["qid"],))
+    conn.commit()
+    changed = [dict(r) for r in rows]
+    changed[0]["q_norm_hash"] = "different-reset-hash"
+    real_extract = extract.extract_doc_status
+    monkeypatch.setattr(extract, "extract_doc_status",
+                        lambda doc_hash, path: (changed, "ok") if path == p else real_extract(doc_hash, path))
+    capsys.readouterr()
+
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["state_loss_blocked"] == 0 and out["answer_provenance_lost"] == 0
+    assert out["recomputable_state_reset"] == 1
+    assert out["recomputable_state_resets"] == [
+        {
+            "doc_hash": h,
+            "count": 1,
+            "qids": [old["qid"]],
+            "fields": {
+                "answer_state": [old["qid"]],
+                "answered_at": [old["qid"]],
+            },
+        },
+    ]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM questions WHERE doc_hash=? AND q_norm_hash=?",
+        (h, "different-reset-hash")).fetchone()[0] == 1
+
+
 def test_allow_empty_overwrite_authorizes_state_loss(tmp_env, capsys):
     corpus, conn = tmp_env
     h, p = _seed_doc(conn, corpus, "empty-loss.md", MD_A)
@@ -947,6 +1048,18 @@ def test_allow_empty_overwrite_authorizes_state_loss(tmp_env, capsys):
     assert extract.main(["--db", str(config.DB_PATH), "--allow-empty-overwrite"]) == 0
     capsys.readouterr()
     assert conn.execute("SELECT COUNT(*) FROM questions WHERE doc_hash=?", (h,)).fetchone()[0] == 0
+
+
+def test_plan_ignores_answered_at_without_provenance(tmp_env, capsys):
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "soft-plan.md", MD_A)
+    assert extract.main(["--db", str(config.DB_PATH)]) == 0
+    conn.execute("UPDATE questions SET answered_at='t' WHERE doc_hash=?", (h,))
+    conn.commit()
+    capsys.readouterr()
+
+    assert extract.main(["--db", str(config.DB_PATH), "--plan"]) == 0
+    assert json.loads(capsys.readouterr().out)["answer_provenance_docs"] == 0
 
 
 def test_plan_detects_answer_model_without_source(tmp_env, capsys):

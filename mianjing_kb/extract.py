@@ -220,14 +220,34 @@ def mark_status(conn, doc_hashes: list[str], new_status: str, only_from=status.I
     return n
 
 
-def purge_orphans(conn, pool_keys: set[str], *, allow_state_loss: bool = False) -> int:
-    """清理孤儿题行；已治理数据未被显式授权丢弃时整批拒绝。"""
+def purge_orphans(conn, pool_keys: set[str], *, allow_state_loss: bool = False,
+                  loss_report: dict | None = None) -> int:
+    """清理孤儿题行；不可重建数据未被显式授权丢弃时整批拒绝。"""
     stale = [r[0] for r in conn.execute("SELECT DISTINCT doc_hash FROM questions").fetchall()
              if r[0] not in pool_keys]
     stale_docs = set(stale)
+    reset_docs = []
+    reset_qids = []
+    reset_fields: dict[str, list[int]] = {}
     for doc_hash in stale:
+        report = {}
         _prepare_rows_preserving_state(
-            conn, doc_hash, [], allow_state_loss=allow_state_loss, removing_docs=stale_docs)
+            conn, doc_hash, [], allow_state_loss=allow_state_loss,
+            loss_report=report, removing_docs=stale_docs)
+        if not report.get("recomputable_state_count"):
+            continue
+        qids = report["recomputable_state_qids"]
+        fields = report["recomputable_state_fields"]
+        reset_docs.append({"doc_hash": doc_hash, "count": len(qids),
+                           "qids": qids, "fields": fields})
+        reset_qids.extend(qids)
+        for field, field_qids in fields.items():
+            reset_fields.setdefault(field, []).extend(field_qids)
+    if loss_report is not None:
+        loss_report.update({"recomputable_state_qids": reset_qids,
+                            "recomputable_state_count": len(reset_qids),
+                            "recomputable_state_fields": reset_fields,
+                            "recomputable_state_docs": reset_docs})
     removed = 0
     for i in range(0, len(stale), 500):
         chunk = stale[i:i + 500]
@@ -327,8 +347,7 @@ def _prepare_rows_preserving_state(conn, doc_hash: str, rows: list[dict], *,
         return str(value).strip() not in ("", "[]")
 
     def has_provenance(old: dict) -> bool:
-        provenance_cols = ("answer_source", "answer_model", "answered_at")
-        return any(present(old.get(c)) for c in provenance_cols)
+        return any(present(old.get(c)) for c in ("answer_source", "answer_model"))
 
     def governed(old: dict) -> bool:
         if has_provenance(old):
@@ -336,6 +355,14 @@ def _prepare_rows_preserving_state(conn, doc_hash: str, rows: list[dict], *,
         if any(present(old.get(c)) for c in label_cols if c != "qtype"):
             return True
         return old.get("qtype") not in (None, "", "八股")
+
+    def recomputable_fields(old: dict) -> list[str]:
+        fields = []
+        if "answer_state" in columns and present(old.get("answer_state")):
+            fields.append("answer_state")
+        if "answered_at" in columns and present(old.get("answered_at")):
+            fields.append("answered_at")
+        return fields
 
     hash_counts = Counter(str(r.get("q_norm_hash") or "") for r in new_rows)
     new_hashes = set(hash_counts) - {""}
@@ -349,6 +376,8 @@ def _prepare_rows_preserving_state(conn, doc_hash: str, rows: list[dict], *,
     old_by_hash: dict[str, list[dict]] = {}
     unmatched_qids = []
     provenance_qids = []
+    recomputable_state_qids = []
+    recomputable_state_fields: dict[str, list[int]] = {}
     for old in old_rows:
         h = str(old.get("q_norm_hash") or "")
         if h and h in new_hashes:
@@ -357,6 +386,12 @@ def _prepare_rows_preserving_state(conn, doc_hash: str, rows: list[dict], *,
             unmatched_qids.append(old.get("qid"))
             if has_provenance(old):
                 provenance_qids.append(old.get("qid"))
+        else:
+            fields = recomputable_fields(old)
+            if fields:
+                recomputable_state_qids.append(old.get("qid"))
+                for field in fields:
+                    recomputable_state_fields.setdefault(field, []).append(old.get("qid"))
 
     excluded_docs = set(removing_docs or ())
     excluded_docs.add(doc_hash)
@@ -377,7 +412,10 @@ def _prepare_rows_preserving_state(conn, doc_hash: str, rows: list[dict], *,
     loss = {"doc_hash": doc_hash, "reason": "unmatched_governed_questions",
             "qids": unmatched_qids, "count": len(unmatched_qids),
             "provenance_qids": provenance_qids, "provenance_count": len(provenance_qids),
-            "lost_fact_hashes": lost_fact_hashes, "lost_fact_count": len(lost_fact_hashes)}
+            "lost_fact_hashes": lost_fact_hashes, "lost_fact_count": len(lost_fact_hashes),
+            "recomputable_state_qids": recomputable_state_qids,
+            "recomputable_state_count": len(recomputable_state_qids),
+            "recomputable_state_fields": recomputable_state_fields}
     if loss_report is not None:
         loss_report.update(loss)
     if (unmatched_qids or lost_fact_hashes) and not allow_state_loss:
@@ -502,7 +540,7 @@ def _empty_doc_list_result(args) -> int:
 def _docs_with_answer_provenance(conn, doc_hashes: list[str]) -> set[str]:
     """题里带模型答案或补答溯源的文档，供只读计划展示风险面。"""
     columns = {r[1] for r in conn.execute("PRAGMA table_info(questions)")}
-    tracked = [c for c in ("answer_source", "answer_model", "answered_at") if c in columns]
+    tracked = [c for c in ("answer_source", "answer_model") if c in columns]
     if not tracked:
         return set()
     guard = " OR ".join(f"COALESCE({c},'')<>''" for c in tracked)
@@ -601,7 +639,9 @@ def _run(args, wanted: set[str] | None = None) -> int:
         conn.commit()
     n_docs = n_q = n_empty = n_err = n_reattached = n_answer_lost = 0
     n_state_loss_blocked = 0
+    n_recomputable_state_reset = 0
     state_losses: list[dict] = []
+    state_resets: list[dict] = []
     n_empty_preserved = 0
     qtype: dict[str, int] = {}
     conf: dict[str, int] = {}
@@ -662,6 +702,13 @@ def _run(args, wanted: set[str] | None = None) -> int:
                 continue
             else:
                 conn.execute("RELEASE extract_one")
+                reset_count = loss_report.get("recomputable_state_count", 0)
+                if reset_count:
+                    n_recomputable_state_reset += reset_count
+                    state_resets.append({
+                        "doc_hash": doc_hash, "count": reset_count,
+                        "qids": loss_report["recomputable_state_qids"],
+                        "fields": loss_report["recomputable_state_fields"]})
             if (i + 1) % 50 == 0:            # 增量/长批次的分块提交（崩溃只回退当前块）
                 conn.commit()
         if (i + 1) % 200 == 0:
@@ -681,8 +728,12 @@ def _run(args, wanted: set[str] | None = None) -> int:
         n_purged = 0
         if not purge_skipped:
             try:
+                purge_report = {}
                 n_purged = purge_orphans(conn, {k for k, _ in pool_all},
-                                         allow_state_loss=args.allow_state_loss)
+                                         allow_state_loss=args.allow_state_loss,
+                                         loss_report=purge_report)
+                n_recomputable_state_reset += purge_report.get("recomputable_state_count", 0)
+                state_resets.extend(purge_report.get("recomputable_state_docs", []))
             except StateLossError as ex:
                 n_err += 1
                 n_state_loss_blocked += 1
@@ -708,6 +759,8 @@ def _run(args, wanted: set[str] | None = None) -> int:
         "answer_provenance_lost": n_answer_lost if not args.dry_run else 0,
         "state_loss_blocked": n_state_loss_blocked,
         "state_loss": state_losses,
+        "recomputable_state_reset": n_recomputable_state_reset if not args.dry_run else 0,
+        "recomputable_state_resets": state_resets if not args.dry_run else [],
         "purged_orphan_docs": n_purged if not args.dry_run else 0,
         "purge_skipped": purge_skipped,
         "label_reattached": n_reattached if not args.dry_run else 0,
