@@ -14,6 +14,7 @@ def _seed(conn):
         ("h2", "Java基础", "八股", 2, "[]", "synchronized 和 ReentrantLock 区别？", "答：…"),
         ("h3", "数据库", "八股", 4, "[]", "MySQL 索引失效的场景有哪些？", "答：…"),
         ("h4", "HR与求职", "HR", 1, "[]", "为什么离职？", "答：…"),
+        ("h5", None, "八股", None, None, "没打过 topic 的题？", "答：…"),
     ]
     for i, (h, topic, qtype, diff, tags, q, a) in enumerate(rows):
         conn.execute(
@@ -37,6 +38,7 @@ def test_golden_export_stratifies_and_skips_existing(tmp_path):
     assert all(it["topic_gold"] == "" for it in items)
     assert "h3" not in {it["q_norm_hash"] for it in items}      # 已在金标里的跳过
     assert {it["current"]["topic"] for it in items} == {"Java基础", "HR与求职"}
+    assert "h5" not in {it["q_norm_hash"] for it in items}      # 没 topic 的行不进金标
     conn.close()
 
 

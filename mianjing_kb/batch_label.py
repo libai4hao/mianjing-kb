@@ -708,6 +708,7 @@ def golden_export(conn, n: int, out=None, seed: int = 42) -> dict:
         "       q.q_text, q.a_text, p.md_rel "
         "FROM questions q LEFT JOIN document_products p ON p.doc_hash = q.doc_hash "
         "WHERE q.q_norm_hash IS NOT NULL AND q.q_norm_hash != '' "
+        "  AND q.topic IS NOT NULL AND q.topic != '' "   # 没打过 topic 的行进了金标也评不了
         "  AND NOT EXISTS (SELECT 1 FROM golden_labels g WHERE g.q_norm_hash = q.q_norm_hash)"
     ).fetchall()
     strata: dict[tuple, list[dict]] = {}
