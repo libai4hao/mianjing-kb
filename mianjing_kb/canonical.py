@@ -340,6 +340,23 @@ def _rep_index(reps: list[tuple[str, str]]):
     return by_norm, gram_sets, index, titles
 
 
+def _fullhash_index(conn, exclude_keys: set[str] | None = None) -> dict[str, set[str]]:
+    """截断前缀 → 该前缀下**已归属代表题**的全文 q_norm_hash 集合（#4 撞车守卫）。
+
+    q_norm 落库只存前 500 字，但 q_norm_hash 按全文算；前缀相同而全文 hash
+    不同的两条长题不是同题。只统计已进 question_variants 的题（代表题身份），
+    不含当前待处理新题——否则新题自己的 hash 会让自己"撞自己"而失效。
+    """
+    out: dict[str, set[str]] = defaultdict(set)
+    rows = conn.execute(
+        "SELECT q.q_norm, q.q_norm_hash FROM questions q "
+        "JOIN question_variants v ON v.q_key = q.q_key "
+        "WHERE COALESCE(q.q_norm_hash,'')<>''").fetchall()
+    for r in rows:
+        out[(r[0] or "")[:TITLE_MAX]].add(r[1])
+    return out
+
+
 def _add_rep(cid: str, title: str, by_norm, gram_sets, index, titles) -> None:
     key = (title or "")[:TITLE_MAX]
     by_norm.setdefault(key, cid)
@@ -350,10 +367,17 @@ def _add_rep(cid: str, title: str, by_norm, gram_sets, index, titles) -> None:
         index[token].append(cid)
 
 
-def _best_existing(norm: str, by_norm, gram_sets, index, titles=None) -> tuple[str | None, float]:
+def _best_existing(norm: str, by_norm, gram_sets, index, titles=None,
+                   fullhash: dict[str, set[str]] | None = None,
+                   q_norm_hash: str = "") -> tuple[str | None, float]:
     key = norm[:TITLE_MAX]
     if key in by_norm:
-        return by_norm[key], 1.0
+        # #4：q_norm 落库截断到 500 字——前缀相同但全文 hash 不同的长题不是同题。
+        # 当前题全文 hash 与该前缀下已知 hash 不同 → 不给 1.0 精确命中，
+        # 落到 gram/Jaccard 路径（截断 gram 全等时降为 0.9999，走候选带人工复核）。
+        known_hashes = fullhash.get(key) if fullhash else None
+        if not (known_hashes and q_norm_hash and q_norm_hash not in known_hashes):
+            return by_norm[key], 1.0
     qg = _grams(norm)
     cands: set[str] = set()
     for token in _prefix_grams(qg, FILTER_JAC):
@@ -363,6 +387,12 @@ def _best_existing(norm: str, by_norm, gram_sets, index, titles=None) -> tuple[s
         if titles and short_latin_conflict(norm, titles.get(cid, "")):   # F6
             continue
         s = jaccard(qg, gram_sets.get(cid, frozenset()))
+        if s >= 1.0 and fullhash and q_norm_hash:
+            # 截断前缀的 gram 全等不代表全文同题：当前全文 hash 与该代表前缀下
+            # 已知 hash 不同 → 降到候选带以下（不自动吸附、不进候选，自建簇）
+            rep_hashes = fullhash.get((titles.get(cid, "") if titles else "")[:TITLE_MAX])
+            if rep_hashes and q_norm_hash not in rep_hashes:
+                s = min(s, FILTER_JAC - 0.0001)
         if s > best_sim:
             best_cid, best_sim = cid, s
     return best_cid, best_sim
@@ -423,6 +453,7 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
     reps = [(r[0], r[1]) for r in conn.execute(
         "SELECT canonical_id, title_norm FROM canonical_questions")]
     by_norm, gram_sets, index, titles = _rep_index(reps)
+    fullhash = _fullhash_index(conn)
     known = set(by_norm.values())
     meta = doc_meta(conn)
     created: list[str] = []
@@ -440,7 +471,8 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
         if qkey in attached_keys:
             continue
         norm = q.get("q_norm") or ""
-        best_cid, best_sim = _best_existing(norm, by_norm, gram_sets, index, titles)
+        best_cid, best_sim = _best_existing(norm, by_norm, gram_sets, index, titles,
+                                            fullhash, q.get("q_norm_hash") or "")
         if best_cid and best_sim < attach_jac and best_sim >= candidate_jac:
             sim = round(best_sim, 4)
             prior_row = conn.execute(
@@ -483,6 +515,9 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
 
         cid = best_cid
         kind, old_cid = _write_variant(conn, q, cid, qkey, now, meta)
+        # 本题已成为某簇代表成员：把它的全文 hash 记入撞车守卫索引（#4 批内后续题可见）
+        if norm and q.get("q_norm_hash"):
+            fullhash.setdefault(norm[:TITLE_MAX], set()).add(q["q_norm_hash"])
         conn.execute(
             "INSERT OR IGNORE INTO canonical_dependents(canonical_id,q_key,doc_hash,collection) "
             "VALUES(?,?,?,?)",

@@ -180,3 +180,69 @@ def test_lsh_recall_estimate_finds_exact_match():
     items = _items(Q_A, Q_C, Q_A2)
     r = cl.lsh_recall_estimate(items, 2, 0.92, sample=1)
     assert r["sampled"] == 1 and r["truth_pairs"] == 1 and r["recall"] == 1.0
+
+
+def test_repeated_blocks_cannot_pad_match_ratio(tmp_path, monkeypatch):
+    """#8：19 份重复命中题 + 1 份独特未匹配题 → 去重占比 0.5，不得判 strong。"""
+    dup = f"1. {Q_A}\n答：" + "答案" * 30
+    pool_body = dup
+    q99_body = "\n".join([dup] * 19 + ["20. Redis 持久化机制是什么？\n答：" + "另一答案" * 30])
+    _corpus(tmp_path, monkeypatch, pool_body, q99_body)
+    out = tmp_path / "r.json"
+    assert cl.main(["--no-cache", "--out", str(out)]) == 0
+    rec = {v["rel"]: v for v in json.loads(out.read_text(encoding="utf-8"))["verdict_detail"]}["99d\\件.md"]
+    assert rec["match_ratio"] >= 0.9            # 出现次数口径被撑高
+    assert rec["distinct_match_ratio"] == 0.5   # 去重口径只有一半
+    assert rec["verdict"] != "strong"
+    assert any("unmatched_distinct" in r for r in rec["reasons"])
+
+
+def test_short_meaningful_answer_conflict_is_manual(tmp_path, monkeypatch):
+    """#12：99 短答案"线程不安全"、池无答案 → 冲突降 manual，不再被短答案闸放行。"""
+    pool_body = f"1. {Q_A}？\n" + "补充说明文字" * 20      # 池版本无答案标记
+    q99_body = f"1. {Q_A}？\n答：线程不安全\n" + "补充说明文字" * 20
+    _corpus(tmp_path, monkeypatch, pool_body, q99_body)
+    out = tmp_path / "r.json"
+    assert cl.main(["--no-cache", "--out", str(out)]) == 0
+    rec = {v["rel"]: v for v in json.loads(out.read_text(encoding="utf-8"))["verdict_detail"]}["99d\\件.md"]
+    assert rec["verdict"] == "manual"
+    assert rec["answer_conflicts"]
+
+
+def test_cache_key_includes_content_hash(tmp_path):
+    """#10：同尺寸同 mtime 换件 → 缓存键不同，不复用旧抽取。"""
+    import os
+    p = tmp_path / "a.md"
+    p.write_text("甲内容", encoding="utf-8")
+    st = p.stat()
+    c = cl.TextCache(tmp_path / "cache.json")
+    cached1, key1 = c.get(p)
+    assert cached1 is None
+    c.put(key1, {"questions": [["旧题"]], "text_chars": 3})
+    # 换内容但恢复 size/mtime（同长度不同字节）
+    p.write_text("乙内容", encoding="utf-8")
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+    cached2, key2 = c.get(p)
+    assert key1 != key2 and cached2 is None
+
+
+def test_witness_content_mismatch_blocks_strong(tmp_path, monkeypatch):
+    """#11：台账状态合法但池文件字节与登记 sha256 不符 → 见证 invalid。"""
+    body = f"## 1. {Q_A}\n\n答：" + "答案" * 30
+    build, root = _corpus(tmp_path, monkeypatch, body, body)
+    import hashlib
+    real_sha = hashlib.sha256((root / "pool" / "池.md").read_bytes()).hexdigest()
+    monkeypatch.setattr(cl, "load_pool_status", lambda: {
+        "pool/池.md": {"status": "processed", "gate": None, "sha256": "0" * 64}})
+    out = tmp_path / "r.json"
+    assert cl.main(["--no-cache", "--out", str(out)]) == 0
+    rec = {v["rel"]: v for v in json.loads(out.read_text(encoding="utf-8"))["verdict_detail"]}["99d\\件.md"]
+    assert rec["verdict"] == "manual"
+    assert any(r.startswith("pool_status_invalid") for r in rec["reasons"])
+    # 对照：sha256 一致时仍可 strong
+    monkeypatch.setattr(cl, "load_pool_status", lambda: {
+        "pool/池.md": {"status": "processed", "gate": None, "sha256": real_sha}})
+    out2 = tmp_path / "r2.json"
+    assert cl.main(["--no-cache", "--out", str(out2)]) == 0
+    rec2 = {v["rel"]: v for v in json.loads(out2.read_text(encoding="utf-8"))["verdict_detail"]}["99d\\件.md"]
+    assert rec2["verdict"] == "strong"

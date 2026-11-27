@@ -70,6 +70,19 @@ def test_normalize_keeps_code_symbols_distinct():
     assert normalize("A & B") == "abitandb"
 
 
+def test_normalize_keeps_single_infix_operators_distinct():
+    """#9：a+b / a-b / a*b / a/b / a<b / a>b 归一后不得撞成同串。"""
+    forms = ["a+b", "a-b", "a*b", "a/b", "a<b", "a>b", "a%b", "a^b"]
+    norms = [normalize(x) for x in forms]
+    assert len(set(norms)) == len(forms)
+    assert normalize("a+b") == "aplusb"
+    assert normalize("a-b") == "aminusb"
+    # 自然语言里的连字符/标点不受影响（两侧不全是字母数字）
+    assert normalize("HashMap-Hashtable") == "hashmapminushashtable"  # 代码形态仍映射
+    assert normalize("什么是 JVM？") == "什么是jvm"
+    assert normalize("B+树") == "b树" or normalize("B+树") != normalize("B-树")
+
+
 def test_near_duplicates_hash_close_far_ones_apart():
     a = simhash(normalize("说一下 JVM 的内存区域划分"))
     b = simhash(normalize("说说 JVM 的内存区域是怎么划分的"))

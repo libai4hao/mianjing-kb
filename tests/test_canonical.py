@@ -182,6 +182,33 @@ def test_incremental_attach_create_and_manifest_rollback(mini_db, tmp_path):
     assert mini_db.execute("SELECT COUNT(*) FROM question_variants").fetchone()[0] == 6
 
 
+def test_truncated_qnorm_prefix_collision_does_not_merge(mini_db):
+    """#4：500 字前缀相同但全文 hash 不同的长题不得凭截断前缀精确吸附。"""
+    cn.main([])
+    prefix = "长题" * 260                    # 520 字 > TITLE_MAX=500
+    assert len(prefix) > cn.TITLE_MAX
+    stored = prefix[:cn.TITLE_MAX]          # extract 落库口径：q_norm 截断 500
+    _add_source_and_question(mini_db, "hA", 1, stored, "hA:hashA", collection="cA")
+    mini_db.execute("UPDATE questions SET q_norm_hash='hashA' WHERE doc_hash='hA'")
+    mini_db.commit()
+    assert cn.main(["--incremental", "--batch-id", "t-long1"]) == 0
+    _add_source_and_question(mini_db, "hB", 1, stored, "hB:hashB", collection="cB")
+    mini_db.execute("UPDATE questions SET q_norm_hash='hashB' WHERE doc_hash='hB'")
+    mini_db.commit()
+    assert cn.main(["--incremental", "--batch-id", "t-long2"]) == 0
+    # 两条长题必须各自成簇（全文不同），不得吸附进同一 canonical
+    ca = mini_db.execute("SELECT canonical_id FROM question_variants WHERE q_key='hA:hashA'").fetchone()[0]
+    cb = mini_db.execute("SELECT canonical_id FROM question_variants WHERE q_key='hB:hashB'").fetchone()[0]
+    assert ca != cb
+    # 对照：全文 hash 相同的真同题仍精确吸附
+    _add_source_and_question(mini_db, "hC", 1, stored, "hC:hashA", collection="cC")
+    mini_db.execute("UPDATE questions SET q_norm_hash='hashA' WHERE doc_hash='hC'")
+    mini_db.commit()
+    assert cn.main(["--incremental", "--batch-id", "t-long3"]) == 0
+    cc = mini_db.execute("SELECT canonical_id FROM question_variants WHERE q_key='hC:hashA'").fetchone()[0]
+    assert cc == ca
+
+
 def _add_source_and_question(conn, h, seq, norm, qkey, topic="JVM", collection="c9"):
     conn.execute(
         "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "

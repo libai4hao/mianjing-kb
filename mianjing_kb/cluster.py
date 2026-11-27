@@ -70,7 +70,11 @@ def iter_docs(root: Path, md_only: bool = False):
 
 
 class TextCache:
-    """切题结果缓存：键 (version, path, size, mtime)，值 = {questions, text_chars}。"""
+    """切题结果缓存：键 (version, path, size, mtime, sha256)，值 = {questions, text_chars}。
+
+    #10：键含内容哈希——同尺寸同 mtime 的换件（mtime 可被伪造/恢复）不得复用旧抽取。
+    哈希在 get 时算一次并随键返回，put 复用同键，避免双重读取。
+    """
 
     def __init__(self, path: Path, enabled: bool = True):
         self.path = path
@@ -83,11 +87,17 @@ class TextCache:
                 self.data = {}
 
     def get(self, p: Path):
+        import hashlib
         try:
             st = p.stat()
+            h = hashlib.sha256()
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            digest = h.hexdigest()
         except OSError:
             return None, False
-        key = f"{CACHE_VERSION}|{p}|{st.st_size}|{int(st.st_mtime)}"
+        key = f"{CACHE_VERSION}|{p}|{st.st_size}|{int(st.st_mtime)}|{digest}"
         return self.data.get(key), key
 
     def put(self, key: str, payload: dict):
@@ -169,11 +179,16 @@ def _pool_answer_covers(ans99: str, anspool: str) -> bool:
 
     99 有实质答案而资源池没有（标记识别失败/资源池缺答案）→ 不能覆盖，视为冲突；
     两边都有答案才比相似度。99 本身没有答案时没有"丢失答案"的风险，返回 True。
+    #12：短答案（<8 归一字符）不再无条件放行——非空短答案也是实质内容，
+    资源池缺答案或答案不同时同样判冲突（"线程不安全"这类短答会被旧闸漏掉）。
     """
-    if len(ans99) < 8:
+    if not ans99:
         return True
-    if len(anspool) < 8:
+    if not anspool:
         return False
+    if len(ans99) < 8 or len(anspool) < 8:
+        # 短答案按包含/相等判：资源池答案须包含 99 短答或与之相等
+        return ans99 == anspool or ans99 in anspool
     return jaccard(grams(ans99), grams(anspool)) >= ANSWER_AGREE
 
 
@@ -253,6 +268,8 @@ def load_pool_status() -> dict[str, dict]:
 
     只有 processed/classified/processing 且 gate 不是乱码/空文档的样本，才有资格作为
     "可删见证"；rejected/superseded/quarantined 的池样本一律不能支撑删除。
+    #11：同时带上源件完整 sha256，direct_pool_matches 用当前文件字节复验——
+    路径型状态不得为换件后的内容背书。
     """
     db = Path(config.DB_PATH)
     if not db.exists():
@@ -261,18 +278,24 @@ def load_pool_status() -> dict[str, dict]:
     conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     by_rel: dict[str, dict] = {}
-    status_of = {r["doc_hash"]: {"status": r["status"], "gate": r["gate_result"]}
-                 for r in conn.execute("SELECT doc_hash, status, gate_result FROM source_documents")}
-    for r in conn.execute("SELECT dir_path, file_name, status, gate_result FROM source_documents"):
+    status_of = {r["doc_hash"]: {"status": r["status"], "gate": r["gate_result"],
+                                 "sha256": r["sha256"], "src_path": r["src_path"]}
+                 for r in conn.execute(
+                     "SELECT doc_hash, status, gate_result, sha256, src_path FROM source_documents")}
+    for r in conn.execute(
+            "SELECT dir_path, file_name, status, gate_result, sha256, src_path FROM source_documents"):
         rel = f"{r['dir_path']}/{r['file_name']}" if r["dir_path"] else r["file_name"]
-        by_rel[rel.replace("\\", "/")] = {"status": r["status"], "gate": r["gate_result"]}
+        by_rel[rel.replace("\\", "/")] = {"status": r["status"], "gate": r["gate_result"],
+                                          "sha256": r["sha256"], "src_path": r["src_path"]}
     try:
         for r in conn.execute("SELECT doc_hash, md_rel FROM document_products"):
             src = status_of.get(r["doc_hash"])
             if not src or not r["md_rel"]:
                 continue
             md_rel = f"{DIR20}/{r['md_rel'].replace(chr(92), '/')}"
-            by_rel[md_rel] = {"status": src["status"], "gate": src["gate"]}
+            by_rel[md_rel] = {"status": src["status"], "gate": src["gate"],
+                              "sha256": src["sha256"], "src_path": src["src_path"],
+                              "md_rel": r["md_rel"]}
     except sqlite3.OperationalError:
         pass
     conn.close()
@@ -282,6 +305,26 @@ def load_pool_status() -> dict[str, dict]:
 def pool_status_ok(info: dict | None) -> bool:
     return bool(info) and info.get("status") in POOL_OK_STATUSES \
         and (info.get("gate") or "") not in POOL_BAD_GATES
+
+
+def _witness_content_ok(info: dict | None, pool_path: Path) -> bool:
+    """#11：见证文件当前字节须与台账登记的完整 sha256 一致。
+
+    台账无 sha256（历史行）时退回旧行为（只信状态）；有登记则必须复验，
+    换件/改写后的池文件不得继续当"可删见证"。md 见证按源件 sha256 登记，
+    这里只对源文件路径复验；md 派生件的内容新鲜度由 gate md_hash（#27）负责。
+    """
+    if not info or not info.get("sha256"):
+        return True
+    import hashlib
+    try:
+        h = hashlib.sha256()
+        with open(pool_path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest() == info["sha256"]
+    except OSError:
+        return False
 
 
 def direct_pool_matches(items, n_pool: int, answers, pool_status: dict,
@@ -310,8 +353,14 @@ def direct_pool_matches(items, n_pool: int, answers, pool_status: dict,
                 continue
             jac = jaccard(gsets[i], gsets[p])
             if jac >= auto:
-                if not pool_status_ok(pool_status.get(items[p][2].replace(chr(92), "/"))):
+                rel_p = items[p][2].replace(chr(92), "/")
+                info = pool_status.get(rel_p)
+                if not pool_status_ok(info):
                     rec["invalid"].append({"pool_idx": p, "jac": round(jac, 4)})
+                elif not _witness_content_ok(info, config.CORPUS_ROOT / rel_p):
+                    # #11：台账状态合法但当前字节与登记 sha256 不符 → 见证不可信
+                    rec["invalid"].append({"pool_idx": p, "jac": round(jac, 4),
+                                           "why": "witness_content_mismatch"})
                 elif _answer_conflict(answers[i], answers[p]):
                     rec["conflict"].append({"pool_idx": p, "jac": round(jac, 4)})
                 else:
@@ -438,12 +487,15 @@ def main(argv=None) -> int:
     answer_conflicts = []
     per_file: dict[str, dict] = defaultdict(
         lambda: {"total": 0, "matched": 0, "pending": 0, "none": 0,
-                 "invalid": 0, "conflicts": 0, "answers": 0})
+                 "invalid": 0, "conflicts": 0, "answers": 0,
+                 "distinct": set(), "distinct_matched": set()})
     for i in range(n_pool, len(items)):
         rel = items[i][2]
         rec = direct.get(i, {"strong": [], "pending": [], "invalid": [], "conflict": []})
         f = per_file[rel]
         f["total"] += 1
+        # #8：重复题块不得撑高匹配占比——按归一题干去重统计 distinct 口径
+        f["distinct"].add(items[i][0])
         if answers[i]:
             f["answers"] += 1
         if rec["conflict"]:
@@ -457,6 +509,7 @@ def main(argv=None) -> int:
                 answer_conflicts.append(record)
         elif rec["strong"]:
             f["matched"] += 1
+            f["distinct_matched"].add(items[i][0])
         elif rec["invalid"]:
             f["invalid"] += 1
         elif rec["pending"]:
@@ -486,12 +539,20 @@ def main(argv=None) -> int:
             cnt["none"] += 1
             continue
         ratio = f["matched"] / f["total"]
+        # #8：去重口径——重复题块撑高的占比不作数；有未匹配的独特题必须降档
+        n_distinct = len(f["distinct"])
+        n_distinct_matched = len(f["distinct_matched"])
+        distinct_ratio = n_distinct_matched / n_distinct if n_distinct else 0.0
         text_chars = info.get("text_chars") or 0
         text_cov = round((info.get("q_chars") or 0) / text_chars, 4) if text_chars else 0.0
         answer_cov = round(f["answers"] / f["total"], 4)
         reasons = []
         if ratio < MIN_MATCH_RATIO:
             reasons.append(f"match_ratio {ratio:.2f}<{MIN_MATCH_RATIO}")
+        if distinct_ratio < MIN_MATCH_RATIO:
+            reasons.append(f"distinct_match_ratio {distinct_ratio:.2f}<{MIN_MATCH_RATIO}")
+        if n_distinct_matched < n_distinct:
+            reasons.append(f"unmatched_distinct {n_distinct - n_distinct_matched}")
         if f["pending"]:
             reasons.append(f"pending {f['pending']}")
         if f["conflicts"]:
@@ -511,6 +572,8 @@ def main(argv=None) -> int:
                              if rel in first_q99_by_rel else 0),
             "total_questions": f["total"], "matched": f["matched"],
             "match_ratio": round(ratio, 4), "answer_coverage": answer_cov,
+            "distinct_questions": n_distinct, "distinct_matched": n_distinct_matched,
+            "distinct_match_ratio": round(distinct_ratio, 4),
             "text_coverage": text_cov,
             "pending": pending_by_99item.get(rel, []),
             "answer_conflicts": conflict_by_99item.get(rel, []),

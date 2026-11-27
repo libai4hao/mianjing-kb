@@ -63,6 +63,11 @@ _POST_INC = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\+\+")
 _PRE_INC = re.compile(r"\+\+([A-Za-z_][A-Za-z0-9_]*)")
 _POST_DEC = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\-\-")
 _PRE_DEC = re.compile(r"\-\-([A-Za-z_][A-Za-z0-9_]*)")
+# #9：单字符算子也要映射——`a+b`/`a-b`/`a*b`/`a/b`/`a<b`/`a>b` 归一后不得撞成同串。
+# 只映射"两侧都是字母/数字/下划线"的中缀算子（代码表达式形态），不动自然语言标点。
+_INFIX_OPS = (("+", "plus"), ("-", "minus"), ("*", "times"), ("/", "div"),
+              ("<", "lt"), (">", "gt"), ("%", "mod"), ("^", "xor"))
+_INFIX_RE = re.compile(r"(?<=[A-Za-z0-9_])([+\-*/<>%^])(?=[A-Za-z0-9_])")
 
 
 def _map_symbols(text: str) -> str:
@@ -70,11 +75,13 @@ def _map_symbols(text: str) -> str:
     text = _CXX.sub("cpp", text)
     text = _CSHARP.sub("csharp", text)
     text = text.replace("&&", "and").replace("||", "or")
-    text = text.replace("&", "bitand").replace("|", "bitor")
     text = _POST_INC.sub(r"\1postinc", text)
     text = _PRE_INC.sub(r"preinc\1", text)
     text = _POST_DEC.sub(r"\1postdec", text)
     text = _PRE_DEC.sub(r"predec\1", text)
+    text = text.replace("&", "bitand").replace("|", "bitor")
+    op_map = dict(_INFIX_OPS)
+    text = _INFIX_RE.sub(lambda m: op_map[m.group(1)], text)
     return text
 
 
