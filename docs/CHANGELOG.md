@@ -8,6 +8,22 @@
 
 ## 2026-11-27
 
+- **外部审计 run-1 第二轮加固（P1-A + P1-E）**（`docs/63` §7、`待办清单` T44）：处置 15 条候选，
+  新增 22 条回归用例；ruff 通过、全量 pytest 通过（1133 收集）、privacy_scan 0 命中。
+  - 只读语义（23/30/44/74）：`search._con` 与 `ingest_queue`/`dispatch`/`reconcile`/`report`/
+    `eval_cluster`/`reconvert`/`build_db` 源库/`manifest --reconcile`、`--rollback` 预览/
+    `taxonomy --list/--export`/`demo._counts` 全部 `mode=ro`；评测连接 `try/finally` 释放。
+  - 门禁权威（26/27/28）：迁移 `020_gate_md_hash`，gate 结论绑定 md sha256；
+    `extract --require-gate` 拒陈旧 pass（`stale_pass`）；registry hash 与台账源行对账
+    （`identity_mismatch`）；真覆盖冲突 fail-closed 降 fail。
+  - 报告新鲜度（54/56/57/58）：发布清单记 `gate_states` + `gate_inputs`（skip_log/retire_log/kb+WAL），
+    `--swap-only` 复验；verify/status 库指纹绑非零 `-wal`；库在盘但打不开 → INVALID；
+    SQL 聚合失败显式未知（`-`），不再伪装 0。
+  - 金标治理（38/60）：G6b 只计 merge 合格样本（JOIN 当前 questions、排除 pending/disagree）；
+    merge 孤儿清理前置并重判门禁；`golden_load` 绑定当前题目身份、重复 hash/坏形状整批拒绝。
+  - 顺手项（59/22）：G1 自指/循环 `duplicate_of` 豁免拒绝；G9 `reviewed` 只认布尔 True。
+  - 生产库与检索库未动；#25（遗漏撤销口径）与 #61（模型 artifact 身份）留待后续批次。
+
 - **外部审计 run-1 首轮加固**（`docs/63`，提交 `8f5e8eb..271a325`）：审计报告 0 条 confirmed、
   84 条未验证候选；按"若成立后果最重 + 改法低风险"加固 19 条，其余 65 条分级进 `待办清单` T44。
   - 库身份/破坏性顺序：`db.ro_uri()` 统一 15 处只读 URI（文件名里的 `#/?` 不再改写目标库或绕开 `mode=ro`）；
