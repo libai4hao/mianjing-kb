@@ -22,6 +22,8 @@
   - 标签治理：`review_resolve` 的 suggest 走 `labelspec.validate_label`，非法 qtype/difficulty 拒绝、
     词表外 topic 归一后留 pending，不再直接 COALESCE 进正式标签。
   - 门禁：ruff 通过；全量 pytest 通过（新增 27 条回归用例）；`privacy_scan` 0 命中。
+  - 复核：另用一次性脚本在临时库/临时语料/回环 server 上重建对抗场景，47 项检查全 PASS，
+    记录见 `docs/63` §6。
 
 - **重抽状态分级与审计**（`docs/60` ISSUE-04、`docs/62 §3.5`）：
   - 真实补答溯源只由 `answer_source`/`answer_model` 证明；单独 `answered_at` 按可重算状态处理。
