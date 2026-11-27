@@ -39,17 +39,40 @@ def spans_from_toc(toc: list, page_count: int, file_name: str) -> tuple[int, lis
     """把 TOC 的 L1 条目转成 [{name, page_start, page_end}]（页号 1-based，闭区间）。
 
     只认"标题形如文件名"的 L1 条目作为源边界；没有这类条目就按单源处理并留痕。
+    #40：页号必须是 1..page_count 的整数、起点严格递增；畸形条目剔除并留痕，
+    不再把越界/乱序页号 clamp 成权威源边界。TOC 基数超预算按无源书签处理。
     """
-    l1 = [(t[1], t[2]) for t in toc if t[0] == 1 and t[2] and SRC_TITLE_RE.search((t[1] or "").strip())]
+    from mianjing_kb.kb import pdfbudget
+    if page_count <= 0:
+        return 1, [{"name": file_name, "page_start": 1, "page_end": 1,
+                    "from": "fallback_zero_pages"}]
+    if len(toc) > pdfbudget.MAX_TOC_ENTRIES:
+        return 1, [{"name": file_name, "page_start": 1, "page_end": page_count,
+                    "from": "fallback_toc_budget"}]
+    l1 = []
+    last_start = 0
+    dropped = 0
+    for t in toc:
+        if t[0] != 1 or not SRC_TITLE_RE.search((t[1] or "").strip()):
+            continue
+        page = t[2]
+        if (isinstance(page, bool) or not isinstance(page, int)
+                or not 1 <= page <= page_count or page <= last_start):
+            dropped += 1
+            continue
+        l1.append((t[1], page))
+        last_start = page
     if not l1:
         # 没有源级书签：按单源处理并留痕，绝不把它当成"1 个源"却不说明来源
-        return 1, [{"name": file_name, "page_start": 1, "page_end": page_count, "from": "fallback_no_source_toc"}]
+        note = "fallback_no_source_toc" if not dropped else "fallback_invalid_toc"
+        return 1, [{"name": file_name, "page_start": 1, "page_end": page_count,
+                    "from": note, "dropped_entries": dropped}]
     out = []
     for i, (name, start) in enumerate(l1):
         end = (l1[i + 1][1] - 1) if i + 1 < len(l1) else page_count
-        if end < start:
-            end = start
         out.append({"name": name, "page_start": start, "page_end": end})
+    if dropped:
+        out[0]["dropped_entries"] = dropped
     return len(l1), out
 
 

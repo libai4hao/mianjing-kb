@@ -53,6 +53,33 @@ def test_mixed_toc_counts_only_filename_l1():
     assert spans[0]["page_end"] == 4 and spans[1]["page_start"] == 5
 
 
+def test_malformed_toc_pages_are_rejected():
+    """#40：越界/乱序/非整数页号不得成为权威源边界；畸形条目剔除并留痕。"""
+    # 越界页号
+    count, spans = bookmarks.spans_from_toc([[1, "a.pdf", 99]], 10, "m.pdf")
+    assert count == 1 and spans[0]["from"] == "fallback_invalid_toc"
+    # 乱序（第二条页号不大于第一条）→ 剔除第二条
+    count, spans = bookmarks.spans_from_toc(
+        [[1, "a.pdf", 5], [1, "b.pdf", 3], [1, "c.pdf", 8]], 10, "m.pdf")
+    assert count == 2
+    assert spans[0]["page_end"] == 7 and spans[1]["page_start"] == 8
+    assert spans[0]["dropped_entries"] == 1
+    # bool 页号不算整数
+    count, spans = bookmarks.spans_from_toc([[1, "a.pdf", True]], 10, "m.pdf")
+    assert count == 1 and spans[0]["from"] == "fallback_invalid_toc"
+    # 0 页文档不再产出 1..0 的非法区间
+    count, spans = bookmarks.spans_from_toc([], 0, "m.pdf")
+    assert spans[0]["page_start"] == 1 and spans[0]["page_end"] == 1
+
+
+def test_toc_cardinality_budget():
+    """#40：TOC 条目数超预算按无源书签处理，不物化超大边界表。"""
+    from mianjing_kb.kb import pdfbudget
+    toc = [[1, f"f{i}.pdf", 1] for i in range(pdfbudget.MAX_TOC_ENTRIES + 1)]
+    count, spans = bookmarks.spans_from_toc(toc, 10, "m.pdf")
+    assert count == 1 and spans[0]["from"] == "fallback_toc_budget"
+
+
 def test_bookmarks_written_to_db(tmp_path, capsys, monkeypatch):
     corpus = tmp_path / "corpus"
     corpus.mkdir()

@@ -206,11 +206,23 @@ def label_one(cfg: dict, q: dict, tax: dict | None = None) -> dict:
     r = chat_json(cfg, system, text if context else f"题目与答案片段：\n{text}", max_tokens=200)
     obj = r.get("obj")
     if obj is None:
-        raise RuntimeError("JSON 解析失败")
-    spec = labelspec.validate_label(obj, vocab, q_text=q.get("q_text") or "",
-                                    synonyms=tax["aliases"],
-                                    topic_aliases=topic_aliases(),
-                                    tag_stopwords=tag_stopwords())
+        # #37：解析失败也消耗了 token——异常携带 usage，run_batch 计入预算，
+        # 否则失败调用绕过 --budget 封顶。
+        err = RuntimeError("JSON 解析失败")
+        err.usage = {"prompt_tokens": r.get("prompt_tokens") or 0,
+                     "completion_tokens": r.get("completion_tokens") or 0,
+                     "tokens": r.get("tokens") or 0}
+        raise err
+    try:
+        spec = labelspec.validate_label(obj, vocab, q_text=q.get("q_text") or "",
+                                        synonyms=tax["aliases"],
+                                        topic_aliases=topic_aliases(),
+                                        tag_stopwords=tag_stopwords())
+    except Exception as ex:
+        ex.usage = {"prompt_tokens": r.get("prompt_tokens") or 0,
+                    "completion_tokens": r.get("completion_tokens") or 0,
+                    "tokens": r.get("tokens") or 0}
+        raise
     return {"qid": q["qid"], "q_norm_hash": q.get("q_norm_hash"),
             "topic": spec["topic"],
             "qtype": spec["qtype"], "difficulty": spec["difficulty"],
@@ -467,6 +479,16 @@ def run_batch(cfg: dict, conn, *, limit: int = 0, budget: float = 10.0,
                         failed_fh = logs.enter_context(failed_path.open("a", encoding="utf-8"))
                     failed_fh.write(json.dumps(failed[-1], ensure_ascii=False) + "\n")
                     failed_fh.flush()
+                    # #37：失败调用的已消耗 token 同样计预算（label_one 异常携带 usage）
+                    usage = getattr(exc, "usage", None) or {}
+                    if usage:
+                        tokens_total += usage.get("tokens") or 0
+                        in_total += usage.get("prompt_tokens") or 0
+                        out_total += usage.get("completion_tokens") or 0
+                        cost = (in_total * cfg["price"][0]
+                                + out_total * cfg["price"][1]) / 1e6
+                        if budget and cost > budget:
+                            budget_exceeded = True
                     continue
                 issues = row.pop("_issues", []) or []
                 raw = row.pop("_raw_response", "") or ""

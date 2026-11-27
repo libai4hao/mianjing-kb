@@ -155,6 +155,27 @@ def test_staging_keeps_review_note_for_pending(mini_db, monkeypatch, tmp_path):
     assert "PHP" in note and "topic_out_of_vocab" in note
 
 
+def test_failed_call_usage_counts_toward_budget(mini_db, monkeypatch, tmp_path):
+    """#37：解析失败/校验失败的已消耗 token 计入预算，超限即停止提交新任务。"""
+    for qid in range(10, 30):
+        _add_question(mini_db, qid, f"题{qid}")
+    mini_db.commit()
+
+    def failing_label(cfg, q):
+        err = RuntimeError("JSON 解析失败")
+        err.usage = {"prompt_tokens": 600_000, "completion_tokens": 100_000,
+                     "tokens": 700_000}
+        raise err
+
+    cfg = {**CFG, "concurrency": 1, "price": (1.0, 4.0)}
+    out = bl.run_batch(cfg, mini_db, budget=1.0, label_fn=failing_label,
+                       failed_path=tmp_path / "f.jsonl")
+    assert out["failed"] >= 1 and out["labeled"] == 0
+    assert out["budget_exceeded"] is True
+    assert out["submitted"] < out["todo"]          # 触发预算后不再提交全部任务
+    assert out["est_cost_yuan"] > 1.0              # 失败消耗被计入成本
+
+
 def test_run_batch_failed_not_blocking(mini_db, monkeypatch, tmp_path):
     monkeypatch.setattr(bl, "label_one", _fake_label(fail_qids={2}))
     fp = tmp_path / "f.jsonl"
