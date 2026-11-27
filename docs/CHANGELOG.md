@@ -8,6 +8,21 @@
 
 ## 2026-11-27
 
+- **外部审计 run-1 首轮加固**（`docs/63`，提交 `8f5e8eb..271a325`）：审计报告 0 条 confirmed、
+  84 条未验证候选；按"若成立后果最重 + 改法低风险"加固 19 条，其余 65 条分级进 `待办清单` T44。
+  - 库身份/破坏性顺序：`db.ro_uri()` 统一 15 处只读 URI（文件名里的 `#/?` 不再改写目标库或绕开 `mode=ro`）；
+    `manifests.prepare` 记 `db_identity`，跨库 `rollback --apply` 直接拒绝；回滚按当前归属重算
+    canonical topic 与 witness；`seed_test_db --force` 改为"先校验源库、写临时库、原子替换"；
+    `rehearse_migrate` 清理绑定预演专用目录并复核删除结果。
+  - 路径边界：`kb/paths` 新增 junction/reparse 剪枝与 containment，`cluster`/`question_freq`/`doc_convert`/
+    `purge_origin`/`gate`/`mdmap`/`pilot5000` 统一口径；`chunk_regress`/`chunk_diag` 的 `md_rel` 走 `safe_join`。
+  - 导出与出口：新增 `kb/csvsafe` 作为唯一公式中和实现（四个 CSV sink）；`llm_client` 不再跟随 3xx
+    （避免 POST 体与 Authorization 转发到重定向主机）；probe 输出整份抹 key；隐私门禁 `--staged`
+    改读 index blob 并把跳过文件计入输出。
+  - 标签治理：`review_resolve` 的 suggest 走 `labelspec.validate_label`，非法 qtype/difficulty 拒绝、
+    词表外 topic 归一后留 pending，不再直接 COALESCE 进正式标签。
+  - 门禁：ruff 通过；全量 pytest 通过（新增 24 条回归）；`privacy_scan` 0 命中。
+
 - **重抽状态分级与审计**（`docs/60` ISSUE-04、`docs/62 §3.5`）：
   - 真实补答溯源只由 `answer_source`/`answer_model` 证明；单独 `answered_at` 按可重算状态处理。
     `answer_state` 原本就未参与硬拦截，本次为两类软状态新增旧 qid/字段审计，并在 SAVEPOINT
