@@ -212,14 +212,21 @@ def _is_section_title(text: str) -> bool:
 
 
 def _strip_all_numbering(text: str) -> str:
-    """去掉行首一层或多层题号/列表号，用于代码判定（不改动题干）。"""
+    """去掉行首一层或多层题号/列表号，用于代码判定（不改动题干）。
+
+    #83：用偏移推进代替每层整串切片——嵌套编号极深时不再 O(k·L) 复制。
+    """
     s = strip_bold((text or "").strip())
+    pos = 0
+    pat = re.compile(r'(?:#{1,6}\s+)?(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[.、．)）]\s*')
     while True:
-        m = re.match(r'^(?:#{1,6}\s+)?(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[.、．)）]\s*', s)
+        m = pat.match(s, pos)
         if not m:
             break
-        s = s[m.end():].strip()
-    return s
+        pos = m.end()
+        while pos < len(s) and s[pos].isspace():
+            pos += 1
+    return s[pos:]
 
 
 def _is_codeish(text: str) -> bool:
@@ -1119,6 +1126,9 @@ def _match_question(line: str) -> Optional[Tuple[Optional[int], str, str]]:
 
 RE_INLINE_HIER = re.compile(r'(?<![\w./])(\d{1,4}(?:[.、．]\d{1,3}){2,})[ \t]+')
 RE_INLINE_QNO = re.compile(r'(?<![\w./()])(\d{1,3})\s*[.、．]\s*(?=[^\d\s]|$)')
+# #83：单行行内题号候选上限——超过即整行不做行内拆分（病态密度行按整行处理，
+# 避免每个匹配 O(L) 前后缀切片的二次方复制；正常文档一行不会有上百个题号）。
+INLINE_MATCH_CAP = 64
 
 
 def _inline_questionish(text: str) -> bool:
@@ -1154,6 +1164,8 @@ def _split_inline_hierarchical_lines(md_text: str) -> Tuple[List[str], List[int]
         if plain and not plain.startswith(("#", "```", "~~~", ">")):
             matches = sorted(list(RE_INLINE_HIER.finditer(plain))
                              + list(RE_INLINE_QNO.finditer(plain)), key=lambda m: m.start())
+            if len(matches) > INLINE_MATCH_CAP:
+                matches = []      # #83：病态密度行不拆，整行按原语义处理
             for m in matches:
                 suffix = plain[m.end():].strip()
                 prefix = plain[:m.start()].strip()
@@ -1366,6 +1378,7 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
     list_active = False         # 普通编号列表：1. 原子性 / 4. 持久性 不是题
     list_pending = False        # 上一行是“如下/以下/四个要素”等列表引导
     last_hier_was_section = False   # F3：上一个层级行是否被判为章节（章节运行上下文）
+    next_nonblank = 0               # #82：连续空行 run 的下一个非空行缓存（只扫一次）
     for i, ln in enumerate(lines):
         if kinds[i] != "text" or ln.strip() in watermark:
             # 页码/目录/页眉/水印只是"扣除区"，不能消费块级空行；否则 `12\n3. 下一题`
@@ -1389,9 +1402,15 @@ def chunk(md_text: str, *, split_long: bool = True) -> Dict:
             last_problem_mark = False
             # 空行后如果接的是列表项，说明列表还在继续；
             # 上一行没有句末标点（跨行断句）时也视为列表续行。
-            j = i + 1
-            while j < n and not lines[j].strip():
-                j += 1
+            # #82：连续空行 run 只扫一次——next_nonblank 缓存 run 边界，
+            # 否则 B 条连续空行会做 O(B²) 次前向扫描。
+            if i + 1 >= next_nonblank:
+                j = i + 1
+                while j < n and not lines[j].strip():
+                    j += 1
+                next_nonblank = j
+            else:
+                j = next_nonblank
             nxt = lines[j].strip() if j < n else ""
             prev_open = bool(lines[i - 1].strip() and not lines[i - 1].strip().endswith(
                 ("。", "！", "？", "；", ".", "!", "?", ";", "）", ")")))
