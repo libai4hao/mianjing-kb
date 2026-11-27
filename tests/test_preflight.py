@@ -42,3 +42,14 @@ def test_preflight_empty_db_reports_all_migrations_pending(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["applied_versions"] == []
     assert len(data["pending_migrations"]) == len(db.MIGRATIONS)
+
+
+def test_preflight_encodes_hash_in_db_filename(tmp_path, capsys):
+    """库名带 `#`：未转义的 file: URI 会把它当片段，读到另一个（不存在的）文件。"""
+    p = tmp_path / "kb#shadow.sqlite"
+    conn = db.connect(p)
+    conn.close()
+    assert preflight.main(["--db", str(p)]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["exists"] is True
+    assert data["integrity_check"] == "ok"

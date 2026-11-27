@@ -23,7 +23,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mianjing_kb import chunker  # noqa: E402
-from mianjing_kb.kb import config  # noqa: E402
+from mianjing_kb.kb import config, db as kbdb, paths  # noqa: E402
 
 DOC_TOL = 0.05          # 单篇题数相对容差
 TOTAL_TOL = 0.02        # 总题数相对容差
@@ -53,16 +53,19 @@ def resolve_text(conn, corpus_root: Path, doc_hash: str) -> str | None:
     if not row or not row[0]:
         return None
     rel = str(row[0])
+    # md_rel 来自台账（低信任）：必须按语料根 containment 解析，绝对路径/`..`/链接越界一律跳过。
     for base in (corpus_root / "20-题库MD", corpus_root):
-        path = base / rel
-        if path.exists():
-            return path.read_text(encoding="utf-8", errors="ignore")
+        try:
+            path = paths.safe_join(base, rel, must_exist=True)
+        except paths.UnsafePath:
+            continue
+        return path.read_text(encoding="utf-8", errors="ignore")
     return None
 
 
 def run(doc_hashes: list[str], db_path: Path, corpus_root: Path) -> dict:
     import sqlite3
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(kbdb.ro_uri(db_path), uri=True)
     per = {}
     try:
         for h in doc_hashes:

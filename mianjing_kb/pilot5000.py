@@ -26,6 +26,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from mianjing_kb.kb import db as kbdb
+
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
 DEFAULT_CONFIG = {
@@ -85,7 +87,7 @@ def _backup(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
         raise RuntimeError(f"目标已存在，拒绝覆盖：{dst}")
-    s = sqlite3.connect(f"file:{src.as_posix()}?mode=ro", uri=True)
+    s = sqlite3.connect(kbdb.ro_uri(src), uri=True)
     d = sqlite3.connect(str(dst))
     try:
         s.backup(d)
@@ -93,7 +95,7 @@ def _backup(src: Path, dst: Path) -> None:
     finally:
         d.close()
         s.close()
-    con = sqlite3.connect(f"file:{dst.as_posix()}?mode=ro", uri=True)
+    con = sqlite3.connect(kbdb.ro_uri(dst), uri=True)
     try:
         state = con.execute("PRAGMA quick_check").fetchone()[0]
     finally:
@@ -199,7 +201,7 @@ def prepare(cfg: dict) -> dict:
 
     build.mkdir(parents=True, exist_ok=True)
     corpus_md.mkdir(parents=True, exist_ok=True)
-    prod = sqlite3.connect(f"file:{prod_db.as_posix()}?mode=ro", uri=True)
+    prod = sqlite3.connect(kbdb.ro_uri(prod_db), uri=True)
     prod.row_factory = sqlite3.Row
     try:
         sample = _sample_docs(prod, int(cfg["docs"]), int(cfg["seed"]),
@@ -397,12 +399,12 @@ def report(cfg: dict) -> dict:
     prod_schema = None
     prod_db = Path(cfg["prod_db"])
     if prod_db.exists():
-        pcon = sqlite3.connect(f"file:{prod_db.as_posix()}?mode=ro", uri=True)
+        pcon = sqlite3.connect(kbdb.ro_uri(prod_db), uri=True)
         try:
             prod_schema = pcon.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
         finally:
             pcon.close()
-    con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    con = sqlite3.connect(kbdb.ro_uri(db), uri=True)
     con.row_factory = sqlite3.Row
     try:
         q = con.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
@@ -419,7 +421,7 @@ def report(cfg: dict) -> dict:
         out_db = root / "build" / "面经库.db"
         vec = None
         if out_db.exists():
-            vcon = sqlite3.connect(f"file:{out_db.as_posix()}?mode=ro", uri=True)
+            vcon = sqlite3.connect(kbdb.ro_uri(out_db), uri=True)
             try:
                 import sqlite_vec
                 vcon.enable_load_extension(True)

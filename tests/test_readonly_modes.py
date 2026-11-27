@@ -84,3 +84,26 @@ def test_bookmarks_dry_run_uses_read_only_connection(tmp_path):
     )
     assert bookmarks._run(args) == 0
     _assert_still_delete(path)
+
+
+def test_ro_uri_encodes_uri_specials_and_stays_read_only(tmp_path):
+    """`#`/`?` 出现在库名时，未编码的 file: URI 会改掉实际目标库或绕过 mode=ro。"""
+    from mianjing_kb.kb import db
+
+    path = tmp_path / "kb#2.sqlite"
+    conn = db.connect(path)
+    conn.execute("CREATE TABLE t(x INTEGER)")
+    conn.execute("INSERT INTO t VALUES (1)")
+    conn.commit()
+    conn.close()
+
+    uri = db.ro_uri(path)
+    assert "#" not in uri
+    con = sqlite3.connect(uri, uri=True)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError):
+            con.execute("INSERT INTO t VALUES (2)")
+    finally:
+        con.close()
+

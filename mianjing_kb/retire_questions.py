@@ -185,7 +185,7 @@ def main(argv=None) -> int:
                 finally:
                     conn.close()
         else:
-            conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+            conn = sqlite3.connect(kbdb.ro_uri(path), uri=True)
             conn.row_factory = sqlite3.Row
             try:
                 res = retire(conn, args.doc_hash, apply=False)

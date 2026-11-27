@@ -41,6 +41,16 @@ BATCH_STATES = (BATCH_RUNNING, BATCH_COMPLETED, BATCH_FAILED)
 _BATCH_COUNT_FIELDS = ("added", "duplicated", "moved", "quarantined", "ignored")
 
 
+def ro_uri(path: Path | str) -> str:
+    """只读 SQLite URI：路径必须 percent-encode 后再拼查询串。
+
+    直接拼 `f"file:{p}?mode=ro"` 时，文件名里的 `?` / `#` 会被 SQLite 当作查询串或
+    片段分隔符：`kb.sqlite?mode=rwc#` 既能绕开 `mode=ro`，也能让连接指向另一个文件。
+    `Path.as_uri()` 会编码这些字符，是唯一可靠的写法。
+    """
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
 def connect(db_path: Path | str | None = None, *, create: bool = True,
             readonly: bool = False) -> sqlite3.Connection:
     """连接数据库；create=True 时自动建库并跑迁移。
@@ -56,7 +66,7 @@ def connect(db_path: Path | str | None = None, *, create: bool = True,
     if readonly:
         if not path.exists():
             raise FileNotFoundError(f"数据库不存在：{path}")
-        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        conn = sqlite3.connect(ro_uri(path), uri=True)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 10000")
         return conn
@@ -746,7 +756,7 @@ def backup_db(db_path: Path | str, backup_dir: Path | str | None = None,
     bdir = Path(backup_dir) if backup_dir else src_path.parent / "backups"
     bdir.mkdir(parents=True, exist_ok=True)
     dst = bdir / f"{src_path.stem}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.db"
-    src = sqlite3.connect(f"file:{src_path.as_posix()}?mode=ro", uri=True)
+    src = sqlite3.connect(ro_uri(src_path), uri=True)
     try:
         out = sqlite3.connect(str(dst))
         try:

@@ -315,7 +315,7 @@ def main(argv=None) -> int:
         if args.dry_run:
             db_file = Path(args.db)
             if db_file.exists():                       # 只读打开，用于报出真实重复数
-                read_conn = sqlite3.connect(f"file:{db_file.as_posix()}?mode=ro", uri=True)
+                read_conn = sqlite3.connect(db.ro_uri(db_file), uri=True)
                 read_conn.row_factory = sqlite3.Row
             conn = read_conn
         else:

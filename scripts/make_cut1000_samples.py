@@ -36,6 +36,11 @@ def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+def _ro_uri(path: Path) -> str:
+    """只读 URI：路径必须编码，`#`/`?` 不编码会被当成片段/查询串改掉目标库。"""
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
 def csv_safe(v) -> str:
     s = "" if v is None else str(v)
     if s and s[0] in DANGEROUS:
@@ -44,7 +49,7 @@ def csv_safe(v) -> str:
 
 
 def _load_rows(db: Path) -> list[dict]:
-    con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    con = sqlite3.connect(_ro_uri(db), uri=True)
     con.row_factory = sqlite3.Row
     try:
         rows = [dict(r) for r in con.execute(
@@ -67,7 +72,7 @@ def _load_rows(db: Path) -> list[dict]:
 
 
 def _staging_labels(db: Path) -> dict[str, dict]:
-    con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    con = sqlite3.connect(_ro_uri(db), uri=True)
     con.row_factory = sqlite3.Row
     try:
         return {r["q_norm_hash"]: dict(r) for r in con.execute(
@@ -79,7 +84,7 @@ def _staging_labels(db: Path) -> dict[str, dict]:
 
 
 def _schema_version(db: Path) -> str | None:
-    con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    con = sqlite3.connect(_ro_uri(db), uri=True)
     try:
         try:
             return con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]

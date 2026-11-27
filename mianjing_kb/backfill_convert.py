@@ -34,7 +34,7 @@ from pathlib import Path, PurePosixPath
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "mianjing_kb"))
-from mianjing_kb.kb import config, paths, status  # noqa: E402
+from mianjing_kb.kb import config, db as kbdb, paths, status  # noqa: E402
 
 BUILD = Path(config.BUILD_DIR)
 LEDGER = Path(config.DB_PATH)
@@ -67,7 +67,7 @@ def _search_hashes() -> set[str]:
     的 questions——它是全量事实源且随 extract 即时更新。
     """
     import sqlite3 as s3
-    con = s3.connect(f"file:{LEDGER.as_posix()}?mode=ro", uri=True)
+    con = s3.connect(kbdb.ro_uri(LEDGER), uri=True)
     try:
         return {r[0] for r in con.execute("SELECT DISTINCT doc_hash FROM questions")}
     finally:
@@ -88,7 +88,7 @@ def build_plan() -> list[dict]:
             md_by_stem.setdefault(_stem(p.name), []).append(rel)
     qs = _search_hashes()
     import hashlib
-    led = sqlite3.connect(f"file:{LEDGER.as_posix()}?mode=ro", uri=True)
+    led = sqlite3.connect(kbdb.ro_uri(LEDGER), uri=True)
     led.row_factory = sqlite3.Row
     rows = led.execute(
         "SELECT doc_hash, file_name, ext, category, topic, src_path "

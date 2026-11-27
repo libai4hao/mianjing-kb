@@ -37,7 +37,7 @@ DEFAULT_WORK = Path(config.BUILD_DIR) / "migration_rehearsal"
 def _copy_db(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.unlink(missing_ok=True)
-    src_con = sqlite3.connect(f"file:{src.as_posix()}?mode=ro", uri=True)
+    src_con = sqlite3.connect(db.ro_uri(src), uri=True)
     dst_con = sqlite3.connect(str(dst))
     try:
         src_con.backup(dst_con)
@@ -69,7 +69,7 @@ def rehearse(src: Path, work: Path, *, keep: bool = False, run_plan: bool = True
     dry = work / "kb_dry.sqlite"
     _copy_db(src, dry)
 
-    before_conn = sqlite3.connect(f"file:{dry.as_posix()}?mode=ro", uri=True)
+    before_conn = sqlite3.connect(db.ro_uri(dry), uri=True)
     before_conn.row_factory = sqlite3.Row
     before = _counts(before_conn)
     before["migrations"] = []

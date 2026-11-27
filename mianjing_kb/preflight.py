@@ -24,7 +24,7 @@ from mianjing_kb.kb import config, db  # noqa: E402
 
 
 def _ro_uri(path: Path) -> str:
-    return f"file:{path.as_posix()}?mode=ro"
+    return db.ro_uri(path)
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

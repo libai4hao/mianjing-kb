@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from mianjing_kb import llm_client  # noqa: E402
-from mianjing_kb.kb import config  # noqa: E402
+from mianjing_kb.kb import config, db as kbdb  # noqa: E402
 
 SYSTEM = (
     "你是 Java/后端面试题答题助手。只输出答案正文，不要复述题目、不要加编号、不要客套。"
@@ -42,7 +42,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default="", help="输出目录（默认 <BUILD_DIR>/pilot-answer-50）")
     args = ap.parse_args(argv)
 
-    conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    conn = sqlite3.connect(kbdb.ro_uri(args.db), uri=True)
     rows = [(q, t, "boundary_gap") for q, t in pick(conn, "boundary_gap", args.gap)]
     rows += [(q, t, "no_answer_source") for q, t in pick(conn, "no_answer_source", args.no_source)]
     conn.close()

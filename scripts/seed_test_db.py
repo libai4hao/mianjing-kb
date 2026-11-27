@@ -77,7 +77,7 @@ def main(argv=None) -> int:
             return 2
         dst_path.unlink()
 
-    src = sqlite3.connect(f"file:{src_path.as_posix()}?mode=ro", uri=True)
+    src = sqlite3.connect(db.ro_uri(src_path), uri=True)
     src.row_factory = sqlite3.Row
     all_qids = [r[0] for r in src.execute("SELECT qid FROM questions ORDER BY qid")]
     if not all_qids:

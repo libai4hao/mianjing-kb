@@ -75,7 +75,7 @@ def _sidecars(p: Path) -> tuple[Path, Path]:
 
 
 def _ro_uri(p: Path) -> str:
-    return f"file:{p.as_posix()}?mode=ro"
+    return kbdb.ro_uri(p)
 
 
 def _quick_check(p: Path) -> str:

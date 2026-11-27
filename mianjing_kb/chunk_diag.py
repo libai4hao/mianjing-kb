@@ -29,6 +29,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from mianjing_kb import chunker as C
+from mianjing_kb.kb import db as kbdb, paths
 
 RE_NUM = re.compile(r'^\s*(?:#{1,6}\s+)?(?:\d{1,3}\s*[.、．)）]|第\s*\d+\s*题|问题[一二三四五六七八九十\d]+)')
 RE_NARR = re.compile(r'(面试官|然后就|然后面试|接着(问|聊|说|又)|问我|问了|跟我说|和我说|聊了|又开始|继续问|'
@@ -47,10 +48,13 @@ def norm_key(s):
 
 
 def resolve_md(corpus, rel):
+    """md_rel（台账值，低信任）→ 语料内路径；越界/绝对路径/链接逃逸一律视为缺失。"""
     for sub in CORPUS_SUBDIRS:
-        p = (corpus / sub / rel) if sub else (corpus / rel)
-        if p.exists():
-            return p
+        base = (corpus / sub) if sub else corpus
+        try:
+            return paths.safe_join(base, rel, must_exist=True)
+        except paths.UnsafePath:
+            continue
     return None
 
 
@@ -58,7 +62,7 @@ def open_ro(kb):
     """生产库只以只读方式打开（判据：诊断不得写库）。"""
     if not Path(kb).exists():
         raise SystemExit(f"[fatal] 库不存在：{kb}")
-    return sqlite3.connect(f"file:{Path(kb).resolve().as_posix()}?mode=ro", uri=True)
+    return sqlite3.connect(kbdb.ro_uri(kb), uri=True)
 
 
 def read_hash_list(path):
