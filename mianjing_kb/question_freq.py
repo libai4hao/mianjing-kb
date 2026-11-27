@@ -23,7 +23,7 @@ import math
 import re
 import sys
 import unicodedata
-import zipfile
+import zipfile  # noqa: F401  保留：外部测试以 question_freq.zipfile 打桩
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from pathlib import Path
@@ -89,10 +89,10 @@ def text_of_pdf(path: Path) -> str:
         return "\n".join(page.get_text("text", sort=True) for page in doc)
 
 
-def _docx_numbering(zf: zipfile.ZipFile) -> dict[str, dict[int, tuple[str, str, int]]]:
+def _docx_numbering(path: Path) -> dict[str, dict[int, tuple[str, str, int]]]:
     """解析受大小限制的 word/numbering.xml：numId -> ilvl -> (numFmt, lvlText, start)。"""
     try:
-        xml = docx_safety.read_docx_member(zf.filename, "word/numbering.xml",
+        xml = docx_safety.read_docx_member(path, "word/numbering.xml",
                                            max_bytes=4 * 1024 * 1024)
         root = ET.fromstring(xml)
     except (KeyError, ET.ParseError, docx_safety.UnsafeDocx):
@@ -180,10 +180,13 @@ def _docx_para_text(p, numbering: dict, counters: dict[str, dict[int, int]]) -> 
 
 
 def text_of_docx(path: Path) -> str:
-    """docx 是 zip：直接读 word/document.xml；保留 w:br/w:tab 与自动编号前缀。"""
-    with zipfile.ZipFile(path) as zf:
-        xml = docx_safety.read_docx_member(path, "word/document.xml")
-        numbering = _docx_numbering(zf)
+    """docx 是 zip：读 word/document.xml；保留 w:br/w:tab 与自动编号前缀。
+
+    #16：不再先做无限制的外层 ZipFile 打开——所有成员读取都走 docx_safety
+    （先查归档大小/条目数/解压总量，再开 ZIP），超限在解析前拒绝。
+    """
+    xml = docx_safety.read_docx_member(path, "word/document.xml")
+    numbering = _docx_numbering(path)
     try:
         root = ET.fromstring(xml)
     except ET.ParseError:
@@ -250,30 +253,50 @@ def word_app():
 def text_of_doc(path: Path) -> str:
     """老 .doc 只能靠 Word（本机 Office 12.0）。失败抛异常，不能冒充空文档。
 
+    #84：COM 调用关进独立子进程 + 硬超时（与 doc_convert 的看门狗同口径）——
+    Documents.Open/Content.Text 无法在进程内被打断，异常文档会卡死整批。
     打开失败重试一次：Word 崩溃后旧代理会拖死后续所有文档，必须 Quit 重建。
     """
     try:
         __import__("win32com.client")      # 仅探依赖；实例统一由 _word_app 管理
     except ImportError as exc:
         raise RuntimeError("win32com 不可用，无法读取 .doc") from exc
-    app = None
-    doc = None
-    for attempt in range(2):
-        try:
-            app = _word_app()
-            doc = _open_word_doc(app, path)
-            break
-        except Exception:
-            close_word()
-            if attempt == 1:
-                raise
-    try:
-        return doc.Content.Text
-    finally:
-        try:
-            doc.Close(False)
-        except Exception:  # noqa: BLE001  已崩溃的 Word 不值得覆盖真实读取错误
-            close_word()
+    import tempfile
+
+    from mianjing_kb.kb import proc
+    with tempfile.TemporaryDirectory(prefix="kbdoc_") as td:
+        out = Path(td) / "text.txt"
+        worker = (
+            "import sys, pathlib\n"
+            "from mianjing_kb.question_freq import _word_app, _open_word_doc, close_word\n"
+            "p = pathlib.Path(sys.argv[1]); out = pathlib.Path(sys.argv[2])\n"
+            "app = None; doc = None\n"
+            "try:\n"
+            "    for attempt in range(2):\n"
+            "        try:\n"
+            "            app = _word_app(); doc = _open_word_doc(app, p); break\n"
+            "        except Exception:\n"
+            "            close_word()\n"
+            "            if attempt == 1: raise\n"
+            "    try:\n"
+            "        out.write_text(doc.Content.Text, encoding='utf-8')\n"
+            "    finally:\n"
+            "        try: doc.Close(False)\n"
+            "        except Exception: close_word()\n"
+            "finally:\n"
+            "    close_word()\n"
+        )
+        rc, _so, se, timed_out = proc.run_with_timeout(
+            [sys.executable, "-c", worker, str(path), str(out)],
+            timeout=DOC_COM_TIMEOUT)
+        if timed_out:
+            raise RuntimeError(f".doc 读取超时（>{DOC_COM_TIMEOUT}s），已杀进程树: {path.name}")
+        if rc != 0 or not out.exists():
+            raise RuntimeError(f".doc 读取失败 rc={rc}: {se[-200:]}")
+        return out.read_text(encoding="utf-8")
+
+
+DOC_COM_TIMEOUT = 120      # 单件 .doc COM 读取硬超时（秒）
 
 
 def extract(path: Path) -> str:

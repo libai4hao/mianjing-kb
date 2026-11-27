@@ -195,6 +195,36 @@ def test_question_freq_docx_member_is_size_limited(tmp_path):
         text_of_docx(p)
 
 
+def test_question_freq_docx_no_unbounded_outer_zip_open(tmp_path, monkeypatch):
+    """#16：text_of_docx 不得在 docx_safety 校验之前做无限制 ZipFile 打开。
+
+    把 question_freq 与 docx_safety 命名空间里的 zipfile.ZipFile 都换成记录器：
+    超限件必须在任何 ZIP 打开前被 stat 大小闸拒绝（条目数闸同理）。
+    """
+    import mianjing_kb.question_freq as qf
+    from mianjing_kb.kb import docx_safety
+    from mianjing_kb.kb.docx_safety import UnsafeDocx
+
+    p = tmp_path / "many-entries.docx"
+    with zipfile.ZipFile(p, "w") as z:
+        for i in range(10_001):
+            z.writestr(f"m{i}.xml", "x")
+    opened = []
+    real_zip = zipfile.ZipFile
+
+    def spy(*a, **k):
+        opened.append(a[0] if a else k.get("file"))
+        return real_zip(*a, **k)
+
+    monkeypatch.setattr(qf.zipfile, "ZipFile", spy)
+    monkeypatch.setattr(docx_safety.zipfile, "ZipFile", spy)
+    with pytest.raises(UnsafeDocx):
+        qf.text_of_docx(p)
+    # docx_safety 内部会开一次 ZIP 做条目数检查——那是受控打开；
+    # 关键断言：question_freq 自身不再额外先开一次（总打开次数 == 1）。
+    assert len(opened) == 1
+
+
 def test_normalize_ascii_dot_space_merges_identifier_fragments():
     """PDF 提取把英文标识符 `X.y` 拆成 `X. y`，应归并回 `X.y`。"""
     src = ("可以使用 Collections. unmodifiableCollection 创建只读集合，"

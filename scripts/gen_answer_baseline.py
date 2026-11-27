@@ -52,13 +52,36 @@ def metrics(a: str) -> tuple[int, int]:
 
 
 def load_annotations() -> list[dict]:
+    """#77：外部工作簿先过归档/展开预算，再限行限列读取——read_only 不限返回量。"""
+    import zipfile
+
+    max_archive = 64 * 1024 * 1024          # 压缩包本体
+    max_uncompressed = 256 * 1024 * 1024    # 解压总量
+    max_rows = 20_000                       # 应用级行数上限
+    if XLSX.stat().st_size > max_archive:
+        raise ValueError(f"标注工作簿过大: {XLSX.stat().st_size} bytes")
+    with zipfile.ZipFile(XLSX) as zf:
+        infos = zf.infolist()
+        if len(infos) > 5000:
+            raise ValueError(f"标注工作簿 ZIP 条目过多: {len(infos)}")
+        total = sum(i.file_size for i in infos)
+        if total > max_uncompressed:
+            raise ValueError(f"标注工作簿解压总量超限: {total} bytes")
     wb = load_workbook(XLSX, data_only=True, read_only=True)
-    ws = wb["母版"]
-    return [
-        dict(zip(HEADERS, r))
-        for r in ws.iter_rows(min_row=4, max_row=ws.max_row, values_only=True)
-        if r[0]
-    ]
+    try:
+        ws = wb["母版"]
+        if (ws.max_row or 0) > max_rows or (ws.max_column or 0) > len(HEADERS) + 8:
+            raise ValueError(f"标注工作簿行列超限: {ws.max_row}x{ws.max_column}")
+        out = []
+        for r in ws.iter_rows(min_row=4, max_row=min(ws.max_row or 0, max_rows),
+                              max_col=len(HEADERS), values_only=True):
+            if r[0]:
+                out.append(dict(zip(HEADERS, r)))
+                if len(out) >= max_rows:
+                    raise ValueError(f"标注行数超过上限 {max_rows}")
+        return out
+    finally:
+        wb.close()
 
 
 def snapshot() -> list[dict]:
