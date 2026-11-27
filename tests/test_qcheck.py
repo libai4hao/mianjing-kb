@@ -64,3 +64,65 @@ class TestStats:
     def test_no_labels_means_no_accuracy(self):
         r = stats([{"qid": 9, "answer_state": "ok", "label": None}], {})
         assert r["strict_accuracy"] is None and r["usable_rate"] is None
+
+
+class TestIdentityBinding:
+    """#69：carry/render 按稳定身份绑定，qid 漂移不得把旧标签挂到新题。"""
+
+    def _db(self, tmp_path, q_text="什么是 JVM？", q_key="d1:h1"):
+        from mianjing_kb.kb import db as kbdb
+        conn = kbdb.connect(tmp_path / "kb.sqlite")
+        conn.execute(
+            "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, span_start, span_end,"
+            " qtype, conf, q_norm, q_norm_hash, simhash, q_key, answer_state, extracted_at)"
+            " VALUES (1,'d1',1,?,?,0,1,'八股','high','norm','h1',0,?,'ok','now')",
+            (q_text, "答案", q_key))
+        conn.commit()
+        return conn
+
+    def test_render_marks_stale_on_qkey_mismatch(self, tmp_path):
+        from mianjing_kb import qcheck
+        conn = self._db(tmp_path, q_text="什么是 Redis？", q_key="d1:h2")
+        items = [{"qid": 1, "q_key": "d1:h1", "q_norm": "什么是jvm",
+                  "answer_state": "ok", "label": "pass", "reason": "旧判"}]
+        md, detail = qcheck.render(conn, items)
+        conn.close()
+        assert detail[0]["stale"] == "q_key_mismatch"
+        assert detail[0]["label"] is None          # 旧标签不作数
+        assert "已失效" in md
+
+    def test_render_missing_qid_is_explicit_stale(self, tmp_path):
+        from mianjing_kb import qcheck
+        conn = self._db(tmp_path)
+        items = [{"qid": 99, "q_key": "d9:h9", "answer_state": "ok", "label": "pass"}]
+        _md, detail = qcheck.render(conn, items)
+        conn.close()
+        assert detail[0]["stale"] == "qid_missing"  # 不再静默跳过
+
+    def test_carry_matches_by_qkey_not_qid(self, tmp_path, monkeypatch, capsys):
+        import json
+
+        from mianjing_kb import qcheck
+        # 当前库：qid=1 已是另一题（h2）；旧样本判的是 h1（现 qid=2）
+        conn = self._db(tmp_path, q_text="什么是 Redis？", q_key="d1:h2")
+        conn.execute(
+            "INSERT INTO questions (qid, doc_hash, seq, q_text, a_text, span_start, span_end,"
+            " qtype, conf, q_norm, q_norm_hash, simhash, q_key, answer_state, extracted_at)"
+            " VALUES (2,'d1',2,'什么是 JVM？','答案',0,1,'八股','high','norm2','h1b',0,"
+            "'d1:h1','ok','now')")
+        conn.commit()
+        conn.close()
+        old = tmp_path / "old.json"
+        old.write_text(json.dumps({"items": [
+            {"qid": 1, "q_key": "d1:h1", "label": "pass", "reason": "旧判"}]}), encoding="utf-8")
+        out = tmp_path / "new.json"
+        rc = qcheck.main(["make", "--db", str(tmp_path / "kb.sqlite"), "--n", "2",
+                          "--carry", str(old), "--out", str(out)])
+        assert rc == 0
+        capsys.readouterr()
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        carried = [x for x in payload["items"] if x.get("label")]
+        assert len(carried) == 1 and carried[0]["qid"] == 2   # 挂到 h1 的当前行
+        assert carried[0]["q_key"] == "d1:h1"
+        # qid=1（现为 Redis 题）不得带上 JVM 的旧标签
+        assert all(x.get("label") is None for x in payload["items"] if x["qid"] == 1)

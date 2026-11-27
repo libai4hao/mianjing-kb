@@ -91,3 +91,12 @@ def test_render_md_flags_star_anchor_violation():
             "violators": [], "band": 0.65}
     md = ca.render_md(data)
     assert "FAIL" in md and "星形违规样例" in md
+
+
+def test_within_stats_respects_pair_budget():
+    """#72：簇内全对统计先于候选枚举受 max_pairs 约束——病态大簇不得无界比较。"""
+    import pytest
+    # 60 条同文题 → 单簇 1770 对；预算 100 必须在簇内统计阶段就拦下
+    qs = [_q(JVM, f"h{i}") for i in range(60)]
+    with pytest.raises(SystemExit, match="簇内对数超过上限"):
+        ca.audit_questions(qs, max_pairs=100)

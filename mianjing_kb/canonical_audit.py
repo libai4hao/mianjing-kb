@@ -36,8 +36,12 @@ def _ro_uri(path: Path) -> str:
 
 
 def _within_stats(qs: list[dict], clusters: list[dict], grams: dict,
-                  jac: float, samples: int) -> dict:
-    """同簇成对统计，并单独校验每个成员与代表题的直连关系。"""
+                  jac: float, samples: int, max_pairs: int = MAX_PAIRS_DEFAULT) -> dict:
+    """同簇成对统计，并单独校验每个成员与代表题的直连关系。
+
+    #72：簇内全对统计同样受 max_pairs 预算约束——它先于 _enumerate_pairs 运行，
+    病态大簇（重复文本展开）不得在预算闸之前做 O(k²) 比较。
+    """
     pairs = below = paraphrase = anchor_below = anchor_checks = 0
     rewrite_samples: list[dict] = []
     chain_samples: list[dict] = []
@@ -50,6 +54,9 @@ def _within_stats(qs: list[dict], clusters: list[dict], grams: dict,
         anchor_checks += max(0, len(ms) - 1)
         for x in range(len(ms)):
             for y in range(x + 1, len(ms)):
+                if pairs >= max_pairs:
+                    raise SystemExit(
+                        f"簇内对数超过上限 {max_pairs}，调大 --max-pairs 或收窄输入")
                 i, j = ms[x], ms[y]
                 same = cn.jaccard(grams[i], grams[j])
                 pairs += 1
@@ -152,7 +159,7 @@ def audit_questions(qs: list[dict], jac: float = cn.ATTACH_JAC,
         for i in c["members"]:
             owner[i] = cid
     grams = {i: cn._grams(q["q_norm"]) for i, q in enumerate(qs)}
-    inside = _within_stats(qs, clusters, grams, jac, samples)
+    inside = _within_stats(qs, clusters, grams, jac, samples, max_pairs)
     enum = _enumerate_pairs(qs, grams, owner, jac, band, max_pairs, samples)
     size_dist: dict[str, int] = defaultdict(int)
     for c in clusters:
