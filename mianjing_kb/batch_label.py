@@ -40,7 +40,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, labelspec, taxonomy, wlock  # noqa: E402
+from mianjing_kb.kb import config, csvsafe, db, labelspec, taxonomy, wlock  # noqa: E402
 from mianjing_kb.kb.vocab import (  # noqa: E402
     OTHER_TOPIC,
     tag_stopwords,
@@ -565,14 +565,8 @@ def manual_template(conn, n: int, path: Path, seed: int = 42) -> dict:
 
 
 def _csv_safe_cell(value):
-    """防 CSV/Excel 公式注入；以公式字符起始的用户文本在首位加单引号。"""
-    if value is None:
-        return ""
-    text = str(value)
-    trimmed = text.lstrip(" \t\r\n")
-    if text.startswith(("\t", "\r", "\n")) or trimmed.startswith(("=", "+", "-", "@")):
-        return "'" + text
-    return text
+    """防 CSV/Excel 公式注入；统一委托 kb/csvsafe（全仓唯一实现）。"""
+    return csvsafe.neutralize(value)
 
 
 def _split_multi(raw: str) -> list[str]:

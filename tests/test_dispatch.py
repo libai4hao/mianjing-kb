@@ -80,3 +80,39 @@ def test_priority_ocr_before_suggest():
     # v2.0-JavaGuide 若 OCR 已跑，按 ocr_done（OCR 是既成事实，退役建议降级）
     r = _row("12-综合题库/v2.0-JavaGuide面试突击版.pdf")
     assert decide(r, "classified", "", True) == "ocr_done"
+
+
+def test_dispatch_csv_neutralizes_formula_cells(tmp_path, monkeypatch):
+    """台账 note（alt 列）里的公式文本不能原样落进 dispatch_plan.csv。"""
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "ocr_text").mkdir()
+    dbp = build / "kb.sqlite"
+    conn = sqlite3.connect(str(dbp))
+    conn.row_factory = sqlite3.Row
+    conn.executescript((config.META_DIR / "schema" / "001_init.sql").read_text(encoding="utf-8"))
+    conn.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+        "dir_path, status, note, batch_id, first_seen_at, last_seen_at) VALUES "
+        "(?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("aaa0000000000001", "a" * 64, "同名.pdf", ".pdf", 1, "甲目录/同名.pdf", "甲目录",
+         "classified", "=HYPERLINK(\"http://x\")", "t", "now", "now"))
+    conn.commit()
+    conn.close()
+
+    report = build / "gate.json"
+    report.write_text(json.dumps({"rows": [{"rel": "甲目录/同名.pdf", "state": "fail",
+                                            "reason": "=cmd|' /C calc'!A1"}]},
+                                 ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(config, "BUILD_DIR", build)
+    monkeypatch.setattr(config, "DB_PATH", dbp)
+    monkeypatch.setattr(dispatch, "BUILD", build)
+    monkeypatch.setattr(dispatch, "OCR_TEXT", build / "ocr_text")
+
+    out = build / "plan.csv"
+    assert dispatch.main(["--report", str(report), "--out", str(out)]) == 0
+    with out.open(encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows[0]["reason"].startswith("'=")
+    assert rows[0]["alt"].startswith("'=")
+

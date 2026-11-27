@@ -24,7 +24,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "mianjing_kb"))
-from mianjing_kb.kb import config, db  # noqa: E402
+from mianjing_kb.kb import config, csvsafe, db  # noqa: E402
 from mianjing_kb.kb import status as st  # noqa: E402  （decide() 的参数名就是 status，用别名避免遮蔽）
 
 BUILD = Path(config.BUILD_DIR)   # P1-3 修复（2026-11-17 审核）：路径统一走 config，KB_* 环境变量可覆盖
@@ -94,7 +94,8 @@ def main(argv=None) -> int:
     with open(args.out, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["rel", "state", "reason", "route", "status", "alt", "ocr_txt"])
         w.writeheader()
-        w.writerows(plan)
+        # rel / reason / alt 来自 gate 报告与台账 note，属低信任文本：逐格公式中和后再写
+        w.writerows([csvsafe.neutralize_row(p) for p in plan])
 
     dist = Counter(p["route"] for p in plan)
     print(json.dumps({"fail_review": len(plan), "route_dist": dict(dist), "out": args.out},

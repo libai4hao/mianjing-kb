@@ -42,8 +42,9 @@ def _ro_uri(path: Path) -> str:
 
 
 def csv_safe(v) -> str:
+    """公式中和（与 kb/csvsafe 同口径）：前导空白后的公式字符也算。"""
     s = "" if v is None else str(v)
-    if s and s[0] in DANGEROUS:
+    if s.startswith(("\t", "\r", "\n")) or s.lstrip(" \t\r\n").startswith(DANGEROUS):
         return "'" + s
     return s
 

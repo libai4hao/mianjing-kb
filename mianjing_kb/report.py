@@ -22,7 +22,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db  # noqa: E402
+from mianjing_kb.kb import config, csvsafe, db  # noqa: E402
 from mianjing_kb.question_freq import cluster  # noqa: E402
 
 
@@ -125,8 +125,9 @@ def write_csv(path: Path, clusters: list, top: int) -> int:
         w = csv.writer(f)
         w.writerow(["rank", "sample_q", "witness", "n_docs", "n_variants", "qtype", "doc_hashes"])
         for i, c in enumerate(multi[:top], 1):
-            w.writerow([i, c["sample"], c["witness"], c["n_docs"], c["n_variants"], c["qtype"],
-                        " ".join(c["doc_hashes"])])
+            w.writerow([csvsafe.neutralize(v) for v in
+                        (i, c["sample"], c["witness"], c["n_docs"], c["n_variants"], c["qtype"],
+                         " ".join(c["doc_hashes"]))])
     return len(multi[:top])
 
 

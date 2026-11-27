@@ -39,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mianjing_kb.kb import config  # noqa: E402
+from mianjing_kb.kb import config, csvsafe  # noqa: E402
 from mianjing_kb.question_freq import (DSU, clean_question, close_word, extract, grams, hamming,  # noqa: E402
                            jaccard, normalize, simhash, split_qa)
 
@@ -558,7 +558,9 @@ def main(argv=None) -> int:
         w.writerow(["rel99", "q99", "pool_rel", "pool_q", "jaccard"])
         for rel99, pairs in pending_by_99item.items():
             for pp in pairs:
-                w.writerow([rel99, pp["q99"], pp["pool_rel"], pp["pool_rel_q"], pp["jac"]])
+                # rel99/q99 来自语料与台账，属低信任文本：写表前统一公式中和
+                w.writerow([csvsafe.neutralize(v) for v in
+                            (rel99, pp["q99"], pp["pool_rel"], pp["pool_rel_q"], pp["jac"])])
 
     sample_path = config.BUILD_DIR / f"cluster_sample50{suffix}.md"
     lines = ["# cluster 强簇抽样（人工核准确率用）", "",

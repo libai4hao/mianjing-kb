@@ -32,7 +32,7 @@ from xml.etree import ElementTree as ET
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config  # noqa: E402
+from mianjing_kb.kb import config, csvsafe  # noqa: E402
 from mianjing_kb.kb import docx_safety
 
 # 题号标记：行首的序号 / 括号序号 / Q1 / 第N题 / 【N】
@@ -679,9 +679,10 @@ def main(argv=None) -> int:
             w.writerow(["rank", "n_collections", "doc_freq", "occurrences", "面试文档", "笔试文档",
                         "variants", "question", "sample"])
             for rank, row in enumerate(top, 1):
-                w.writerow([rank, row["n_collections"], row["doc_freq"], row["occurrences"],
-                            row["面试文档"], row["笔试文档"],
-                            row["variants"], row["question"], row["sample"]])
+                w.writerow([csvsafe.neutralize(v) for v in
+                            (rank, row["n_collections"], row["doc_freq"], row["occurrences"],
+                             row["面试文档"], row["笔试文档"],
+                             row["variants"], row["question"], row["sample"])])
         print(f"[csv] {len(top)} 行 → {out}")
 
     print(f"[stat] 文档 {stats['docs']}，抽不出文本 {stats['no_text']}，异常 {stats['error']}，"
