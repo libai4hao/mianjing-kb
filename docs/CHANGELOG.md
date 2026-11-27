@@ -8,6 +8,17 @@
 
 ## 2026-11-28
 
+- **外部审计 run-1 第五轮加固（P1-C 评估口径 + P2 低成本项）**（`docs/63` §10、`待办清单` T44）：
+  处置 18 条候选，新增 22 条回归用例；ruff 通过、全量 pytest 通过（1198 收集）、privacy_scan 0 命中。
+  - 评估口径（5/6/17/18/19/20/21/69/72）：chunk_regress 拒不完整基线 + md_hash 内容绑定；
+    eval_cluster 缺输入 exit 2、谓词对齐生产（dist 退役、F6 参与）、review_state 门禁；
+    eval_retrieval nDCG 身份去重、grade 校验、矛盾标注拒绝、recall 只认正分级；
+    qcheck carry/render 绑定 q_key/q_norm 稳定身份；审计簇内对数受 max_pairs 预算。
+  - P2（4/8/9/10/11/12/24/33/45/46）：canonical 长题截断撞车守卫；normalize 单算子映射；
+    cluster 去重占比/缓存内容哈希/见证 sha256 复验/短答案冲突闸；extract 字面 [] 标量；
+    redact 正斜杠盘符；think 线性剥离；provider 响应 32MiB 上限。
+  - 生产库与检索库未动；剩余 14 条（#25/#61/#64 主体需口径或句柄级原语，其余 P2）留待后续。
+
 - **外部审计 run-1 第四轮加固（P1-D 资源预算 + P1-F 代码执行信任）**（`docs/63` §9、`待办清单` T44）：
   处置 13 条候选，新增 26 条回归用例；ruff 通过、全量 pytest 通过（1176 收集）、privacy_scan 0 命中。
   - 资源预算（16/37/40/43/63/65/77/82/83）：新增 `kb/pdfbudget` 共享预算
