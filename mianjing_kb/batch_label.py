@@ -772,17 +772,42 @@ def golden_load(conn, path, annotator: str = "human") -> dict:
                 "note": "清单格式见 --golden-sample 输出"}
     items = data["items"]
     errs: list[str] = []
+    seen_hashes: dict[str, int] = {}
     for i, it in enumerate(items):
-        if not (it.get("q_norm_hash") or "").strip():
-            errs.append(f"items[{i}]: q_norm_hash 为空")
-        if not (it.get("topic_gold") or "").strip():
-            errs.append(f"items[{i}]: topic_gold 为空")
-        qg = (it.get("qtype_gold") or "").strip()
-        if qg and qg not in QTYPES:
+        if not isinstance(it, dict):
+            errs.append(f"items[{i}]: 必须是 JSON 对象")
+            continue
+        h = it.get("q_norm_hash")
+        tg = it.get("topic_gold")
+        if not isinstance(h, str) or not h.strip():
+            errs.append(f"items[{i}]: q_norm_hash 为空或非字符串")
+            h = None
+        if not isinstance(tg, str) or not tg.strip():
+            errs.append(f"items[{i}]: topic_gold 为空或非字符串")
+        qg = it.get("qtype_gold")
+        qg = qg.strip() if isinstance(qg, str) else ("" if qg is None else None)
+        if qg is None:
+            errs.append(f"items[{i}]: qtype_gold 必须是字符串或空")
+        elif qg and qg not in QTYPES:
             errs.append(f"items[{i}]: qtype_gold 非法 {qg!r}（允许 {','.join(QTYPES)}）")
         dg = it.get("difficulty_gold")
-        if dg is not None and dg not in (1, 2, 3, 4, 5):
-            errs.append(f"items[{i}]: difficulty_gold 非法 {dg!r}（允许 1-5）")
+        if dg is not None and (isinstance(dg, bool) or not isinstance(dg, int)
+                               or dg not in (1, 2, 3, 4, 5)):
+            errs.append(f"items[{i}]: difficulty_gold 非法 {dg!r}（允许 1-5 整数）")
+        if h:
+            hk = h.strip()
+            if hk in seen_hashes:
+                # 候选 #38：同 hash 重复项静默 last-write-wins 会悄悄改写金标权威
+                errs.append(f"items[{i}]: q_norm_hash 重复（items[{seen_hashes[hk]}] 已出现）")
+            else:
+                seen_hashes[hk] = i
+            # 候选 #38：q_norm_hash 必须对应当前 questions 的真实题干身份，
+            # 陈旧/伪造 hash 不得替换既有金标（golden_labels 是 G6b 的判定权威）。
+            row = conn.execute("SELECT 1 FROM questions WHERE q_norm_hash=? LIMIT 1",
+                               (hk,)).fetchone()
+            if row is None:
+                errs.append(f"items[{i}]: q_norm_hash={hk} 在当前 questions 中不存在"
+                            "（陈旧清单/身份不符）")
     if errs:
         return {"ok": False, "errors": errs[:10], "rejected": len(errs),
                 "note": "非法项整批拒绝（全部通过才写入）——修正后重跑"}
@@ -1183,25 +1208,14 @@ def merge(conn, drop_orphans: bool = False, hash_consistency: str = "fill",
                 "note": "G6 schema 合格率未过，staging 保留未 merge"}
     if g6["state"] == "SKIP":
         return {"ok": False, "gate": "SKIP", "note": "labels_staging 为空，无可 merge"}
-    g6b = g6b_golden(conn)
-    if g6b["state"] == "FAIL":
-        weak = ",".join(g6b["detail"].get("weak_topics") or []) or "-"
-        return {"ok": False, "gate": "G6b", "g6b": g6b["detail"],
-                "note": f"金标抽检准确率 <0.8（G6b FAIL，弱项主题：{weak}），"
-                        "staging 保留未 merge——--eval 看混淆矩阵，修标签或补金标后重试"}
-    from mianjing_kb.label_quality import assess as quality_assess
-    quality = quality_assess(conn, strict=strict_quality)
-    if not quality["ok"]:
-        return {"ok": False, "gate": "LABEL_QUALITY", "detail": quality["detail"],
-                "fails": quality["fails"],
-                "note": "批次质量门禁未过：碎片/待复核/其他主题超限，staging 保留未 merge——"
-                        "先清理碎片、--review-resolve 处理 pending，或修词表后重跑"}
-    quality_warn = quality["detail"].get("warns") if quality["state"] == "WARN" else []
+    # 候选 #60：孤儿检测/清理必须先于 G6b——否则被删掉的孤儿行仍在给准确率凑分，
+    # 删除后沿用的 PASS 对应的是另一个（更大的）样本集。
     orphans = conn.execute(
         "SELECT COUNT(*) FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
         "WHERE (q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash)) "
         "  AND s.review_state IS NOT 'disagree'"    # 评审 Important#1：分歧行不算孤儿
     ).fetchone()[0]
+    dropped_orphans = 0
     if orphans:
         orphan_qids = [r[0] for r in conn.execute(
             "SELECT s.qid FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
@@ -1219,6 +1233,32 @@ def merge(conn, drop_orphans: bool = False, hash_consistency: str = "fill",
             "  SELECT s.qid FROM labels_staging s LEFT JOIN questions q ON q.qid=s.qid "
             "  WHERE (q.qid IS NULL OR (s.q_norm_hash IS NOT NULL AND s.q_norm_hash != q.q_norm_hash)) "
             "    AND s.review_state IS NOT 'disagree')")
+        dropped_orphans = orphans
+        conn.commit()               # 清理先落盘：后续门禁失败也不把孤儿留在 staging
+        g6 = g6_label(conn)         # 样本集变了，G6/G6b 都按清理后的 staging 重判
+        if g6["state"] == "FAIL":
+            return {"ok": False, "gate": "FAIL", "fails": g6["fails"][:5],
+                    "dropped_orphans": dropped_orphans,
+                    "note": "孤儿清理后 G6 schema 合格率未过，staging 保留未 merge"}
+        if g6["state"] == "SKIP":
+            return {"ok": False, "gate": "SKIP", "dropped_orphans": dropped_orphans,
+                    "note": "孤儿清理后 labels_staging 为空，无可 merge"}
+    g6b = g6b_golden(conn)
+    if g6b["state"] == "FAIL":
+        weak = ",".join(g6b["detail"].get("weak_topics") or []) or "-"
+        return {"ok": False, "gate": "G6b", "g6b": g6b["detail"],
+                "dropped_orphans": dropped_orphans,
+                "note": f"金标抽检准确率 <0.8（G6b FAIL，弱项主题：{weak}），"
+                        "staging 保留未 merge——--eval 看混淆矩阵，修标签或补金标后重试"}
+    from mianjing_kb.label_quality import assess as quality_assess
+    quality = quality_assess(conn, strict=strict_quality)
+    if not quality["ok"]:
+        return {"ok": False, "gate": "LABEL_QUALITY", "detail": quality["detail"],
+                "fails": quality["fails"],
+                "dropped_orphans": dropped_orphans,
+                "note": "批次质量门禁未过：碎片/待复核/其他主题超限，staging 保留未 merge——"
+                        "先清理碎片、--review-resolve 处理 pending，或修词表后重跑"}
+    quality_warn = quality["detail"].get("warns") if quality["state"] == "WARN" else []
     n = conn.execute("SELECT COUNT(*) FROM labels_staging "
                      "WHERE review_state IS NOT 'disagree' "
                      "  AND review_state IS NOT 'pending'").fetchone()[0]

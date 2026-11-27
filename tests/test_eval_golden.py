@@ -33,8 +33,7 @@ def test_ndcg_prefers_higher_grade_and_higher_rank():
     assert R._ndcg([], rel, 10) == 0.0
 
 
-def test_evaluate_golden_counts_hits_and_no_answer_false_positive(tmp_path):
-    db = tmp_path / "mini.db"
+def _mini_db(db):
     con = sqlite3.connect(str(db))
     con.row_factory = sqlite3.Row
     con.executescript("""
@@ -52,6 +51,11 @@ INSERT INTO questions_fts(rowid, q_text, a_text) VALUES (1, 'MySQL 索引为什�
 """)
     con.commit()
     con.close()
+
+
+def test_evaluate_golden_counts_hits_and_no_answer_false_positive(tmp_path):
+    db = tmp_path / "mini.db"
+    _mini_db(db)
     queries = [
         {"query": "MySQL 索引", "topic": "MySQL", "category": "exact",
          "expect_q_keys": ["d1:q1"], "relevance": [{"q_key": "d1:q1", "grade": 3}],
@@ -63,3 +67,15 @@ INSERT INTO questions_fts(rowid, q_text, a_text) VALUES (1, 'MySQL 索引为什�
     assert out["recall_at_5"] == 1.0 and out["mrr_at_10"] == 1.0
     assert out["no_answer_false_positive_rate"] == 0.0
     assert out["per_topic_recall_at_5"]["MySQL"]["recall_at_5"] == 1.0
+
+
+def test_reviewed_requires_boolean_true(tmp_path):
+    """#22：非布尔 truthy 值（"yes"/1）不得被算作已人工审核（G9 前提）。"""
+    db = tmp_path / "mini.db"
+    _mini_db(db)
+    rows = [{"query": "MySQL 索引", "category": "exact",
+             "expect_q_keys": ["d1:q1"], "relevance": [{"q_key": "d1:q1", "grade": 3}],
+             "reviewed": v} for v in ("yes", 1, True, False, None)]
+    out = R.evaluate_golden(db, rows, k=10, mode="kw")
+    assert out["reviewed_count"] == 1           # 只有布尔 True 那条
+    assert [d["reviewed"] for d in out["details"]] == [False, False, True, False, False]

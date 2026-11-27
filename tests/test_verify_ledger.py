@@ -430,10 +430,18 @@ def _golden_db(tmp_path):
 
 
 def _pair(conn, i: int, gold: str = "JVM", pred=None):
-    """插一对金标 + staging 行（q_norm_hash=gh{i}）；pred=None 表示标注与金标一致。"""
+    """插一对金标 + staging 行（q_norm_hash=gh{i}）；pred=None 表示标注与金标一致。
+
+    候选 #60 后 G6b 只计 merge 合格样本：staging 行必须有当前 questions 行
+    （qid + q_norm_hash 都对得上），否则不算抽检样本。
+    """
     h = f"gh{i}"
     conn.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
                  "VALUES (?,?,?, 'now')", (h, f"题{i}", gold))
+    conn.execute("INSERT INTO questions(qid, doc_hash, seq, q_text, q_norm, simhash, "
+                 "span_start, span_end, q_norm_hash, extracted_at) "
+                 "VALUES(?,?,?,?,?,?,?,?,?, 'now')",
+                 (1000 + i, "d" * 16, i, f"题{i}", f"题{i}", 0, 0, 1, h))
     conn.execute("INSERT INTO labels_staging(qid, q_norm_hash, topic, qtype, difficulty, "
                  "tags, provider, model, redacted, latency_ms, tokens, labeled_at) "
                  "VALUES (?,?,?,?,?,?,?,?,?,?,?, 'now')",
@@ -527,6 +535,43 @@ def test_g6b_pass_and_fail(tmp_path):
     assert g2["state"] == "FAIL" and g2["detail"]["topic_acc"] == 0.76
     assert g2["detail"]["weak_topics"] == ["JVM"]
     assert g2["detail"]["matrix"]["JVM"] == {"数据库": 12, "JVM": 38}
+    conn.close()
+
+
+def test_g6b_excludes_identity_unbound_staging_rows(tmp_path):
+    """#60：孤儿 staging 行（qid 不在 questions / hash 不符 / pending）不得给准确率凑分。
+
+    50 对合格样本准确率 0.70（应 FAIL），25 条全对的孤儿行不能把它抬过 0.8。
+    """
+    conn = _golden_db(tmp_path)
+    for i in range(50):
+        _pair(conn, i, pred="JVM" if i < 35 else "MySQL")
+    for i in range(50, 75):                     # 孤儿：只有 staging + golden，无 questions
+        h = f"gh{i}"
+        conn.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                     "VALUES (?,?,?, 'now')", (h, f"题{i}", "JVM"))
+        conn.execute("INSERT INTO labels_staging(qid, q_norm_hash, topic, qtype, difficulty, "
+                     "tags, provider, model, redacted, latency_ms, tokens, labeled_at) "
+                     "VALUES (?,?,?,?,?,?,?,?,?,?,?, 'now')",
+                     (1000 + i, h, "JVM", "八股", 3, "[]", "local", "m", 0, 1, 10))
+    conn.commit()
+    g = vl.g6b_golden(conn)
+    assert g["detail"]["matched"] == 50         # 孤儿行不计
+    assert g["detail"]["topic_acc"] == 0.7
+    assert g["state"] == "FAIL"
+    conn.close()
+
+
+def test_g6b_excludes_pending_and_disagree_rows(tmp_path):
+    """#60：pending/disagree 行不参与 merge，也不得参与 G6b 评分。"""
+    conn = _golden_db(tmp_path)
+    for i in range(50):
+        _pair(conn, i)
+    conn.execute("UPDATE labels_staging SET review_state='pending' WHERE qid=1000")
+    conn.execute("UPDATE labels_staging SET review_state='disagree' WHERE qid=1001")
+    conn.commit()
+    g = vl.g6b_golden(conn)
+    assert g["detail"]["matched"] == 48
     conn.close()
 
 
@@ -690,3 +735,22 @@ def test_g1_duplicate_of_target_must_exist(mini_env):
     g2 = vl.g1_coverage(mini_env["kb"], out, {rel: "duplicate_of"}, bad)
     assert g2["state"] == "FAIL"
     assert any(f.get("target") == "02-Java进阶/不存在.pdf" for f in g2["fails"])
+
+
+def test_g1_duplicate_of_self_and_cycle_are_rejected(mini_env):
+    """#59：自指与循环 duplicate_of 豁免不得放行——没有覆盖证据的互相担保等于没担保。"""
+    out = mini_env["out"]
+    out.execute("DELETE FROM questions")        # 甲乙都无题：只能靠豁免
+    out.commit()
+    rel_a, rel_b = "02-Java进阶/甲.pdf", "02-Java进阶/乙.pdf"
+    # 自指
+    self_ref = {rel_a: {"rel": rel_a, "reason": "duplicate_of", "target": rel_a}}
+    g = vl.g1_coverage(mini_env["kb"], out, {rel_a: "duplicate_of"}, self_ref)
+    assert any(f.get("rel") == rel_a and "自身" in f.get("suggest", "") for f in g["fails"])
+    # A→B→A 循环（两条都没有真实覆盖）
+    cyc = {rel_a: {"rel": rel_a, "reason": "duplicate_of", "target": rel_b},
+           rel_b: {"rel": rel_b, "reason": "duplicate_of", "target": rel_a}}
+    g2 = vl.g1_coverage(mini_env["kb"], out,
+                        {rel_a: "duplicate_of", rel_b: "duplicate_of"}, cyc)
+    assert g2["state"] == "FAIL"
+    assert sum(1 for f in g2["fails"] if "循环" in f.get("suggest", "")) == 2

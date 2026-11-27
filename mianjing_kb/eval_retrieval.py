@@ -58,23 +58,25 @@ def evaluate(db: Path, queries: list[dict], k: int, mode: str) -> dict:
     con = S._con(db)
     fn = {"kw": S.keyword_search, "vec": S.vector_search, "hybrid": S.hybrid_search}[mode]
     details, hits, strict_hits = [], 0, 0
-    for item in queries:
-        q = item["q"]
-        expects = item.get("expect_any") or []
-        ids = item.get("expect_ids") or []
-        rows = fn(con, q, **_search_kwargs(item, k))
-        if expects:
-            ok = any(hit(r, expects) for r in rows)
-        elif ids:
-            got = {str(r.get("doc_hash") or "") for r in rows}
-            ok = any(i in got for i in ids)
-        else:
-            ok = bool(rows)     # 没给期望时只记"有没有返回"，用于冒烟，不代表质量
-        hits += 1 if ok else 0
-        if ids:
-            strict_hits += 1 if any(i in {str(r.get("doc_hash") or "") for r in rows} for i in ids) else 0
-        details.append({"q": q, "ok": ok, "top": (rows[0]["q_text"] if rows else None)})
-    con.close()
+    try:
+        for item in queries:
+            q = item["q"]
+            expects = item.get("expect_any") or []
+            ids = item.get("expect_ids") or []
+            rows = fn(con, q, **_search_kwargs(item, k))
+            if expects:
+                ok = any(hit(r, expects) for r in rows)
+            elif ids:
+                got = {str(r.get("doc_hash") or "") for r in rows}
+                ok = any(i in got for i in ids)
+            else:
+                ok = bool(rows)     # 没给期望时只记"有没有返回"，用于冒烟，不代表质量
+            hits += 1 if ok else 0
+            if ids:
+                strict_hits += 1 if any(i in {str(r.get("doc_hash") or "") for r in rows} for i in ids) else 0
+            details.append({"q": q, "ok": ok, "top": (rows[0]["q_text"] if rows else None)})
+    finally:
+        con.close()                 # 异常路径也要释放连接（候选 #23 加固项）
     out = {"queries": len(queries), "k": k, "mode": mode,
            "hit_at_k": round(hits / len(queries), 4), "details": details}
     out["recall_at_k"] = out["hit_at_k"]      # 兼容旧字段名；只有给全相关项时才是严格 recall
@@ -130,7 +132,8 @@ def _one_query(con, item: dict, k: int, mode: str) -> dict:
     ndcg10 = _ndcg(ids, rel, 10) if relevant else None
     return {
         "query": q, "topic": item.get("topic"), "category": item.get("category"),
-        "reviewed": item.get("reviewed"),
+        # #22：只有布尔 True 才算已人工审核；"yes"/1 等 truthy 值不得满足 G9 前提
+        "reviewed": item.get("reviewed") is True,
         "expected": sorted(relevant), "top_q_keys": keys[:10],
         "recall_at_5": recall5, "mrr_at_10": mrr10, "ndcg_at_10": ndcg10,
         "no_answer_false_positive": (bool(rows) if not relevant else None),
@@ -140,8 +143,10 @@ def _one_query(con, item: dict, k: int, mode: str) -> dict:
 
 def evaluate_golden(db: Path, queries: list[dict], k: int = 10, mode: str = "kw") -> dict:
     con = S._con(db)
-    details = [_one_query(con, item, k, mode) for item in queries]
-    con.close()
+    try:
+        details = [_one_query(con, item, k, mode) for item in queries]
+    finally:
+        con.close()
     answered = [d for d in details if d["recall_at_5"] is not None]
     no_answer = [d for d in details if d["no_answer_false_positive"] is not None]
     recalls = [d["recall_at_5"] for d in answered]
@@ -158,7 +163,7 @@ def evaluate_golden(db: Path, queries: list[dict], k: int = 10, mode: str = "kw"
         "no_answer_false_positive_rate": mean(
             [1.0 if d["no_answer_false_positive"] else 0.0 for d in no_answer]),
         "per_topic_recall_at_5": per_topic,
-        "reviewed_count": sum(1 for d in details if d.get("reviewed")),
+        "reviewed_count": sum(1 for d in details if d.get("reviewed") is True),
         "details": details,
     }
 

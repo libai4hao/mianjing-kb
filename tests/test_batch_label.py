@@ -629,9 +629,50 @@ def test_golden_load_rejects_invalid_whole_batch(mini_db, tmp_path):
     assert mini_db.execute("SELECT COUNT(*) FROM golden_labels").fetchone()[0] == 0
 
 
+def test_golden_load_rejects_stale_hash_and_duplicates(mini_db, tmp_path):
+    """#38：hash 不在当前 questions / 同批重复 hash → 整批拒绝，既有金标不被改写。"""
+    _stage(mini_db, 1, "JVM")
+    todo = {"items": [{"q_norm_hash": "hash1", "topic_gold": "Java基础"}]}
+    p = tmp_path / "ok.json"
+    p.write_text(json.dumps(todo, ensure_ascii=False), encoding="utf-8")
+    assert bl.golden_load(mini_db, p)["ok"]
+    # 陈旧 hash（questions 里没有）想替换既有金标
+    stale = {"items": [{"q_norm_hash": "hash1", "topic_gold": "Redis"},
+                       {"q_norm_hash": "ghost", "topic_gold": "JVM"}]}
+    p2 = tmp_path / "stale.json"
+    p2.write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+    out = bl.golden_load(mini_db, p2)
+    assert not out["ok"]
+    assert any("不存在" in e for e in out["errors"])
+    assert mini_db.execute("SELECT topic_gold FROM golden_labels WHERE q_norm_hash='hash1'"
+                           ).fetchone()[0] == "Java基础"
+    # 同批重复 hash：不再 last-write-wins
+    dup = {"items": [{"q_norm_hash": "hash1", "topic_gold": "Redis"},
+                     {"q_norm_hash": "hash1", "topic_gold": "MySQL"}]}
+    p3 = tmp_path / "dup.json"
+    p3.write_text(json.dumps(dup, ensure_ascii=False), encoding="utf-8")
+    out3 = bl.golden_load(mini_db, p3)
+    assert not out3["ok"] and any("重复" in e for e in out3["errors"])
+    assert mini_db.execute("SELECT topic_gold FROM golden_labels WHERE q_norm_hash='hash1'"
+                           ).fetchone()[0] == "Java基础"
+
+
+def test_golden_load_rejects_malformed_scalar_fields(mini_db, tmp_path):
+    """#38 加固：非对象项 / 非字符串 hash / bool difficulty 优雅整批拒绝，不抛异常。"""
+    todo = {"items": ["not-an-object",
+                      {"q_norm_hash": 123, "topic_gold": "JVM"},
+                      {"q_norm_hash": "hash1", "topic_gold": "JVM", "difficulty_gold": True}]}
+    p = tmp_path / "bad-shape.json"
+    p.write_text(json.dumps(todo, ensure_ascii=False), encoding="utf-8")
+    out = bl.golden_load(mini_db, p)
+    assert not out["ok"] and out["rejected"] == 3
+    assert mini_db.execute("SELECT COUNT(*) FROM golden_labels").fetchone()[0] == 0
+
+
 def test_merge_rejects_on_g6b_fail(mini_db):
     """批次二 G3：金标抽检 <0.8 → merge 拒绝（staging 保留），提示看弱项。"""
     for i in range(50):
+        _add_question(mini_db, 100 + i, f"金标题{i}")     # G6b 只计当前题目身份（#60）
         _stage(mini_db, 100 + i, "JVM")                # q_norm_hash=hash{100+i}
         mini_db.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
                         "VALUES (?,?,?, 'now')", (f"hash{100 + i}", "题", "数据库"))
@@ -645,6 +686,7 @@ def test_merge_rejects_on_g6b_fail(mini_db):
 def test_eval_golden_writes_report(mini_db):
     """批次二 G3 --eval：调 g6b_golden 评准确率 → build/label_eval.json。"""
     for i in range(50):
+        _add_question(mini_db, 100 + i, f"金标题{i}")     # G6b 只计当前题目身份（#60）
         _stage(mini_db, 100 + i, "JVM")
         mini_db.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
                         "VALUES (?,?,?, 'now')", (f"hash{100 + i}", "题", "JVM"))
@@ -1000,6 +1042,32 @@ def test_todo_predicate_single_source(mini_db, monkeypatch):
     assert bl.health(CFG, mini_db)["todo"] == 4                # 1/2/3 空 + 9 未分类
 
 # ---- 评审修复（2026-11-19）：Important#1/#2/#3/#4 + Minor#2/#7 ----
+
+def test_merge_drop_orphans_recomputes_g6b_after_cleanup(mini_db):
+    """#60：孤儿删除后必须按清理后的样本重判 G6b——全对的孤儿行不得替坏标签放行。
+
+    50 对合格样本 acc=0.70（FAIL）；25 条全对孤儿行删除前后都不该把结论抬成 PASS。
+    """
+    for i in range(50):
+        qid = 100 + i
+        _add_question(mini_db, qid, f"题{qid}")
+        _stage(mini_db, qid, "JVM" if i < 35 else "MySQL")
+        mini_db.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                        "VALUES (?,?,?, 'now')", (f"hash{qid}", "题", "JVM"))
+    for i in range(25):                          # 孤儿：qid 无对应 questions 行，预测全对
+        qid = 900 + i
+        _stage(mini_db, qid, "JVM")
+        mini_db.execute("INSERT INTO golden_labels(q_norm_hash, q_text, topic_gold, created_at) "
+                        "VALUES (?,?,?, 'now')", (f"hash{qid}", "题", "JVM"))
+    mini_db.commit()
+    out = bl.merge(mini_db, drop_orphans=True)
+    assert not out["ok"] and out["gate"] == "G6b"
+    assert out["dropped_orphans"] == 25
+    assert out["g6b"]["matched"] == 50 and out["g6b"]["topic_acc"] == 0.7
+    # 本批权威表未被更新（qid=4 夹具自带 MySQL，不算）
+    assert mini_db.execute("SELECT COUNT(*) FROM questions WHERE topic='MySQL' "
+                           "AND qid>=100").fetchone()[0] == 0
+
 
 def test_merge_drop_orphans_spares_disagree_rows(mini_db):
     """Important#1：--drop-orphans 不得静默删分歧行——disagree 孤儿行保留待人工终审。"""
