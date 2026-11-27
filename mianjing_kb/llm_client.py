@@ -400,10 +400,26 @@ def _rate_wait(cfg: dict) -> None:
         time.sleep(wait)
 
 
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """拒绝自动跟随 3xx。
+
+    urllib 默认会跟随重定向；307/308 连 POST 体一起重发、并带上原 Authorization 头。
+    出口地址一旦被改写，`allow_content_upload` 的端点授权就失效了，凭据也可能被转到
+    另一台主机。这里直接拒绝，交给调用方快速失败。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+_OPENER = urllib.request.build_opener(_RefuseRedirect())
+
+
 def _post(cfg: dict, payload: dict) -> tuple[int, dict]:
     """POST /chat/completions。返回 (status, resp)；网络层异常归一为 (0, {"error": ...})。
 
     网络出口处的最后一道闸：非回环地址且没有内容外发授权，直接拒绝，不发一个字节。
+    3xx 不跟随：重定向等于换出口，授权与凭据都不再成立。
     """
     if not is_local_endpoint(cfg["base"]) and not cfg.get("allow_content_upload", False):
         raise ConfigError(
@@ -416,9 +432,13 @@ def _post(cfg: dict, payload: dict) -> tuple[int, dict]:
                  **({"Authorization": f"Bearer {cfg['key']}"} if cfg["key"] else {})},
         method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=cfg["timeout"]) as resp:
+        with _OPENER.open(req, timeout=cfg["timeout"]) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8", "replace") or "{}")
     except urllib.error.HTTPError as e:
+        if 300 <= e.code < 400:
+            loc = (e.headers.get("Location", "") if e.headers else "") or "未知地址"
+            return e.code, {"error": scrub_secret(
+                f"HTTP {e.code} 重定向被拒绝（禁止把请求与凭据转发到 {loc}）", cfg)}
         try:
             body = json.loads(e.read().decode("utf-8", "replace"))
         except Exception:  # noqa: BLE001

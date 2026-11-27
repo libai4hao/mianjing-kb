@@ -162,3 +162,25 @@ def test_local_provider_skips_json():
     r = pp.probe("local", "qwen3-4b", key="", skip_json=False)
     # local 的 json_mode=unsupported，应为 skipped；无 key 也允许（非 local 才要求 key）
     assert r.get("p4_json", {}).get("skipped") is True
+
+
+# ---------- 6. 输出脱敏 ----------
+def test_scrub_masks_key_anywhere():
+    assert pp.scrub("Bearer sk-abc / sk-abc", "sk-abc") == "Bearer *** / ***"
+    assert pp.scrub("no secret here", "") == "no secret here"
+
+
+def test_main_masks_key_in_printed_json(monkeypatch, capsys):
+    """provider 错误体回显 key 时，探针输出不能原样打印。"""
+
+    def fake_probe(provider, model, key=None, timeout=30.0, skip_json=False):
+        return {"provider": provider,
+                "p2_text": {"error": f"401 invalid key {key}"},
+                "verdict": {"可用": False}}
+
+    monkeypatch.setattr(pp, "probe", fake_probe)
+    assert pp.main(["--provider", "deepseek", "--model", "m", "--key", "sk-secret-123"]) == 1
+    out = capsys.readouterr().out
+    assert "sk-secret-123" not in out
+    assert "***" in out
+

@@ -1,16 +1,44 @@
 # -*- coding: utf-8 -*-
 """llm_client 离线测试：配置路由 / 缺 key 指引 / 重试退避 / JSON 宽松解析 / 脱敏。"""
 
+import urllib.error
+import urllib.request
+
 import pytest
 from mianjing_kb.llm_client import (ConfigError, chat, chat_json, redact,  # noqa: E402
                         resolve_config)
+import mianjing_kb.llm_client as lc  # noqa: E402
 
 
-# ---------------- 配置路由 ----------------
+# ---------------- 出口重定向 ----------------
 def test_config_local_defaults():
     cfg = resolve_config(env={})
     assert cfg["provider"] == "local" and cfg["base"].endswith("/v1")
     assert cfg["concurrency"] == 1 and cfg["json_mode"] is False
+
+
+class _FakeRedirectingOpener:
+    def open(self, req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 302, "Found",
+                                     {"Location": "https://evil.example/v1"}, None)
+
+
+def test_redirect_handler_never_follows():
+    """urllib 默认跟随重定向会把 POST 体与 Authorization 一起转给新主机。"""
+    handler = lc._RefuseRedirect()
+    req = urllib.request.Request("https://a.example/v1/chat/completions",
+                                 data=b"{}", method="POST")
+    assert handler.redirect_request(req, None, 307, "Temporary Redirect",
+                                    {"Location": "https://b.example"}, "https://b.example") is None
+
+
+def test_post_reports_refused_redirect_without_leaking_key(monkeypatch):
+    monkeypatch.setattr(lc, "_OPENER", _FakeRedirectingOpener())
+    cfg = {"base": "http://127.0.0.1:11434/v1", "key": "sk-secret-123", "timeout": 5.0}
+    st, body = lc._post(cfg, {"model": "m"})
+    assert st == 302
+    assert "重定向被拒绝" in body["error"]
+    assert "sk-secret-123" not in body["error"]
 
 
 def test_config_online_requires_key_with_guidance():

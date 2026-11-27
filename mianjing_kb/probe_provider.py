@@ -123,6 +123,13 @@ def resolve_key(cfg: dict, key: str | None) -> str:
     return os.environ.get(env, "") if env else ""
 
 
+def scrub(text: str, key: str) -> str:
+    """把 key 从任意输出里抹掉：provider 的错误体会回显 Authorization 前缀/整串。"""
+    if key and text:
+        return str(text).replace(key, "***")
+    return str(text or "")
+
+
 # ---------------- 网络层（单测里被 monkeypatch 掉） ----------------
 def post(url: str, payload: dict | None, key: str, timeout: float = 30.0) -> tuple[int, dict]:
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -134,14 +141,15 @@ def post(url: str, payload: dict | None, key: str, timeout: float = 30.0) -> tup
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8", "replace") or "{}")
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace")
+        # 错误体先脱敏再解析，避免 key/cookie 这类回显被原样打印到终端
+        body = scrub(e.read().decode("utf-8", "replace"), key)
         try:
             parsed = json.loads(body)
         except json.JSONDecodeError:
             parsed = {"raw": body}
         return e.code, parsed
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return 0, {"error": f"{type(e).__name__}: {e}"}
+        return 0, {"error": scrub(f"{type(e).__name__}: {e}", key)}
 
 
 def _content(resp: dict) -> str:
@@ -187,7 +195,7 @@ def probe(provider: str, model: str, key: str | None = None,
     tin, tout = _usage(resp)
     out["p2_text"] = {"status": st, "ok": st == 200 and bool(text), "latency_s": lat,
                       "content_head": text[:30], "tokens": [tin, tout],
-                      "error": resp.get("error") or resp.get("message") or ""}
+                      "error": scrub(resp.get("error") or resp.get("message") or "", k)}
 
     # P3 system 字段是否被遵守（回复里必须出现暗号）
     user_msg = "请只输出你收到的系统提示里的暗号，不要解释。"
@@ -233,7 +241,9 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
     r = probe(args.provider, args.model, args.key, args.timeout, args.skip_json)
-    txt = json.dumps(r, ensure_ascii=False, indent=1)
+    # 最后一道：整份 JSON 里任何位置出现的 key 都抹掉（provider 可能把凭据回显进错误体）
+    key = resolve_key(PROVIDERS[args.provider], args.key)
+    txt = scrub(json.dumps(r, ensure_ascii=False, indent=1), key)
     print(txt)
     if args.out:
         from pathlib import Path
