@@ -530,6 +530,18 @@ def _ensure_answer_source(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE questions ADD COLUMN answered_at TEXT")
 
 
+def _ensure_gate_md_hash(conn: sqlite3.Connection) -> None:
+    """020：门禁结论绑定 md 内容指纹 —— gate_results.md_hash（审计候选 #27）。
+
+    pass 只对被判定时的那份 md 字节有效；extract 前置过滤按当前 md 的 sha256
+    比对，内容变了（OCR 合并 / 懒图重写 / 手改）而门禁没重跑 → 按陈旧结论拒抽。
+    历史行 md_hash 为 NULL：无法证明新鲜度，--require-gate 时同样按陈旧处理，
+    默认模式保持旧行为（有 pass 即放行），由操作者重跑 gate --audit 补齐。
+    """
+    if not _column_exists(conn, "gate_results", "md_hash"):
+        conn.execute("ALTER TABLE gate_results ADD COLUMN md_hash TEXT")
+
+
 MIGRATIONS = [
     ("001_init", _init_schema),
     ("002_parent_dir", _ensure_parent_dir),
@@ -550,6 +562,7 @@ MIGRATIONS = [
     ("017_label_facts_hardening", _ensure_label_facts_hardening),
     ("018_answer_state", _ensure_answer_state),
     ("019_answer_source", _ensure_answer_source),
+    ("020_gate_md_hash", _ensure_gate_md_hash),
 ]
 
 

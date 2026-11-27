@@ -42,6 +42,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 import unicodedata
 from datetime import datetime
@@ -249,8 +250,50 @@ def _doc_hash_for(rel: str, e: dict) -> str | None:
     return hashing.sha256_file(src)[:16]
 
 
+def _source_identity() -> dict[str, str] | None:
+    """doc_hash → 台账 rel（#28：registry 身份必须与 source_documents 对账）。
+
+    台账库不存在/打不开时返回 None（跳过对账，保持独立扫描语义）。
+    """
+    try:
+        conn = db.connect(config.DB_PATH, create=False, readonly=True)
+    except (FileNotFoundError, sqlite3.Error, OSError):
+        return None
+    try:
+        out = {}
+        for r in conn.execute("SELECT doc_hash, dir_path, file_name FROM source_documents"):
+            rel = f"{r['dir_path']}/{r['file_name']}" if r["dir_path"] else r["file_name"]
+            out[r["doc_hash"]] = _rel_key(rel)
+        return out
+    finally:
+        conn.close()
+
+
+def _reconcile_doc_hash(rel: str, doc_hash: str | None,
+                        src_ident: dict[str, str] | None) -> tuple[str | None, bool]:
+    """registry hash 与台账源行对账；指向别的源记录时弃用并按源件字节重算。
+
+    只在能**证明挂错**（hash 在台账里、但对应的是别的 rel）时才纠正；
+    台账里没有该 hash（未入库的新源/独立扫描）保持原行为，不误伤 hash8 变体绑定。
+    """
+    if not doc_hash or src_ident is None:
+        return doc_hash, False
+    if src_ident.get(doc_hash, _rel_key(rel)) == _rel_key(rel):
+        return doc_hash, False
+    fixed = _doc_hash_for(rel, {})
+    if fixed and src_ident.get(fixed) != _rel_key(rel):
+        fixed = None
+    return fixed, True
+
+
 def run_audit() -> dict:
-    """生产口径：convert_log ok 件 → 逐件找产物 md → 三态判定 → rows + collisions。"""
+    """生产口径：convert_log ok 件 → 逐件找产物 md → 三态判定 → rows + collisions。
+
+    审计候选加固（2026-11-27，docs/63 §3 P1-A）：
+    - #28 registry doc_hash 与台账源行对账：指向别的源记录时弃用，改按源件字节重算；
+    - #27 每行记录 md_hash（sha256），extract --require-gate 按它拒绝陈旧 pass；
+    - #26 真覆盖冲突的源一律降 fail（fail-closed），不再发布可抽题的 pass。
+    """
     build = Path(config.BUILD_DIR)
     reg = json.loads((build / "registry.json").read_text(encoding="utf-8"))
     log = json.loads((build / "convert_log.json").read_text(encoding="utf-8"))
@@ -266,14 +309,18 @@ def run_audit() -> dict:
         seen.add(k)
         ok.append(l)
 
+    src_ident = _source_identity()
     idx = md_index()
-    rows, skipped_reg = [], 0
+    rows, skipped_reg, identity_mismatch = [], 0, 0
     for l in ok:
         e = by_rel.get(_rel_key(l["rel"]))
         if not e:
             skipped_reg += 1
             continue
         doc_hash = _doc_hash_for(l["rel"], e)
+        doc_hash, mismatch = _reconcile_doc_hash(l["rel"], doc_hash, src_ident)
+        if mismatch:
+            identity_mismatch += 1
         probe = dict(e)
         probe["doc_hash"] = doc_hash
         canonical_path = md_path_for(probe)
@@ -283,18 +330,30 @@ def run_audit() -> dict:
         if p is None:
             p = canonical_path
             rows.append(dict(rel=l["rel"], md=str(p), doc_hash=doc_hash, exists=False,
-                             state="fail", reason="产物缺失", drift=False))
+                             md_hash=None, state="fail", reason="产物缺失", drift=False))
             continue
         raw, enc = read_text_info(p)
         m = metrics(raw)
         state, why = judge(m)
+        try:
+            md_hash = hashing.sha256_file(p)
+        except OSError:
+            md_hash = None
         rows.append(dict(rel=l["rel"], md=str(p), doc_hash=doc_hash, exists=True, drift=drift,
-                         state=state, reason=why, chars=m["chars"], cjk=round(m["cjk"], 4),
-                         latin=round(m["latin"], 4), bad=round(m["bad"], 4),
-                         fixed=m["fixed"], nfkc_changed=m["nfkc_changed"],
+                         md_hash=md_hash, state=state, reason=why, chars=m["chars"],
+                         cjk=round(m["cjk"], 4), latin=round(m["latin"], 4),
+                         bad=round(m["bad"], 4), fixed=m["fixed"], nfkc_changed=m["nfkc_changed"],
                          encoding=enc, head=head_of(raw)))
 
     colls = collisions_of(rows)
+    # #26 fail-closed：真覆盖（不同源写同一 md，内容已丢）涉及的所有源降 fail，
+    # 无论正文指标多好都不发布 pass —— 被覆盖源的正文根本不在盘上。
+    real_keys = {path_key(c["md"]) for c in colls if c["kind"].startswith("真")}
+    for r in rows:
+        if r.get("exists") and path_key(r["md"]) in real_keys:
+            r["state"] = "fail"
+            r["reason"] = "真覆盖冲突：同一md被多个不同源写入"
+            r["collision"] = True
     sp = [r for r in rows if r["state"] == "pass"]
     sr = [r for r in rows if r["state"] == "review"]
     sf = [r for r in rows if r["state"] == "fail"]
@@ -307,6 +366,7 @@ def run_audit() -> dict:
                         abnormal_rate=round(rate, 4), collisions=len(colls),
                         real_collisions=real, drift=drift,
                         skipped_no_registry=skipped_reg, skipped_duplicate_log=dup_log,
+                        identity_mismatch=identity_mismatch,
                         missing=sum(1 for r in rows if not r.get("exists"))),
         "thresholds": dict(bad=TH_BAD, cjk=TH_CJK, min_chars=TH_MIN, nfkc=True),
         "rows": rows,
@@ -477,8 +537,12 @@ def scan_dir(md_dir: Path) -> dict:
         raw, enc = read_text_info(p)
         m = metrics(raw)
         state, why = judge(m)
+        try:
+            md_hash = hashing.sha256_file(p)
+        except OSError:
+            md_hash = None
         rows.append(dict(rel=p.relative_to(md_dir).as_posix(), md=str(p), doc_hash=None,
-                         exists=True, drift=False, state=state, reason=why,
+                         exists=True, drift=False, md_hash=md_hash, state=state, reason=why,
                          chars=m["chars"], cjk=round(m["cjk"], 4), latin=round(m["latin"], 4),
                          bad=round(m["bad"], 4), fixed=m["fixed"], nfkc_changed=m["nfkc_changed"],
                          encoding=enc, head=head_of(raw)))
@@ -538,8 +602,9 @@ def _ledger_verdict(r: dict) -> str:
 
 
 def _write_audit_ledger(conn, rows: list[dict]) -> None:
-    """--audit 行写 gate_results（带 doc_hash），并把三态结论回写 source_documents。"""
+    """--audit 行写 gate_results（带 doc_hash + md_hash），并把三态结论回写 source_documents。"""
     now = datetime.now().strftime(NOW_FMT)
+    has_md_hash = any(r[1] == "md_hash" for r in conn.execute("PRAGMA table_info(gate_results)"))
     current_hashes, current_mds = set(), set()
     for r in rows:
         dh = r.get("doc_hash")
@@ -554,12 +619,21 @@ def _write_audit_ledger(conn, rows: list[dict]) -> None:
         vis = int(r.get("chars") or 0)
         cjk_ratio = float(r.get("cjk") or 0)
         bad = float(r.get("bad") or 0)
-        conn.execute(
-            "INSERT OR REPLACE INTO gate_results "
-            "(md_path, doc_hash, visible_chars, cjk_chars, cjk_ratio, garbled_ratio, "
-            "valid_ratio, verdict, checked_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (r["md"], dh, vis, round(cjk_ratio * vis), round(cjk_ratio, 4),
-             round(bad, 4), round(max(0.0, 1.0 - bad), 4), _ledger_verdict(r), now))
+        if has_md_hash:
+            conn.execute(
+                "INSERT OR REPLACE INTO gate_results "
+                "(md_path, doc_hash, visible_chars, cjk_chars, cjk_ratio, garbled_ratio, "
+                "valid_ratio, verdict, checked_at, md_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (r["md"], dh, vis, round(cjk_ratio * vis), round(cjk_ratio, 4),
+                 round(bad, 4), round(max(0.0, 1.0 - bad), 4), _ledger_verdict(r), now,
+                 r.get("md_hash")))
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO gate_results "
+                "(md_path, doc_hash, visible_chars, cjk_chars, cjk_ratio, garbled_ratio, "
+                "valid_ratio, verdict, checked_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (r["md"], dh, vis, round(cjk_ratio * vis), round(cjk_ratio, 4),
+                 round(bad, 4), round(max(0.0, 1.0 - bad), 4), _ledger_verdict(r), now))
 
     # 只清理本次 audit 覆盖到的 doc_hash 的旧路径，避免误删 --md-dir 台账
     for old in conn.execute("SELECT md_path, doc_hash FROM gate_results "

@@ -202,7 +202,7 @@ def test_gate_and_textmetrics_definitions_do_not_drift():
 
 def test_extract_gate_filter_blocks_review_and_fail():
     from mianjing_kb.extract import _filter_by_gate
-    statuses = ({"a": "garbled"}, {"b": "low_cjk", "c": "pass"})
+    statuses = ({"a": "garbled"}, {"b": "low_cjk", "c": "pass"}, {})
     kept, skipped = _filter_by_gate([("a", "a"), ("b", "b"), ("c", "c"), ("d", "d")],
                                     statuses, require_gate=False)
     assert [x[0] for x in kept] == ["c", "d"]
@@ -210,6 +210,114 @@ def test_extract_gate_filter_blocks_review_and_fail():
     kept, skipped = _filter_by_gate([("a", "a"), ("d", "d")], statuses, require_gate=True)
     assert kept == []
     assert skipped == {"garbled": 1, "ungated": 1}
+
+
+def test_require_gate_rejects_stale_pass_after_md_change(tmp_path):
+    """#27：pass 只对判定时那份 md 字节有效；内容变了而门禁没重跑 → stale_pass。"""
+    from mianjing_kb.extract import _filter_by_gate
+    from mianjing_kb.kb import hashing
+
+    md = tmp_path / "a.md"
+    md.write_text("判定时的内容", encoding="utf-8")
+    bound = hashing.sha256_file(md)
+    statuses = ({"a": "pass"}, {}, {"a": bound})
+    kept, skipped = _filter_by_gate([("a", md)], statuses, require_gate=True)
+    assert [x[0] for x in kept] == ["a"] and skipped == {}
+    md.write_text("被 OCR/手改后的新内容", encoding="utf-8")
+    kept, skipped = _filter_by_gate([("a", md)], statuses, require_gate=True)
+    assert kept == [] and skipped == {"stale_pass": 1}
+    # 历史行无 md_hash：--require-gate 下同样按陈旧处理；默认模式保持旧行为
+    legacy = ({"a": "pass"}, {}, {})
+    kept, skipped = _filter_by_gate([("a", md)], legacy, require_gate=True)
+    assert kept == [] and skipped == {"stale_pass": 1}
+    kept, skipped = _filter_by_gate([("a", md)], legacy, require_gate=False)
+    assert [x[0] for x in kept] == ["a"]
+
+
+def test_audit_records_md_hash(tmp_path, monkeypatch):
+    """#27：--audit 行必须带 md_hash（sha256），供 extract 新鲜度校验。"""
+    import hashlib
+
+    from mianjing_kb import gate
+    build, corpus, md_root = tmp_path / "build", tmp_path / "corpus", tmp_path / "md"
+    for d in (build, corpus, md_root):
+        d.mkdir()
+    monkeypatch.setattr(gate.config, "BUILD_DIR", build)
+    monkeypatch.setattr(gate.config, "CORPUS_ROOT", corpus)
+    monkeypatch.setattr(gate.config, "QUESTION_MD_DIR", md_root)
+    monkeypatch.setattr(gate.config, "DB_PATH", tmp_path / "missing.sqlite")
+    e = {"rel": "src/foo.pdf", "title": "foo.pdf", "category": "题库", "topic": "Java"}
+    (build / "registry.json").write_text(json.dumps([e], ensure_ascii=False), encoding="utf-8")
+    (build / "convert_log.json").write_text(
+        json.dumps([{"rel": "src/foo.pdf", "ok": True}], ensure_ascii=False), encoding="utf-8")
+    p = md_root / "题库" / "Java" / "foo.md"
+    write(p, "中文内容" * 60)
+    report = gate.run_audit()
+    row = report["rows"][0]
+    assert row["md_hash"] == hashlib.sha256(p.read_bytes()).hexdigest()
+    assert row["state"] == "pass"
+
+
+def test_audit_registry_hash_must_match_source_ledger(tmp_path, monkeypatch):
+    """#28：registry doc_hash 指向别的源记录时弃用，改按源件字节重算，判定不得挂错源。"""
+    from mianjing_kb import gate
+    from mianjing_kb.kb import db as kbdb, hashing
+    build, corpus, md_root = tmp_path / "build", tmp_path / "corpus", tmp_path / "md"
+    for d in (build, corpus, md_root):
+        d.mkdir()
+    monkeypatch.setattr(gate.config, "BUILD_DIR", build)
+    monkeypatch.setattr(gate.config, "CORPUS_ROOT", corpus)
+    monkeypatch.setattr(gate.config, "QUESTION_MD_DIR", md_root)
+    kb_path = tmp_path / "kb.sqlite"
+    monkeypatch.setattr(gate.config, "DB_PATH", kb_path)
+    conn = kbdb.connect(kb_path)
+    src_dir = corpus / "src"
+    src_dir.mkdir()
+    (src_dir / "foo.pdf").write_bytes(b"real-foo-bytes")
+    real_hash = hashing.doc_hash(src_dir / "foo.pdf")
+    for h, name, dirp in ((real_hash, "foo.pdf", "src"), ("bbbbbbbbbbbbbbbb", "bar.pdf", "src")):
+        conn.execute(
+            "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes,"
+            " src_path, dir_path, status, batch_id, first_seen_at, last_seen_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (h, h + "0" * 48, name, ".pdf", 1, f"{dirp}/{name}", dirp, "classified",
+             "t", "now", "now"))
+    conn.commit()
+    conn.close()
+    # registry 把 bar 的 hash 冒挂到 foo 的 rel 上
+    e = {"rel": "src/foo.pdf", "title": "foo.pdf", "category": "题库", "topic": "Java",
+         "doc_hash": "bbbbbbbbbbbbbbbb"}
+    (build / "registry.json").write_text(json.dumps([e], ensure_ascii=False), encoding="utf-8")
+    (build / "convert_log.json").write_text(
+        json.dumps([{"rel": "src/foo.pdf", "ok": True}], ensure_ascii=False), encoding="utf-8")
+    write(md_root / "题库" / "Java" / "foo.md", "中文内容" * 60)
+    report = gate.run_audit()
+    assert report["summary"]["identity_mismatch"] == 1
+    assert report["rows"][0]["doc_hash"] == real_hash
+
+
+def test_audit_real_collision_is_fail_closed(tmp_path, monkeypatch):
+    """#26：真覆盖冲突的源即使正文指标合格也降 fail，不得发布可抽题的 pass。"""
+    from mianjing_kb import gate
+    build, corpus, md_root = tmp_path / "build", tmp_path / "corpus", tmp_path / "md"
+    for d in (build, corpus, md_root):
+        d.mkdir()
+    monkeypatch.setattr(gate.config, "BUILD_DIR", build)
+    monkeypatch.setattr(gate.config, "CORPUS_ROOT", corpus)
+    monkeypatch.setattr(gate.config, "QUESTION_MD_DIR", md_root)
+    monkeypatch.setattr(gate.config, "DB_PATH", tmp_path / "missing.sqlite")
+    entries = [{"rel": f"src/{n}.pdf", "title": "同题.pdf", "category": "题库",
+                "topic": "Java", "doc_hash": h}
+               for n, h in (("a", "aaaaaaaaaaaaaaaa"), ("b", "bbbbbbbbbbbbbbbb"))]
+    (build / "registry.json").write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+    (build / "convert_log.json").write_text(json.dumps(
+        [{"rel": e["rel"], "ok": True} for e in entries], ensure_ascii=False), encoding="utf-8")
+    write(md_root / "题库" / "Java" / "同题.md", "中文内容" * 60)   # 两源共用一份健康 md
+    report = gate.run_audit()
+    assert report["summary"]["real_collisions"] == 1
+    assert report["summary"]["passed"] == 0
+    assert all(r["state"] == "fail" and r.get("collision") for r in report["rows"])
+    assert all("真覆盖" in r["reason"] for r in report["rows"])
 
 
 def test_doc_hash_for_refuses_escape_from_corpus(tmp_path, monkeypatch):

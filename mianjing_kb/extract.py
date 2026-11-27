@@ -487,21 +487,33 @@ def store(conn, doc_hash: str, rows: list[dict], *, allow_state_loss: bool = Fal
     return cur.rowcount
 
 
-def _gate_statuses(conn) -> tuple[dict, dict]:
-    """source_documents.gate_result + gate_results 最新 verdict，供 T30 前置过滤。"""
+def _gate_statuses(conn) -> tuple[dict, dict, dict]:
+    """source_documents.gate_result + gate_results 最新 verdict/md_hash，供 T30 前置过滤。
+
+    md_hash（020 迁移）绑定判定时那份 md 字节：--require-gate 时按当前文件 sha256
+    比对，内容已变而门禁未重跑的 pass 按 stale_pass 拒抽（审计候选 #27）。
+    """
     src = {r["doc_hash"]: r["gate_result"] for r in conn.execute(
         "SELECT doc_hash, gate_result FROM source_documents "
         "WHERE gate_result IS NOT NULL AND gate_result <> ''")}
-    latest = {}
-    for r in conn.execute("SELECT doc_hash, verdict, checked_at FROM gate_results "
-                          "WHERE doc_hash IS NOT NULL ORDER BY checked_at"):
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(gate_results)")}
+    hash_col = ", md_hash" if "md_hash" in cols else ""
+    latest, hashes = {}, {}
+    for r in conn.execute("SELECT doc_hash, verdict, checked_at" + hash_col +
+                          " FROM gate_results WHERE doc_hash IS NOT NULL ORDER BY checked_at"):
         latest[r["doc_hash"]] = r["verdict"]
-    return src, latest
+        if "md_hash" in cols and r["md_hash"]:
+            hashes[r["doc_hash"]] = r["md_hash"]
+    return src, latest, hashes
 
 
 def _filter_by_gate(pool, statuses, require_gate: bool):
-    """T30：只放行 pass；review/fail 记原因跳过。--require-gate 时无台账也跳过。"""
-    src, latest = statuses
+    """T30：只放行 pass；review/fail 记原因跳过。--require-gate 时无台账也跳过。
+
+    --require-gate 追加新鲜度校验（#27）：pass 必须绑定当前 md 内容哈希；
+    历史行无 md_hash、或文件读不出/内容已变 → stale_pass，先重跑 gate --audit。
+    """
+    src, latest, hashes = statuses
     kept, skipped = [], {}
     for doc_hash, p in pool:
         gate = src.get(doc_hash) or latest.get(doc_hash)
@@ -511,6 +523,15 @@ def _filter_by_gate(pool, statuses, require_gate: bool):
         if not gate and require_gate:
             skipped["ungated"] = skipped.get("ungated", 0) + 1
             continue
+        if gate == "pass" and require_gate:
+            bound = hashes.get(doc_hash)
+            try:
+                current = hashing.sha256_file(p)
+            except OSError:
+                current = None
+            if not bound or current != bound:
+                skipped["stale_pass"] = skipped.get("stale_pass", 0) + 1
+                continue
         kept.append((doc_hash, p))
     return kept, skipped
 
@@ -589,7 +610,7 @@ def _run(args, wanted: set[str] | None = None) -> int:
         pool_hashes = {h for h, _p in pool_all}
         eligible_hashes = {h for h, _p in pool}
         missing_hashes = sorted(wanted - pool_hashes)
-        src, latest = gate_statuses
+        src, latest, _hashes = gate_statuses
         gate_skipped_docs = [
             {"doc_hash": h, "gate": src.get(h) or latest.get(h) or "ungated"}
             for h in sorted((wanted & pool_hashes) - eligible_hashes)
