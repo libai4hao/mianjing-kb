@@ -11,8 +11,8 @@
 
 1. **hash8 精确**：md 文件名带 `_<8hex>` / `__<8hex>` 后缀，且该 8 位是某个源 `doc_hash` 的前缀 → 唯一命中即映射；
 2. **唯一 stem**：剥掉 hash 后缀后与源文件名 stem（归一化后）相等，且只有一个源 → 映射；
-3. **歧义**：多个候选时按"非 md 源优先（产物来自 pdf/docx/doc 转换）+ doc_hash 字典序"裁决，
-   并记入报告 `conflicts` 供人工复核——**绝不静默取第一个**；
+3. **歧义**：多个候选时只有产物字节与某候选源 sha256 一致才归属该源（审计候选 #36）；
+   否则记 `conflicts` 并留孤儿——各源回退抽自己的源文件，**绝不按文件名猜归属**；
 4. **孤儿**：没有源文档对应（例如纯 md 整理件），保留自身 `md-mirror:` 身份，计入 `orphans`。
 
 一个源有多份产物（reconvert 新旧版、跨目录重复导出）时只取**主产物**：
@@ -115,14 +115,31 @@ def build(conn, md_root: Path) -> Mapping:
             how = "stem"
 
         if len(cands) > 1:
-            # 非 md/txt 的源优先：20-题库MD 的产物通常由 pdf/docx/doc 转换而来
-            non_md = [c for c in cands if Path(c[1]).suffix.lower() not in MD_EXTS]
-            chosen = sorted(non_md or cands, key=lambda c: c[0])[0]
-            conflicts.append({"md": rel, "how": how, "candidates": [c[0] for c in cands],
-                              "chosen": chosen[0],
-                              "rule": "non_md_first+hash_order" if non_md else "hash_order"})
-            stats["ambiguous"] += 1
-            doc_hash = chosen[0]
+            # 候选 #36：同 stem 多源不再按文件名猜归属——只有产物字节与某个候选源
+            # 完全一致（sha256 前 16 位 == doc_hash）才归属该源；否则记冲突并留孤儿，
+            # 各源回退抽自己的源文件，产物以 md-mirror 身份单独成池，内容不丢失。
+            try:
+                content_hash = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+            except OSError:
+                content_hash = None
+            exact = [c for c in cands if c[0] == content_hash]
+            if len(exact) == 1:
+                doc_hash = exact[0][0]
+                stats[{"hash8": "by_hash8", "stem": "by_stem"}[how]] += 1
+                conflicts.append({"md": rel, "how": how, "candidates": [c[0] for c in cands],
+                                  "chosen": doc_hash, "rule": "content_hash_match"})
+            else:
+                conflicts.append({"md": rel, "how": how, "candidates": [c[0] for c in cands],
+                                  "chosen": None, "rule": "unresolved_kept_orphan"})
+                stats["ambiguous"] += 1
+                stats["orphans"] += 1
+                mh = mirror_hash(rel)
+                m.orphans[mh] = (rel, p)
+                orphans_list.append(rel)
+                m.products.append({"rel": rel, "path": p, "hash_suffix": bool(hit),
+                                   "doc_hash": None, "size": p.stat().st_size,
+                                   "selected": False})
+                continue
         elif len(cands) == 1:
             doc_hash = cands[0][0]
             stats[{"hash8": "by_hash8", "stem": "by_stem"}[how]] += 1

@@ -35,7 +35,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, hashing, mdmap, products, status, textio, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, hashing, mdmap, paths, products, status, textio, wlock  # noqa: E402
 from mianjing_kb.kb.qtext import clean_question_text  # noqa: E402
 from mianjing_kb.question_freq import close_word, extract, normalize, simhash  # noqa: E402
 from mianjing_kb.chunker import chunk_v2  # noqa: E402
@@ -165,8 +165,14 @@ def doc_pool(conn, md_root: Path | None = None) -> tuple[list[tuple[str, Path]],
         doc_hash = r["doc_hash"]
         if doc_hash in pool:             # 已有产物，源文件不再重复抽
             continue
-        p = Path(r["src_path"])
-        if not p.exists():
+        # #81：src_path 是台账字符串（可被改/陈旧）——开读前复验：
+        # 非链接、解析后仍在语料根内（intake 的源都登记在语料树里）。
+        # 越界/链接行跳过并留痕，不静默读语料外正文。
+        p = Path(r["src_path"] or "")
+        if not r["src_path"] or not p.exists():
+            continue
+        if paths.is_link(p) or not paths.resolves_inside(config.CORPUS_ROOT, p):
+            print(f"[warn] src_path 越界或为链接，跳过: {r['src_path']}", file=sys.stderr)
             continue
         rel = source_rels.get(doc_hash, ("", ""))[0]
         if rel in ex_src:

@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pymupdf  # noqa: E402
 
-from mianjing_kb.kb import config, db, status, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, paths, status, wlock  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
@@ -68,7 +68,12 @@ def _run(args) -> int:
 
     for r in rows:
         p = Path(r["src_path"] or "")
-        if not p.exists():
+        if not r["src_path"] or not p.exists():
+            missing += 1
+            continue
+        # #81：台账 src_path 开读前复验——非链接且解析后仍在语料根内
+        if paths.is_link(p) or not paths.resolves_inside(config.CORPUS_ROOT, p):
+            print(f"[warn] src_path 越界或为链接，跳过: {r['src_path']}", file=sys.stderr)
             missing += 1
             continue
         if args.only_merged and (r["source_count"] or 0) <= 1:

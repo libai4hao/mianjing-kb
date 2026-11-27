@@ -53,9 +53,12 @@ def test_mixed_toc_counts_only_filename_l1():
     assert spans[0]["page_end"] == 4 and spans[1]["page_start"] == 5
 
 
-def test_bookmarks_written_to_db(tmp_path, capsys):
+def test_bookmarks_written_to_db(tmp_path, capsys, monkeypatch):
     corpus = tmp_path / "corpus"
     corpus.mkdir()
+    # #81 后 src_path 须解析在语料根内：夹具同步 config（与生产口径一致）
+    from kb import config as kconfig
+    monkeypatch.setattr(kconfig, "CORPUS_ROOT", corpus)
     pdf = corpus / "【合并版】JVM面试题合集.pdf"
     _make_merged(pdf, [("51道.pdf", 1), ("大厂.pdf", 4)], 6)
 

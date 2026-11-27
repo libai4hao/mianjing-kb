@@ -89,20 +89,61 @@ def test_unique_stem_maps_without_hash_suffix(env):
     assert mp.report["by_stem"] == 1
 
 
-def test_ambiguous_stem_prefers_non_md_source(env):
-    """同名 a.pdf / a.md 两个源 + 无后缀 md：产物按"非 md 源优先"裁决，并留冲突记录。"""
+def _seed_bytes(conn, corpus: Path, rel: str, text: str) -> str:
+    """按落盘后的真实字节登记 doc_hash（Windows 文本写入会转 CRLF，
+    与 intake 的"对实际字节哈希"口径一致；_seed 的文本哈希只适用于无换行内容）。"""
+    p = corpus / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    h = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+    conn.execute(
+        "INSERT INTO source_documents (doc_hash, sha256, file_name, ext, size_bytes, src_path, "
+        "dir_path, status, batch_id, first_seen_at, last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (h, h, p.name, p.suffix, p.stat().st_size, str(p), str(p.parent),
+         "classified", "t", "now", "now"))
+    conn.commit()
+    return h
+
+
+def test_ambiguous_stem_requires_content_match(env):
+    """#36：同名 a.pdf / a.md 两个源 + 无后缀 md——只有字节一致的源才认领产物。
+
+    产物字节 == a.md 源字节 → 归属 a.md；a.pdf 回退抽自己的源文件。
+    旧口径"非 md 源优先"会让 a.pdf 冒领 a.md 的正文（错误归属）。
+    """
     corpus, conn = env
-    h_pdf = _seed(conn, corpus, "src/题库/x/a.pdf", "pdf 内容" * 30)
-    h_md = _seed(conn, corpus, "src/题库/x/a.md", Q_TEXT)
+    h_pdf = _seed_bytes(conn, corpus, "src/题库/x/a.pdf", "pdf 内容" * 30)
+    h_md = _seed_bytes(conn, corpus, "src/题库/x/a.md", Q_TEXT)
     _md(corpus, "题库/x/a.md", Q_TEXT)
 
     mapping = mdmap.build(conn, config.QUESTION_MD_DIR)
-    assert mapping.by_doc == {h_pdf: ("题库/x/a.md", config.QUESTION_MD_DIR / "题库/x/a.md")}
-    assert mapping.report["ambiguous"] == 1
-    assert mapping.report["conflicts"][0]["chosen"] == h_pdf
-    # 未被选为产物的那个源（a.md）仍按自己的源文件抽题，不会消失
+    assert mapping.by_doc == {h_md: ("题库/x/a.md", config.QUESTION_MD_DIR / "题库/x/a.md")}
+    assert mapping.report["conflicts"][0]["chosen"] == h_md
+    assert mapping.report["conflicts"][0]["rule"] == "content_hash_match"
     pool, _ = extract.doc_pool(conn)
     assert set(dict(pool)) == {h_pdf, h_md}
+    assert dict(pool)[h_pdf] == corpus / "src/题库/x/a.pdf"   # 回退自己的源文件
+
+
+def test_ambiguous_stem_without_content_match_keeps_orphan(env):
+    """#36：产物与任何候选源字节都不一致 → 不猜归属，产物留孤儿、各源抽自己。"""
+    corpus, conn = env
+    h_pdf = _seed_bytes(conn, corpus, "src/题库/x/b.pdf", "pdf 内容" * 30)
+    h_md = _seed_bytes(conn, corpus, "src/题库/x/b.md", Q_TEXT)
+    _md(corpus, "题库/x/b.md", Q_TEXT + "\n转换后新增的一段。")   # 与两个源都不同
+
+    mapping = mdmap.build(conn, config.QUESTION_MD_DIR)
+    assert mapping.by_doc == {}
+    assert mapping.report["ambiguous"] == 1
+    assert mapping.report["conflicts"][0]["chosen"] is None
+    assert mapping.report["conflicts"][0]["rule"] == "unresolved_kept_orphan"
+    assert len(mapping.orphans) == 1                     # 产物以 md-mirror 身份保留
+    pool, _ = extract.doc_pool(conn)
+    keys = set(dict(pool))
+    assert h_pdf in keys and h_md in keys                # 两源都回退自己的文件
+    assert dict(pool)[h_pdf] == corpus / "src/题库/x/b.pdf"
+    assert dict(pool)[h_md] == corpus / "src/题库/x/b.md"
+    assert len(keys) == 3                                # 孤儿产物单独成池，内容不丢
 
 
 def test_old_md_dropped_when_hashed_sibling_exists(env):
@@ -174,3 +215,25 @@ def test_build_db_and_g8_pass(env):
     g8 = vl.g8_single_identity(out)
     out.close()
     assert g8["state"] == "PASS" and g8["detail"]["mapped_products"] == 1
+
+
+def test_src_path_outside_corpus_or_link_is_skipped(env, capsys):
+    """#81：台账 src_path 指向语料外 / 软链 → 不进题池（不读未授权正文）。"""
+    corpus, conn = env
+    h_out = _seed(conn, corpus, "src/题库/JVM/out.txt", "源" * 60)
+    outside = corpus.parent / "outside.txt"
+    outside.write_text("语料外正文", encoding="utf-8")
+    conn.execute("UPDATE source_documents SET src_path=? WHERE doc_hash=?",
+                 (str(outside), h_out))
+    h_link = _seed(conn, corpus, "src/题库/JVM/link.txt", "不一样的源内容" * 40)
+    link = corpus / "src/题库/JVM/link.txt"
+    link.unlink()
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink not permitted on this host")
+    conn.commit()
+    pool, _ = extract.doc_pool(conn)
+    keys = {k for k, _p in pool}
+    assert h_out not in keys and h_link not in keys
+    assert "越界或为链接" in capsys.readouterr().err
