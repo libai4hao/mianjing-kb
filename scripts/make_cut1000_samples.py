@@ -101,6 +101,7 @@ def _safe_stem(s: str, max_len: int = 80) -> str:
 
 
 def _md_path(root: Path, md_rel: str) -> Path:
+    """#64：返回**已校验的解析路径**，不再把未解析的原始路径交给后续读取。"""
     parts = PurePosixPath(md_rel.replace("\\", "/")).parts
     if not parts or any(p in ("", "..") for p in parts):
         raise ValueError(f"非法 md_rel：{md_rel}")
@@ -108,7 +109,7 @@ def _md_path(root: Path, md_rel: str) -> Path:
     rp = p.resolve()
     if root.resolve() not in rp.parents:
         raise ValueError(f"md_rel 越界：{md_rel}")
-    return p
+    return rp
 
 
 def main(argv=None) -> int:

@@ -62,16 +62,22 @@ def load_annotations() -> list[dict]:
 
 
 def snapshot() -> list[dict]:
+    from mianjing_kb.kb import paths
     rows = load_annotations()
     cache: dict[str, list] = {}
     out = []
     for d in rows:
         rel = str(d["md_rel"])
         if rel not in cache:
-            f = CORPUS / rel
+            # #78：工作簿 md_rel 是外部输入——绝对路径 / .. / 链接一律拒绝，
+            # 不得让标注表选到 Markdown 语料之外的文件。
+            try:
+                f = paths.safe_join(CORPUS, rel)
+            except paths.UnsafePath:
+                f = None
             cache[rel] = (
                 chunker.chunk_v2(f.read_text(encoding="utf-8", errors="replace"))["items"]
-                if f.exists() else []
+                if f is not None and f.is_file() else []
             )
         items = cache[rel]
         q_labeled = str(d["q_text"] or "")
