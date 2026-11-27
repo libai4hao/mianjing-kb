@@ -49,7 +49,7 @@ def main(argv=None) -> int:
     if args.limit < 0:
         ap.error("--limit 必须大于等于 0（0 表示不限制）")
 
-    conn = db.connect(args.db, create=False)
+    conn = db.connect(args.db, create=False, readonly=True)
     rows = fetch(conn, args.limit)
 
     if args.lookup:

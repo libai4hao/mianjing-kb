@@ -68,8 +68,14 @@ class VectorUnavailable(RuntimeError):
 
 
 def _con(db_path: Path):
+    """检索是只读操作：mode=ro 打开（不建库、不改 journal mode、不写 WAL）。
+
+    候选 #44/#23：默认 sqlite3.connect 以读写打开，评测/演示会把 DELETE 库
+    切到 WAL 或触发 hot-journal 恢复——只读工具不得有这些副作用。
+    """
     import sqlite3
-    con = sqlite3.connect(str(db_path))
+    from mianjing_kb.kb import db as kbdb
+    con = sqlite3.connect(kbdb.ro_uri(db_path), uri=True)
     con.row_factory = sqlite3.Row
     try:  # vec0 虚表需要扩展；文件库无向量表时跳过
         import sqlite_vec

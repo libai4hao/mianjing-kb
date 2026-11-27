@@ -64,7 +64,7 @@ def build(out_db: Path | None = None) -> dict:
     # 路径在调用时取 config（T3 改名后模块常量和默认参数会跨测试/跨进程冻结成旧值）
     out_db = Path(out_db or (Path(config.BUILD_DIR) / "面经库.db"))
     md_root = Path(config.CORPUS_ROOT) / "20-题库MD"
-    src = db.connect(config.DB_PATH, create=False)
+    src = db.connect(config.DB_PATH, create=False, readonly=True)
     started = time.perf_counter()
     out = sqlite3.connect(str(out_db))
     vec_before = 0

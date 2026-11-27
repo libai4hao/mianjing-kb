@@ -141,7 +141,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out-csv", default=str(config.BUILD_DIR / "question_freq_clusters.csv"))
     args = ap.parse_args(argv)
 
-    conn = db.connect(args.db, create=False)
+    conn = db.connect(args.db, create=False, readonly=True)
     qs = load_questions(conn)
     conn.close()
     started = time.perf_counter()

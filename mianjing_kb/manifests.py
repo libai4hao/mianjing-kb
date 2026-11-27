@@ -336,7 +336,7 @@ def main(argv=None) -> int:
         print(json.dumps({"manifests": list_manifests()}, ensure_ascii=False, indent=1))
         return 0
     if args.reconcile:
-        conn = db.connect(args.db, create=False)
+        conn = db.connect(args.db, create=False, readonly=True)
         try:
             out = reconcile(conn)
         finally:
@@ -353,7 +353,11 @@ def main(argv=None) -> int:
         return 0
     db_path = Path(args.db)
     if not args.apply:
-        out = rollback(db.connect(db_path, create=False), args.rollback, apply=False)
+        conn = db.connect(db_path, create=False, readonly=True)
+        try:
+            out = rollback(conn, args.rollback, apply=False)
+        finally:
+            conn.close()
         print(json.dumps(out, ensure_ascii=False, indent=1))
         return 0
     try:

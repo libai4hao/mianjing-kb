@@ -230,7 +230,7 @@ def _run(args) -> int:
     except (OSError, json.JSONDecodeError) as ex:
         print(f"[fatal] 转换日志不可读：{ex}", file=sys.stderr)
         return 2
-    conn = db.connect(config.DB_PATH, create=False)
+    conn = db.connect(config.DB_PATH, create=False, readonly=True)
     try:
         for rel in args.extra:
             job = _extra_job(conn, rel)

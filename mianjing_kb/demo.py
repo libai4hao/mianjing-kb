@@ -104,11 +104,13 @@ def run(work: Path, *, quiet: bool = False) -> dict:
 
 
 def _counts(db_path: Path, out_db: Path) -> dict:
-    """从两个库直接读行数（不依赖各脚本的打印格式）。"""
+    """从两个库直接读行数（不依赖各脚本的打印格式）。只读打开，不改 journal mode。"""
     import sqlite3
+
+    from mianjing_kb.kb import db as kbdb
     out: dict = {}
     if db_path.exists():
-        con = sqlite3.connect(str(db_path))
+        con = sqlite3.connect(kbdb.ro_uri(db_path), uri=True)
         out["docs_classified"] = con.execute(
             f"SELECT COUNT(*) FROM source_documents WHERE status='{status.CLASSIFIED}'").fetchone()[0]
         out["docs_ingested"] = con.execute(
@@ -117,7 +119,7 @@ def _counts(db_path: Path, out_db: Path) -> dict:
         out["questions"] = con.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
         con.close()
     if out_db.exists():
-        con = sqlite3.connect(str(out_db))
+        con = sqlite3.connect(kbdb.ro_uri(out_db), uri=True)
         names = {r[0] for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
         if "doc_contents" in names:

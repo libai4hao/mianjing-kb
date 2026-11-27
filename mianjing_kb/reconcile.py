@@ -34,7 +34,7 @@ def main() -> int:
     by_stem: dict[str, list[str]] = {}
     for rel in actual_paths:
         by_stem.setdefault(Path(rel).stem, []).append(rel)
-    conn = db.connect(config.DB_PATH, create=False)
+    conn = db.connect(config.DB_PATH, create=False, readonly=True)
     sd = {r["file_name"]: dict(r) for r in conn.execute(
         "SELECT file_name, status, dir_path, note FROM source_documents").fetchall()}
 

@@ -136,7 +136,7 @@ def _tokens(text: str) -> int:
 def db_stats(db_path: Path) -> dict:
     from mianjing_kb.kb import db
 
-    conn = db.connect(db_path, create=False)
+    conn = db.connect(db_path, create=False, readonly=True)
     rows = conn.execute("SELECT q_text, a_text FROM questions").fetchall()
     conn.close()
     qlens = [len(r[0] or "") for r in rows]

@@ -63,7 +63,7 @@ def main(argv=None) -> int:
 
     report = json.loads(Path(args.report).read_text(encoding="utf-8"))
     rows = [r for r in report["rows"] if r["state"] in ("fail", "review")]
-    conn = db.connect(config.DB_PATH, create=False)
+    conn = db.connect(config.DB_PATH, create=False, readonly=True)
 
     plan = []
     for r in rows:

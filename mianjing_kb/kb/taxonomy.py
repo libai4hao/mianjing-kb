@@ -213,7 +213,8 @@ def prompt_lines(tax: dict | None = None, max_groups: int = 14, max_tags: int = 
 
 
 def _run_cli(args) -> int:
-    conn = db.connect(args.db, create=False)
+    needs_write = bool(args.seed or args.add or args.disable)
+    conn = db.connect(args.db, create=False, readonly=not needs_write)
     try:
         if args.seed:
             print(json.dumps({"seeded": seed(conn, only_if_empty=False)}, ensure_ascii=False))
