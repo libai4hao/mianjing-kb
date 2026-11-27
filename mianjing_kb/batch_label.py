@@ -981,13 +981,31 @@ def review_list(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _json_list(raw) -> list:
+    """staging 里的多选列是 JSON 数组字符串；坏值/旧值一律当空表，不猜。"""
+    try:
+        v = json.loads(raw) if raw else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return v if isinstance(v, list) else []
+
+
+# suggest 只允许改这些标签字段；review_note 里的其余键一律忽略（防夹带未校验列）
+SUGGESTION_FIELDS = ("topic", "qtype", "difficulty", "position", "quality",
+                     "canonical_q", "tags")
+
+
 def review_resolve(conn, spec: str) -> dict:
     """人工终审 "qid:action ..."（keep/suggest/drop）——merge 分歧行的唯一出口。
 
     keep=维持原标签（review_state='agree'）；suggest=把 review_note 里的建议
-    应用到标签列再 'agree'；drop=DELETE 行。未知/无行 token 进 unknown 上报。
+    经 labelspec 同一套校验后应用（词表外 topic 归一为"其他"并留在 pending，qtype/
+    difficulty 非法直接拒绝），只有校验通过才 'agree'；drop=DELETE 行。
+    未知/无行 token 进 unknown 上报。
     """
-    resolved, unknown = 0, []
+    vocab = topic_vocab()
+    tax = taxonomy.load()
+    resolved, unknown, held, rejected = 0, [], [], []
     for token in spec.split():
         try:
             qid_s, action = token.split(":", 1)
@@ -1003,16 +1021,49 @@ def review_resolve(conn, spec: str) -> dict:
             conn.execute("UPDATE labels_staging SET review_state='agree' WHERE qid=?", (qid,))
         elif action == "suggest":
             try:
-                sug = (json.loads(row["review_note"]) or {}).get("suggestion") or {}
+                note = json.loads(row["review_note"]) or {}
             except (json.JSONDecodeError, TypeError):
                 unknown.append(token)
                 continue
+            sug = note.get("suggestion") if isinstance(note, dict) else None
+            if not isinstance(sug, dict) or not sug:
+                unknown.append(token)
+                continue
+            candidate = {
+                "topic": row["topic"], "qtype": row["qtype"], "difficulty": row["difficulty"],
+                "position": _json_list(row["position"]), "quality": _json_list(row["quality"]),
+                "canonical_q": row["canonical_q"], "tags": _json_list(row["tags"]),
+            }
+            for name in SUGGESTION_FIELDS:
+                value = sug.get(name)
+                if value not in (None, ""):
+                    candidate[name] = value
+            try:
+                cleaned = labelspec.validate_label(
+                    candidate, vocab, q_text="", synonyms=tax["aliases"],
+                    topic_aliases=topic_aliases(), tag_stopwords=tag_stopwords())
+            except ValueError as ex:
+                # qtype/difficulty 非法：拒绝应用，行保持原状态等人工重审
+                rejected.append({"qid": qid, "why": str(ex)})
+                continue
+            values = (cleaned["topic"], cleaned["qtype"], cleaned["difficulty"],
+                      labelspec.dump_multi(cleaned["position"]),
+                      labelspec.dump_multi(cleaned["quality"]),
+                      cleaned["canonical_q"],
+                      json.dumps(cleaned["tags"], ensure_ascii=False))
+            if cleaned["review_state"] == "pending":
+                # 归一后仍不合规（如 topic 词表外）：写回规范化值，但不放行 merge
+                conn.execute(
+                    "UPDATE labels_staging SET topic=?, qtype=?, difficulty=?, position=?, "
+                    "quality=?, canonical_q=?, tags=?, review_state='pending', review_note=? "
+                    "WHERE qid=?",
+                    (*values, json.dumps({"issues": cleaned["issues"]}, ensure_ascii=False), qid))
+                held.append({"qid": qid, "issues": cleaned["issues"]})
+                continue
             conn.execute(
-                "UPDATE labels_staging SET "
-                "topic=COALESCE(NULLIF(?,''),topic), qtype=COALESCE(?,qtype), "
-                "difficulty=COALESCE(?,difficulty), review_state='agree' WHERE qid=?",
-                (str(sug.get("topic") or "").strip()[:40], sug.get("qtype"),
-                 sug.get("difficulty"), qid))
+                "UPDATE labels_staging SET topic=?, qtype=?, difficulty=?, position=?, "
+                "quality=?, canonical_q=?, tags=?, review_state='agree' WHERE qid=?",
+                (*values, qid))
         elif action == "drop":
             conn.execute("DELETE FROM labels_staging WHERE qid=?", (qid,))
         else:
@@ -1020,7 +1071,7 @@ def review_resolve(conn, spec: str) -> dict:
             continue
         resolved += 1
     conn.commit()
-    return {"resolved": resolved, "unknown": unknown}
+    return {"resolved": resolved, "unknown": unknown, "held": held, "rejected": rejected}
 
 
 def _propagate_by_hash(conn, hashes, *, overwrite: bool = False) -> dict:

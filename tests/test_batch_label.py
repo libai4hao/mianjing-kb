@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from mianjing_kb import batch_label as bl  # noqa: E402
 from mianjing_kb.kb import config  # noqa: E402
+from mianjing_kb.kb.vocab import OTHER_TOPIC  # noqa: E402
 
 REAL_META = config.META_DIR
 
@@ -874,6 +875,43 @@ def test_review_resolve_keep_suggest_drop(mini_db):
     r2 = mini_db.execute("SELECT topic, qtype, difficulty, review_state FROM labels_staging WHERE qid=2").fetchone()
     assert tuple(r2) == ("Redis", "八股", 2, "agree")
     assert mini_db.execute("SELECT COUNT(*) FROM labels_staging WHERE qid=3").fetchone()[0] == 0
+
+
+def test_review_resolve_holds_out_of_vocab_suggestion(mini_db, monkeypatch):
+    """suggest 的 topic 词表外：归一为"其他"但不得标 agree（否则绕过 G6 直接 merge）。"""
+    monkeypatch.setattr(bl, "topic_vocab", lambda: ("Java基础", "Redis"))
+    _stage(mini_db, 2, "怪谈")
+    mini_db.execute(
+        "UPDATE labels_staging SET review_state='disagree', review_note=? WHERE qid=2",
+        (json.dumps({"suggestion": {"topic": "OUTSIDE_VOCAB", "qtype": "八股", "difficulty": 2}},
+                    ensure_ascii=False),))
+    mini_db.commit()
+
+    out = bl.review_resolve(mini_db, "2:suggest")
+
+    assert out["resolved"] == 0 and len(out["held"]) == 1
+    row = mini_db.execute("SELECT topic, qtype, difficulty, review_state, review_note "
+                          "FROM labels_staging WHERE qid=2").fetchone()
+    assert row["topic"] == OTHER_TOPIC and row["review_state"] == "pending"
+    assert "topic_out_of_vocab" in row["review_note"]
+
+
+def test_review_resolve_rejects_invalid_qtype_and_ignores_extra_fields(mini_db):
+    """qtype 非法整条拒绝；suggestion 里的非标签键（如 review_state/status）一律忽略。"""
+    _stage(mini_db, 2, "怪谈")
+    mini_db.execute(
+        "UPDATE labels_staging SET review_state='disagree', review_note=? WHERE qid=2",
+        (json.dumps({"suggestion": {"qtype": "不存在的类型", "difficulty": 2,
+                                    "review_state": "agree"}}, ensure_ascii=False),))
+    mini_db.commit()
+
+    out = bl.review_resolve(mini_db, "2:suggest")
+
+    assert len(out["rejected"]) == 1 and out["resolved"] == 0
+    row = mini_db.execute("SELECT qtype, difficulty, review_state FROM labels_staging "
+                          "WHERE qid=2").fetchone()
+    assert tuple(row) == ("八股", 3, "disagree")
+
 
 
 # ---- 批次三 R5：COALESCE 守卫（评审 Minor#1）+ 待打标口径单源（bug5）----

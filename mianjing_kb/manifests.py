@@ -8,12 +8,19 @@ manifest 是"这批增量到底改了什么"的账本：
   - added_variants：本批新增的 variant q_key
 
 回滚先标 `rollback_requested`（不动库）；带 `--apply` 才删本批 variant/dependent，
-并只重算受影响 canonical 的 witness，不删任何源文件。
+再按剩余成员重算受影响 canonical 的 topic 与 witness，不删任何源文件。
+
+manifests 目录是全局的（`build/manifests`），而 `--db` 可以被指向任何库：
+所以 prepare() 把连接所在库的身份（绝对路径）写进清单，rollback --apply 先核对身份，
+路径不一致就拒绝，避免"拿 A 库的批次去删 B 库的行"。老清单没有身份字段时按 batch_id
+兼容执行，并在输出里标注 legacy。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -54,13 +61,48 @@ def create(batch_id: str, payload: dict, build_dir: Path | None = None) -> dict:
     return data
 
 
-def prepare(batch_id: str, payload: dict, build_dir: Path | None = None) -> dict:
-    """写 prepared 清单：SQLite 尚未提交前绝不能标 committed。"""
+def db_identity(conn) -> dict:
+    """连接实际落盘的库身份（绝对路径 + Windows 归一大小写）。
+
+    `PRAGMA database_list` 的第三个字段是打开时解析出的文件名；内存库（"":memory:"
+    或空）返回 `memory`，这类库本来就不该有可回滚的批次。
+    """
+    path = ""
+    try:
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            if row[1] == "main":
+                path = row[2] or ""
+                break
+    except sqlite3.Error:
+        path = ""
+    if not path:
+        return {"kind": "memory"}
+    return {"kind": "file", "path": os.path.normcase(str(Path(path).resolve()))}
+
+
+def _identity_conflict(conn, data: dict) -> str | None:
+    recorded = data.get("db_identity") or {}
+    if not recorded.get("path"):
+        return None                       # 老清单：没有身份可核对
+    actual = db_identity(conn).get("path")
+    if actual != recorded["path"]:
+        return f"manifest 属于另一个库（{recorded['path']}），当前连接是 {actual}"
+    return None
+
+
+def prepare(batch_id: str, payload: dict, build_dir: Path | None = None,
+            *, conn=None) -> dict:
+    """写 prepared 清单：SQLite 尚未提交前绝不能标 committed。
+
+    传入 conn 时把库身份一起记下，rollback --apply 靠它拒绝跨库回滚。
+    """
     d = manifest_dir(build_dir)
     d.mkdir(parents=True, exist_ok=True)
     data = {"batch_id": batch_id, "tool": payload.get("tool", "canonical"),
             "status": "prepared", "created_at": datetime.now().strftime(NOW_FMT),
             "prepared_at": datetime.now().strftime(NOW_FMT), **payload}
+    if conn is not None:
+        data["db_identity"] = db_identity(conn)
     _write(data, build_dir)
     return data
 
@@ -224,6 +266,22 @@ def rollback(conn, batch_id: str, apply: bool = False,
     qkeys = [x for x in (data.get("added_variants") or []) if x]
     touched = set(data.get("touched_canonicals") or [])
     created = set(data.get("created_canonicals") or [])
+
+    conflict = _identity_conflict(conn, data)
+    if conflict:
+        return {"ok": False, "batch_id": batch_id, "status": "db_mismatch",
+                "why": conflict, "expected": (data.get("db_identity") or {}).get("path"),
+                "actual": db_identity(conn).get("path")}
+    legacy = not (data.get("db_identity") or {}).get("path")
+
+    # 删之前先记住这些 variant 当前的归属：manifest 里的 touched 只是批次当时的快照，
+    # 其间可能有新批次把它们吸附到别的簇，回滚必须按"现在的成员"重算。
+    owners = set()
+    for qkey in qkeys:
+        rows = conn.execute("SELECT canonical_id FROM question_variants WHERE q_key=?",
+                            (qkey,)).fetchall()
+        owners.update(r[0] for r in rows if r[0])
+
     n_var = 0
     for qkey in qkeys:
         cur = conn.execute("DELETE FROM question_variants WHERE q_key=?", (qkey,))
@@ -236,10 +294,16 @@ def rollback(conn, batch_id: str, apply: bool = False,
             conn.execute("DELETE FROM canonical_questions WHERE canonical_id=?", (cid,))
         else:
             touched.add(cid)
-    for cid in touched:
-        if conn.execute("SELECT COUNT(*) FROM canonical_questions WHERE canonical_id=?",
-                        (cid,)).fetchone()[0]:
-            _recompute_witness(conn, cid)
+
+    survivors = {cid for cid in (touched | owners)
+                 if conn.execute("SELECT 1 FROM canonical_questions WHERE canonical_id=?",
+                                 (cid,)).fetchone()}
+    repaired = {}
+    if survivors:
+        # 删掉的变体可能正是 topic 多数票或 witness 的来源：topic 与 witness 一起重算，
+        # 否则回滚后 canonical 会留着已不存在的主题（旧实现只重算 witness）。
+        from mianjing_kb import canonical as canonical_mod
+        repaired = canonical_mod.recompute_canonical(conn, survivors)["topics"]
     removed_candidates, restored_candidates, skipped_candidates = _rollback_candidates(conn, data)
     conn.commit()
     data["status"] = "rolled_back"
@@ -251,7 +315,9 @@ def rollback(conn, batch_id: str, apply: bool = False,
     data["skipped_candidates"] = skipped_candidates
     create(batch_id, data, build_dir)
     return {"ok": True, "batch_id": batch_id, "status": "rolled_back",
-            "removed_variants": n_var, "touched_canonicals": len(touched),
+            "removed_variants": n_var, "touched_canonicals": len(survivors),
+            "recomputed_topics": repaired,
+            "legacy_manifest": legacy,
             "removed_candidates": removed_candidates,
             "restored_candidates": restored_candidates,
             "skipped_candidates": skipped_candidates}

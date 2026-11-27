@@ -456,3 +456,42 @@ def test_near_miss_band_variants_stay_split(mini_db, capsys):
     assert cids["h8:mvc"] != cids["h9:mvc"]
     assert mini_db.execute("SELECT COUNT(*) FROM merge_candidates").fetchone()[0] == 0
 
+
+
+def test_rollback_recomputes_topic_from_surviving_members(mini_db, tmp_path):
+    """回滚删掉的多票变体不能把 topic 留在簇上：按剩余成员重算 topic 与 witness。"""
+    from mianjing_kb import manifests
+    cn.main([])
+    # 两道 Kafka 文档里的同题变体吸附到 Redis 单件簇：多数票把 topic 投成 Kafka
+    for h, seq, col in (("h8", 1, "c8"), ("h9", 1, "c9")):
+        _add_source_and_question(mini_db, h, seq, N_REDIS, f"{h}:{N_REDIS[:8]}",
+                                 topic="Kafka", collection=col)
+    assert cn.main(["--incremental", "--batch-id", "t2"]) == 0
+    row = mini_db.execute("SELECT topic, witness FROM canonical_questions "
+                          "WHERE title_norm=?", (N_REDIS,)).fetchone()
+    assert row["topic"] == "Kafka" and row["witness"] == 3
+
+    out = manifests.rollback(mini_db, "t2", apply=True, build_dir=tmp_path / "build")
+
+    assert out["ok"] and out["status"] == "rolled_back"
+    assert set(out["recomputed_topics"].values()) == {"Redis"}
+    row = mini_db.execute("SELECT topic, witness FROM canonical_questions "
+                          "WHERE title_norm=?", (N_REDIS,)).fetchone()
+    assert row["topic"] == "Redis" and row["witness"] == 1
+
+
+def test_rollback_refuses_manifest_from_another_database(mini_db, tmp_path):
+    """manifests 目录全局共享：拿 A 库的批次去回滚 B 库必须拒绝。"""
+    from mianjing_kb import manifests
+    build = tmp_path / "build"
+    manifests.prepare("mA", {"added_variants": ["h1:dead"], "touched_canonicals": []},
+                      build, conn=mini_db)
+    other = sqlite3.connect(tmp_path / "other.sqlite")
+    other.row_factory = sqlite3.Row
+    try:
+        out = manifests.rollback(other, "mA", apply=True, build_dir=build)
+    finally:
+        other.close()
+    assert out["ok"] is False and out["status"] == "db_mismatch"
+    assert "另一个库" in out["why"]
+    assert manifests.load("mA", build)["status"] == "prepared"   # 拒绝时不得改状态

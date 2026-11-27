@@ -301,6 +301,23 @@ def _recompute_topic(conn, canonical_id: str,
     return topic
 
 
+def recompute_canonical(conn, canonical_ids, meta: dict[str, tuple[str, str]] | None = None) -> dict:
+    """按当前成员重算 topic 与 witness（回滚、修数据共用这一个入口）。
+
+    topic 是成员文档的多数票，witness 是去重后的 collection 数——两者都是派生值。
+    删掉变体后如果不重算 topic，簇上会留着已经不存在的主题（回滚后检索串味）。
+    """
+    meta = meta if meta is not None else doc_meta(conn)
+    topics: dict[str, str | None] = {}
+    for cid in canonical_ids:
+        if not conn.execute("SELECT 1 FROM canonical_questions WHERE canonical_id=?",
+                            (cid,)).fetchone():
+            continue
+        topics[cid] = _recompute_topic(conn, cid, meta)
+        _recompute_witness(conn, cid)
+    return {"recomputed": len(topics), "topics": topics}
+
+
 def _rep_index(reps: list[tuple[str, str]]):
     """预计算代表题干的 gram 与前缀倒排，供增量候选召回。
 
@@ -496,7 +513,8 @@ def attach_incremental(conn, attach_jac: float = ATTACH_JAC,
                "added_variants": added_variants,
                "touched_canonicals": sorted(touched)}
     if batch_id:
-        payload["manifest"] = str(manifests.prepare(batch_id, payload).get("batch_id"))
+        payload["manifest"] = str(
+            manifests.prepare(batch_id, payload, conn=conn).get("batch_id"))
     return {"new_questions": len(added_variants) + len(candidates),
             "created_canonicals_count": len(created),
             "created_questions": len(seeded),
