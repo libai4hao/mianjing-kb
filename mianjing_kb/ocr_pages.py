@@ -159,13 +159,20 @@ class PaddleOCRJson:
 
 
 def render_page(pdf_path: Path, pno: int, png_path: Path, dpi: int = config.OCR_DPI) -> Path:
-    """把单页渲染成 PNG（1-based 页号）。"""
+    """把单页渲染成 PNG（1-based 页号）。
+
+    #63：渲染前按页盒几何核算像素预算——超大页盒先拒绝，不先分配再失败。
+    """
     import pymupdf
+
+    from mianjing_kb.kb import pdfbudget
     png_path.parent.mkdir(parents=True, exist_ok=True)
     with pymupdf.open(str(pdf_path)) as doc:
         if not 1 <= pno <= doc.page_count:
             raise ValueError(f"页号超界: {pno}/{doc.page_count}")
-        pix = doc[pno - 1].get_pixmap(dpi=dpi)
+        page = doc[pno - 1]
+        pdfbudget.check_render_geometry(page.rect.width, page.rect.height, dpi)
+        pix = page.get_pixmap(dpi=dpi)
         pix.save(str(png_path))
     return png_path
 
@@ -322,10 +329,18 @@ def run_batch(rels: list[str], out_root: Path, log_path: Path, dpi: int,
                 _log(log_path, {"rel": rel, "ok": False, "reason": "file_missing"})
                 continue
             import pymupdf
+
+            from mianjing_kb.kb import pdfbudget
             source_sha256 = _sha256_file(pdf)
-            with pymupdf.open(str(pdf)) as doc:
-                pages = list(range(1, doc.page_count + 1))
-                page_count = doc.page_count
+            try:
+                with pymupdf.open(str(pdf)) as doc:
+                    pdfbudget.check_page_count(doc.page_count)   # #63：页数预算
+                    pages = list(range(1, doc.page_count + 1))
+                    page_count = doc.page_count
+            except pdfbudget.ResourceBudgetError as ex:
+                stats["fail"] += 1
+                _log(log_path, {"rel": rel, "ok": False, "reason": f"budget: {ex}"})
+                continue
             total_pages_est += len(pages)
             if is_complete_text(rel, pdf, out_root):
                 stats["resumed"] += 1
@@ -334,6 +349,12 @@ def run_batch(rels: list[str], out_root: Path, log_path: Path, dpi: int,
             while True:
                 try:
                     results = ocr_pdf_pages(pdf, pages, engine, dpi)
+                    break
+                except pdfbudget.ResourceBudgetError as ex:
+                    # #63：超大页盒渲染预算超限——记失败跳过该件，不重试不崩溃
+                    stats["fail"] += 1
+                    _log(log_path, {"rel": rel, "ok": False, "reason": f"budget: {ex}"})
+                    results = None
                     break
                 except (RuntimeError, TimeoutError) as ex:
                     attempt += 1

@@ -408,13 +408,20 @@ def pix_fp(pdf_path: Path, dpi: int = 72, with_meta: bool = False):
     """PDF 像素指纹：采样 10%/35%/60%/85% 四页渲染 md5 拼接（语料侧同款）。
 
     with_meta=True 时返回 {"fp", "page_count", "dpi"}，便于区分 PyMuPDF 版本/页数差异。
+    #43：渲染前按页盒几何核算像素预算，超大页盒拒绝而不是先分配。
     """
     import pymupdf
+
+    from mianjing_kb.kb import pdfbudget
     with pymupdf.open(str(pdf_path)) as doc:
         n = doc.page_count
         picks = sorted({min(int(n * r), n - 1) for r in (0.1, 0.35, 0.6, 0.85)})
-        fp = "".join(hashlib.md5(doc[i].get_pixmap(dpi=dpi).samples).hexdigest()[:8]
-                     for i in picks)
+        parts = []
+        for i in picks:
+            page = doc[i]
+            pdfbudget.check_render_geometry(page.rect.width, page.rect.height, dpi)
+            parts.append(hashlib.md5(page.get_pixmap(dpi=dpi).samples).hexdigest()[:8])
+        fp = "".join(parts)
     return {"fp": fp, "page_count": n, "dpi": dpi} if with_meta else fp
 
 

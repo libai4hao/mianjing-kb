@@ -169,26 +169,49 @@ def txt_to_text(path: str | Path) -> str:
 
 
 def pdf_extract_images(doc, img_dir: str, doc_stem: str) -> tuple[list, int, int]:
-    """提取图片，过滤小图和跨页装饰。返回 (refs, kept, skipped)。"""
+    """提取图片，过滤小图和跨页装饰。返回 (refs, kept, skipped)。
+
+    #65：页数/单图解码字节/图片张数/累计字节都有预算；超限记 skip 不崩溃，
+    恶意超大图在解码前按 xref 尺寸拒绝。
+    """
     import pymupdf
+
+    from mianjing_kb.kb import pdfbudget
     os.makedirs(img_dir, exist_ok=True)
+    pdfbudget.check_page_count(len(doc))
     page_counts: dict[str, set] = {}
     kept = []
+    budget_skipped = 0
+    total_bytes = 0
     for pno in range(len(doc)):
         for im in doc[pno].get_images(full=True):
             xref = im[0]
+            if len(kept) >= pdfbudget.MAX_IMAGES_PER_DOC:
+                budget_skipped += 1
+                continue
             try:
+                # im = (xref, smask, width, height, bpc, colorspace, ...)
+                w, h = int(im[2]), int(im[3])
+                pdfbudget.check_image_decode(w, h, 4)   # 按最坏 4 通道预估
                 pix = pymupdf.Pixmap(doc, xref)
                 if pix.width < 80 or pix.height < 80:
                     continue
                 if pix.colorspace and pix.colorspace.n > 3:
                     pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                pdfbudget.check_image_decode(pix.width, pix.height, pix.n)
                 data = pix.tobytes("png")
+            except pdfbudget.ResourceBudgetError:
+                budget_skipped += 1
+                continue
             except Exception:                          # noqa: BLE001
                 continue
-            h = img_hash(data)
-            page_counts.setdefault(h, set()).add(pno)
-            kept.append((h, pno, data))
+            if total_bytes + len(data) > pdfbudget.MAX_IMAGE_TOTAL_BYTES:
+                budget_skipped += 1
+                continue
+            total_bytes += len(data)
+            h_hash = img_hash(data)
+            page_counts.setdefault(h_hash, set()).add(pno)
+            kept.append((h_hash, pno, data))
     decorative = {h for h, pcs in page_counts.items() if len(pcs) >= max(4, len(doc) // 3)}
     saved: dict[str, tuple[str, int]] = {}
     for h, pno, data in kept:
@@ -198,14 +221,17 @@ def pdf_extract_images(doc, img_dir: str, doc_stem: str) -> tuple[list, int, int
         with open(os.path.join(img_dir, fn), "wb") as f:
             f.write(data)
         saved[h] = (fn, pno + 1)
-    return list(saved.values()), len(saved), len(kept) - len(saved)
+    return list(saved.values()), len(saved), len(kept) - len(saved) + budget_skipped
 
 
 def pdf_to_md(path: str | Path, img_dir: str, doc_stem: str,
               extractor: str = "pymupdf4llm") -> tuple[str, int, int, int]:
     import pymupdf
     import pymupdf4llm
+
+    from mianjing_kb.kb import pdfbudget
     doc = pymupdf.open(str(path))
+    pdfbudget.check_page_count(len(doc))       # #65：文本抽取前的页数预算
     refs, kept, skipped = pdf_extract_images(doc, img_dir, doc_stem)
     if extractor == "pymupdf4llm":
         md = pymupdf4llm.to_markdown(doc, write_images=False, show_progress=False)
@@ -301,7 +327,13 @@ def main(argv=None) -> int:
             if ext == ".docx":
                 md = docx_to_md(src)
             elif ext == ".doc":
-                md = doc_to_text(src)
+                # #84：本入口常以 `python -m mianjing_kb.kb.convert_one` 直跑，
+                # 无父进程看门狗；进程内 COM 无法被打断，异常 .doc 会卡死。
+                # 拒绝并指向有逐文件子进程 + 硬超时的 doc_convert 生产链路。
+                res.update(ok=False, err=".doc 请先用 python -m mianjing_kb.doc_convert "
+                                         "转成 .docx（逐文件子进程+超时隔离）再转换")
+                _dump()
+                return 1
             else:
                 md = txt_to_text(src)
             if not md.strip():
