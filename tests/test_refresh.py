@@ -559,3 +559,63 @@ def test_unreadable_db_invalidates_matching_pass_report(tmp_path, monkeypatch):
     gates = ks._gate_summary(build, kb_id, out_id, health=health)
     assert gates["state"] == "STALE" and gates["effective_verdict"] == "INVALID"
     assert any("无法只读打开" in r for r in gates["stale_reasons"])
+
+
+# ---- 候选 #75/#76（P1-B）：发布前影子指纹复核；swap-only 实跑门禁 ----
+
+def test_shadow_swapped_after_manifest_check_is_refused(mini_env, monkeypatch, capsys):
+    """#75：清单校验通过后、os.replace 前影子被换件 → 发布前 sha256 复核拦下。"""
+    import shutil
+    monkeypatch.setattr(rf, "run_gates", _all_pass)   # 隔离 #76 复核，专测换件窗口
+    shadow = mini_env["build"] / rf.SHADOW_NAME
+    shutil.copy2(mini_env["online"], shadow)
+    rf._write_publish_manifest(mini_env["build"], shadow, _all_pass(None))
+    real_counts = rf._counts
+
+    def swap_after_counts(path):
+        out = real_counts(path)
+        if Path(path) == shadow and not swap_after_counts.done:
+            swap_after_counts.done = True
+            # 换件成另一份合法同构 SQLite（quick_check/counts 都过），只有指纹能识破
+            other = mini_env["build"] / "other.db"
+            con = sqlite3.connect(str(other))
+            con.executescript(
+                "CREATE TABLE doc_contents(doc_id INTEGER PRIMARY KEY, md_rel TEXT,"
+                " doc_hash TEXT, mirror_hash TEXT, content TEXT);"
+                "CREATE TABLE questions(qid INTEGER PRIMARY KEY, doc_hash TEXT, seq INTEGER,"
+                " q_text TEXT, a_text TEXT, qtype TEXT, conf TEXT, q_norm_hash TEXT,"
+                " topic TEXT, category TEXT);"
+                "INSERT INTO doc_contents(md_rel, doc_hash, mirror_hash, content)"
+                " VALUES('题库/综合/甲.md','x','y','z');"
+                "INSERT INTO questions(qid, doc_hash, seq, q_text, q_norm_hash, topic, category)"
+                " VALUES(1,'x',1,'伪造题','h','JVM','题库');")
+            con.commit()
+            con.close()
+            shutil.copy2(other, shadow)
+        return out
+
+    swap_after_counts.done = False
+    monkeypatch.setattr(rf, "_counts", swap_after_counts)
+    assert rf.main(["--swap-only"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "ABORT" and "替换" in out["why"]
+    # 线上库未被换件
+    con = sqlite3.connect(str(mini_env["online"]))
+    assert con.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 1
+    con.close()
+
+
+def test_swap_only_reruns_gates_and_rejects_forged_pass(mini_env, monkeypatch, capsys):
+    """#76：自洽的伪造 PASS 清单不算数——swap-only 实跑门禁 FAIL 即拒绝。"""
+    import shutil
+    shadow = mini_env["build"] / rf.SHADOW_NAME
+    shutil.copy2(mini_env["online"], shadow)
+    rf._write_publish_manifest(mini_env["build"], shadow, _all_pass(None))
+    monkeypatch.setattr(rf, "run_gates", _fail_gates)
+    assert rf.main(["--swap-only"]) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "ABORT" and "G1" in out["why"]
+    assert shadow.exists()                          # 拒绝但影子保留
+    con = sqlite3.connect(str(mini_env["online"]))
+    assert con.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 1
+    con.close()

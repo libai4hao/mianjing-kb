@@ -815,6 +815,17 @@ def main(argv=None) -> int:
                                   "why": "影子库侧车删不掉，拒绝在旧 WAL 上切换",
                                   "leftover_locked": stale}, ensure_ascii=False, indent=1))
                 return 2
+            # #76：清单只是自洽 JSON，不证明门禁真跑过——发布前对影子再实跑一遍硬门禁。
+            # 伪造/陈旧的 PASS 清单在这里被真实判定拦下（G9 软门不阻断，与主路径同口径）。
+            gates_now = run_gates(shadow)
+            problems = check_gates(gates_now)
+            if problems:
+                print(json.dumps({"verdict": "ABORT",
+                                  "why": "swap-only 复核门禁未过：" + "；".join(problems),
+                                  "note": "发布清单的 PASS 不被信任；重跑 refresh 重建并过门禁",
+                                  "gate_problems": problems},
+                                 ensure_ascii=False, indent=1))
+                return 2
         else:
             notes = _cleanup(shadow)
             if notes:
@@ -900,6 +911,23 @@ def main(argv=None) -> int:
                               "note": "线上 面经库.db 未动"}, ensure_ascii=False, indent=1))
             return 1
         pre = _counts(shadow)
+
+        # #75：清单校验/quick_check/counts 都按路径名多次打开影子——发布前最后一刻
+        # 再核一次 sha256，manifest 校验之后被换件的影子不得上线。
+        if manifest:
+            try:
+                m_final = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as ex:
+                print(json.dumps({"verdict": "ABORT",
+                                  "why": f"发布清单不可读：{type(ex).__name__}",
+                                  "note": "线上 面经库.db 未动"}, ensure_ascii=False, indent=1))
+                return 1
+            if m_final.get("db_sha256") != _db_sha256(shadow):
+                print(json.dumps({"verdict": "ABORT",
+                                  "why": "影子库在清单校验后被替换（发布前 sha256 复核不符）",
+                                  "note": "线上 面经库.db 未动；重跑 refresh 重建影子"},
+                                 ensure_ascii=False, indent=1))
+                return 1
 
         snapshot = _snapshot(online)
         try:
