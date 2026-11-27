@@ -14,6 +14,8 @@
 
 产物：`<work>/kb_dry.sqlite`、`<work>/build/md_identity_report.json`、stdout JSON。
 任何一步失败都返回非 0；默认删除副本，`--keep` 保留。
+清理前先证明 `--work` 是预演专用目录（写入 `.kb-rehearsal` 标记，且只含 kb_dry/build 等产物）：
+与源台账目录重叠、或混入无关文件时直接拒绝运行，不会顺手删源库或用户文件。
 """
 from __future__ import annotations
 
@@ -32,6 +34,30 @@ from mianjing_kb.kb import config, db  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_WORK = Path(config.BUILD_DIR) / "migration_rehearsal"
+MARKER = ".kb-rehearsal"
+# 预演目录里允许出现的东西（清理只对这类目录负责）
+WORK_OUTPUTS = {MARKER, "kb_dry.sqlite", "kb_dry.sqlite-wal", "kb_dry.sqlite-shm", "build"}
+
+
+def _work_guard(src: Path, work: Path) -> None:
+    """清理前先证明 work 是"预演专用目录"，不是用户目录或源台账所在目录。
+
+    `shutil.rmtree(work)` 是全删：work 指到源库父目录、上级目录或混进别的东西时，
+    旧实现会把源台账和无关文件一起删掉。这里 fail-closed，宁可拒绝跑也不猜。
+    """
+    src_r = Path(src).resolve()
+    work_r = Path(work).resolve()
+    if work_r == src_r or work_r in src_r.parents or src_r in work_r.parents:
+        raise ValueError(f"--work 与源台账目录重叠，拒绝清理：{work_r}")
+    if not work_r.exists():
+        return
+    if not work_r.is_dir():
+        raise ValueError(f"--work 不是目录：{work_r}")
+    unexpected = sorted(p.name for p in work_r.iterdir()
+                        if p.name not in WORK_OUTPUTS and not p.name.startswith("md_identity_report"))
+    if unexpected:
+        raise ValueError(
+            f"--work 目录含非预演产物，拒绝复用/清理：{work_r} :: {', '.join(unexpected[:5])}")
 
 
 def _copy_db(src: Path, dst: Path) -> None:
@@ -66,6 +92,9 @@ def rehearse(src: Path, work: Path, *, keep: bool = False, run_plan: bool = True
     work = Path(work)
     if not src.exists():
         raise FileNotFoundError(f"台账不存在：{src}")
+    _work_guard(src, work)
+    work.mkdir(parents=True, exist_ok=True)
+    (work / MARKER).write_text("mianjing-kb migration rehearsal\n", encoding="utf-8")
     dry = work / "kb_dry.sqlite"
     _copy_db(src, dry)
 
@@ -82,6 +111,7 @@ def rehearse(src: Path, work: Path, *, keep: bool = False, run_plan: bool = True
     applied = []
     after = {}
     plan = {"skipped": True}
+    cleanup = "kept"
     try:
         conn = db.connect(dry)
         try:
@@ -106,19 +136,24 @@ def rehearse(src: Path, work: Path, *, keep: bool = False, run_plan: bool = True
     finally:
         if not keep:
             shutil.rmtree(work, ignore_errors=True)
+            # 删除是真的发生了才算"已删除"：rmtree(ignore_errors=True) 可能静默失败
+            cleanup = "removed" if not work.exists() else "failed"
 
     ok = (not plan.get("skipped")) and plan.get("exit") == 0
     if plan.get("skipped"):
         ok = True
+    if cleanup == "failed":
+        ok = False
     return {
         "ok": ok,
         "src": str(src),
-        "dry_db": str(dry) if keep else "(已删除)",
+        "dry_db": str(dry) if keep else ("(已删除)" if cleanup == "removed" else str(dry)),
         "before": before,
         "after": after,
         "new_migrations": [v for v in applied if v not in set(before["migrations"])],
         "plan": plan,
         "kept": keep,
+        "cleanup": cleanup,
     }
 
 
