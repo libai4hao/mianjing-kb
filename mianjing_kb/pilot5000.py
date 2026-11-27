@@ -239,13 +239,18 @@ def prepare(cfg: dict) -> dict:
     if state != "ok":
         raise RuntimeError(f"裁剪副本 quick_check={state}，停止")
 
-    copied = missing = 0
+    copied = missing = escaped = 0
     for _hash, md_rel in products:
         src = _safe_join(prod_md, md_rel)
         if src is None or not src.exists() or not src.is_file():
             missing += 1
             continue
-        dst = corpus_md / (md_rel or "").replace("\\", "/").lstrip("/")
+        # md_rel 是库里的字符串（低信任）：目标是试跑语料，必须同样做 containment，
+        # 否则带盘符的绝对路径或 ".." 会把正文写到试跑目录之外
+        dst = _safe_join(corpus_md, md_rel)
+        if dst is None:
+            escaped += 1
+            continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         copied += 1
@@ -265,6 +270,7 @@ def prepare(cfg: dict) -> dict:
         "seed": int(cfg["seed"]),
         "md_copied": copied,
         "md_missing": missing,
+        "md_escaped": escaped,
         "quick_check": state,
     }
     _write_json(build / "pilot_plan.json", plan)

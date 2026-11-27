@@ -210,3 +210,23 @@ def test_extract_gate_filter_blocks_review_and_fail():
     kept, skipped = _filter_by_gate([("a", "a"), ("d", "d")], statuses, require_gate=True)
     assert kept == []
     assert skipped == {"garbled": 1, "ungated": 1}
+
+
+def test_doc_hash_for_refuses_escape_from_corpus(tmp_path, monkeypatch):
+    """convert_log 的 rel 可被手改：绝对路径 / `..` 不得让 gate 读语料外文件。"""
+    import mianjing_kb.gate as gate
+    from mianjing_kb.kb import config
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(config, "CORPUS_ROOT", corpus)
+
+    assert gate._doc_hash_for("../outside.pdf", {}) is None
+    assert gate._doc_hash_for(str(outside), {}) is None
+    inside = corpus / "02-Java" / "a.pdf"
+    inside.parent.mkdir()
+    inside.write_bytes(b"%PDF-1.4 fake")
+    assert gate._doc_hash_for("02-Java/a.pdf", {}) is not None
+    assert gate._doc_hash_for("02-Java/a.pdf", {"doc_hash": "abc"}) == "abc"

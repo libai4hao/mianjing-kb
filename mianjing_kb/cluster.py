@@ -39,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mianjing_kb.kb import config, csvsafe  # noqa: E402
+from mianjing_kb.kb import config, csvsafe, paths  # noqa: E402
 from mianjing_kb.question_freq import (DSU, clean_question, close_word, extract, grams, hamming,  # noqa: E402
                            jaccard, normalize, simhash, split_qa)
 
@@ -61,13 +61,12 @@ DIR20 = "20-题库MD"
 def iter_docs(root: Path, md_only: bool = False):
     if not root.exists():
         return
-    for dirpath, _dn, filenames in os.walk(root):
-        for fn in filenames:
-            if fn.startswith("~$"):
-                continue          # Word 锁文件不是文档
-            p = Path(dirpath) / fn
-            if p.suffix.lower() in DOC_EXTS and not (md_only and p.suffix.lower() != ".md"):
-                yield p
+    suffixes = (".md",) if md_only else tuple(DOC_EXTS)
+    # 统一走 paths.walk_files：junction/软链目录剪枝，语料外文件不进切题与统计
+    for p in paths.walk_files(root, suffixes):
+        if p.name.startswith("~$"):
+            continue          # Word 锁文件不是文档
+        yield p
 
 
 class TextCache:

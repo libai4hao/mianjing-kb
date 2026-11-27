@@ -47,3 +47,24 @@ def test_abs_path_single_segment_and_custom_dir(tmp_path, monkeypatch):
     assert [h["rule"] for h in hits] == ["abs_path", "abs_path"]
 
 
+
+
+def test_scan_staged_reads_index_blob(tmp_path, monkeypatch):
+    """--staged 判的是将要提交的 blob：工作区改干净也不能绕过。"""
+    monkeypatch.setattr(ps, "REPO", tmp_path)
+    (tmp_path / "h.py").write_text("clean\n", encoding="utf-8")
+    monkeypatch.setattr(ps, "_staged_text",
+                        lambda rel: 'KEY = "sk-' + "a" * 24 + '"\n')  # privacy-scan: allow 合成测试数据
+    assert [h["rule"] for h in ps.scan(["h.py"], staged=True)] == ["secret"]
+    assert ps.scan(["h.py"]) == []          # 非 staged 仍按工作区（干净）
+
+
+def test_scan_reports_skipped_files(tmp_path, monkeypatch):
+    """跳过的文件必须有账：否则"扫了 0 个"也会被当成干净。"""
+    monkeypatch.setattr(ps, "REPO", tmp_path)
+    (tmp_path / "big.py").write_text("x" * (600 * 1024), encoding="utf-8")
+    (tmp_path / "img.png").write_text("x", encoding="utf-8")
+    stats = {}
+    assert ps.scan(["big.py", "img.png"], stats=stats) == []
+    whys = {s["file"]: s["why"] for s in stats["skipped"]}
+    assert "超过 512KB" in whys["big.py"] and "非文本" in whys["img.png"]

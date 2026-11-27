@@ -33,7 +33,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, events, hashing, proc, status, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, events, hashing, paths, proc, status, wlock  # noqa: E402
 
 WD_FORMAT_XML_DOCUMENT = 16   # 2010+ 的 wdFormatDocumentDefault；2007 只认 12，见 convert()
 WD_FORMAT_XML_DOCUMENT_2007 = 12
@@ -50,6 +50,8 @@ def iter_doc(root: Path):
     except Exception as ex:                                   # noqa: BLE001
         print(f"[warn] 拒收规则读取失败，本次不做拒收过滤：{ex}", file=sys.stderr)
     for dirpath, dirnames, filenames in os.walk(root):
+        # 不跟随 junction/软链目录：os.walk 会顺着它们走出语料根
+        dirnames[:] = [d for d in dirnames if not paths.is_link(Path(dirpath) / d)]
         rel = Path(dirpath).relative_to(root).as_posix() if dirpath != str(root) else ""
         if any(seg in config.EXCLUDE_DIR_NAMES for seg in Path(rel).parts if seg) or \
                 any(rel == p or rel.startswith(p + "/") for p in config.EXCLUDE_PREFIXES) or \
@@ -62,7 +64,10 @@ def iter_doc(root: Path):
             full_rel = f"{rel}/{fn}" if rel else fn
             if reject and any(fnmatch(full_rel, pat) for pat in reject):
                 continue                                # 拒收位（简历模板/学习路线/图解课件）不转
-            yield Path(dirpath) / fn
+            p = Path(dirpath) / fn
+            if paths.is_link(p) or not paths.resolves_inside(root, p):
+                continue                                # 链接文件/越界文件不转
+            yield p
 
 
 def _is_zip(path: Path) -> bool:

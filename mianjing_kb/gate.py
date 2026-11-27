@@ -49,7 +49,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, hashing, textio, textmetrics, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, hashing, paths, textio, textmetrics, wlock  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
@@ -182,12 +182,24 @@ def path_key(p: str | Path) -> str:
 
 
 def md_index() -> dict[str, list[str]]:
-    """20-题库MD 全量 basename 索引（casefold，和 collisions_of 同一套规则）。"""
+    """20-题库MD 全量 basename 索引（casefold，和 collisions_of 同一套规则）。
+
+    只收语料目录内的 md：junction/软链指到语料外的文件不能进索引，否则 gate 会把
+    语料外的正文当产物读、把哈希写进报告。
+    """
     idx: dict[str, list[str]] = {}
+    root_r = Path(config.QUESTION_MD_DIR).resolve()
     for root, _dn, files in os.walk(config.QUESTION_MD_DIR):
         for fn in files:
-            if fn.lower().endswith(".md"):
-                idx.setdefault(fn.casefold(), []).append(os.path.join(root, fn))
+            if not fn.lower().endswith(".md"):
+                continue
+            p = Path(root) / fn
+            try:
+                if not p.resolve().is_relative_to(root_r):
+                    continue
+            except OSError:
+                continue
+            idx.setdefault(fn.casefold(), []).append(str(p))
     return idx
 
 
@@ -229,8 +241,12 @@ def _doc_hash_for(rel: str, e: dict) -> str | None:
     dh = e.get("doc_hash")
     if dh:
         return dh
-    src = Path(config.CORPUS_ROOT) / rel
-    return hashing.sha256_file(src)[:16] if src.exists() else None
+    # rel 来自 convert_log（可被手改）：必须落在语料根内，绝对路径/`..`/链接逃逸视为缺失
+    try:
+        src = paths.safe_join(config.CORPUS_ROOT, rel, must_exist=True)
+    except paths.UnsafePath:
+        return None
+    return hashing.sha256_file(src)[:16]
 
 
 def run_audit() -> dict:

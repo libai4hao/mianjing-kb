@@ -35,7 +35,7 @@ from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, db, events, hashing, status, wlock  # noqa: E402
+from mianjing_kb.kb import config, db, events, hashing, paths, status, wlock  # noqa: E402
 
 OK_STATUS = status.PURGE_OK
 
@@ -95,13 +95,18 @@ def _root_refusal(root: Path, corpus: Path) -> str | None:
 
 def _walk_skip(root: Path, forbidden: list[Path], on_error):
     def _prune(dirnames: list[str], dirpath: str) -> None:
+        # junction/软链目录也剪掉：purge 会删文件，顺着链接走进别处就是误删
         dirnames[:] = [d for d in dirnames
-                       if not any(_within(Path(dirpath) / d, f) for f in forbidden)]
+                       if not any(_within(Path(dirpath) / d, f) for f in forbidden)
+                       and not paths.is_link(Path(dirpath) / d)]
 
     for dirpath, dirnames, filenames in os.walk(root, onerror=on_error):
         _prune(dirnames, dirpath)
         for fn in filenames:
-            yield Path(dirpath) / fn
+            p = Path(dirpath) / fn
+            if paths.is_link(p) or not paths.resolves_inside(root, p):
+                continue                    # 链接目标/根外文件不进入删除计划
+            yield p
 
 
 LOG_HEADER = ["deleted_at", "origin_path", "size_bytes", "doc_hash", "kept_copy", "status"]

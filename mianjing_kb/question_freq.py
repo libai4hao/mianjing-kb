@@ -20,7 +20,6 @@ import csv
 import hashlib
 import heapq
 import math
-import os
 import re
 import sys
 import unicodedata
@@ -32,7 +31,7 @@ from xml.etree import ElementTree as ET
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mianjing_kb.kb import config, csvsafe  # noqa: E402
+from mianjing_kb.kb import config, csvsafe, paths  # noqa: E402
 from mianjing_kb.kb import docx_safety
 
 # 题号标记：行首的序号 / 括号序号 / Q1 / 第N题 / 【N】
@@ -556,12 +555,9 @@ def cluster(items: list[tuple[str, int]], max_dist: int = 24, min_jac: float = 0
 
 # ---------------- 主流程 ----------------
 def iter_docs(dirs: list[Path]):
+    # 与切题/转换同一套遍历口径：junction/软链目录不进入，语料外文件不计频次
     for root in dirs:
-        for dirpath, _dirnames, filenames in os.walk(root):
-            for fn in filenames:
-                p = Path(dirpath) / fn
-                if p.suffix.lower() in DOC_EXTS:
-                    yield p
+        yield from paths.walk_files(root, tuple(DOC_EXTS))
 
 
 def kind_of(path: Path) -> str:

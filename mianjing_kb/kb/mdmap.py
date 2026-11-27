@@ -74,12 +74,27 @@ def build(conn, md_root: Path) -> Mapping:
         by_prefix.setdefault(h[:8], []).append((h, fn))
         by_stem.setdefault(_norm(Path(fn).stem), []).append((h, fn))
 
-    paths = sorted(md_root.rglob("*.md")) if Path(md_root).exists() else []
+    root = Path(md_root)
+    root_r = root.resolve()
+    paths: list[Path] = []
+    outside_root = 0
+    if root.exists():
+        for p in sorted(root.rglob("*.md")):
+            # md 是产物目录：软链/junction 指向语料外时，正文与身份都不该进库（越界读取）
+            try:
+                if not p.resolve().is_relative_to(root_r):
+                    outside_root += 1
+                    continue
+            except OSError:
+                outside_root += 1
+                continue
+            paths.append(p)
     hashed_sibling: dict[tuple[Path, str], Path] = {}
     for p in paths:
         if HASH_SUFFIX.search(p.stem):
             hashed_sibling[(p.parent, _norm(base_stem(p.stem)))] = p
-    stats = {"md_files": len(paths), "by_hash8": 0, "by_stem": 0, "ambiguous": 0, "orphans": 0}
+    stats = {"md_files": len(paths), "by_hash8": 0, "by_stem": 0, "ambiguous": 0, "orphans": 0,
+             "outside_root": outside_root}
     conflicts, orphans_list, old_siblings = [], [], []
     for p in paths:
         rel = p.relative_to(md_root).as_posix()

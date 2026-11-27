@@ -3,7 +3,9 @@
 
 扫描对象是 **git 已跟踪文件**（默认）或 **暂存区**（--staged，供 pre-commit 调用），
 不扫未跟踪文件——工作区的临时产物不该挡住提交。
-覆盖边界：只看**当前文件内容**；历史提交里的泄露需另用 gitleaks / trufflehog 扫 git log。
+`--staged` 读的是 index 里的 blob（`git show :path`），不是工作区当前内容：
+先写好、再"临时改回"的文件仍按将要提交的内容判定。
+覆盖边界：只看**当前内容**；历史提交里的泄露需另用 gitleaks / trufflehog 扫 git log。
 
 规则（命中即失败）：
   abs_path      任意 Windows 绝对路径（盘符 + 根，如 C:\\Users\\x、D:\\corpus），
@@ -67,21 +69,50 @@ def list_files(staged: bool) -> list[str]:
     return [f for f in _git("ls-files").splitlines() if f]
 
 
-def scan(files: list[str]) -> list[dict]:
+def _staged_text(rel: str) -> str | None:
+    """读暂存区 blob（而不是工作区文件）：改完又改回去也必须按将要提交的内容判。"""
+    try:
+        return _git("show", f":{rel}")
+    except RuntimeError:
+        return None
+
+
+def scan(files: list[str], *, staged: bool = False, stats: dict | None = None) -> list[dict]:
+    """扫给定文件；stats（可选）收集跳过原因，避免"扫了 0 个也算干净"。"""
     hits = []
+    skipped = stats.setdefault("skipped", []) if stats is not None else None
+
+    def _skip(rel: str, why: str) -> None:
+        if skipped is not None:
+            skipped.append({"file": rel, "why": why})
+
     for rel in files:
         p = REPO / rel
         if rel in BLOCKED_FILES:
             hits.append({"file": rel, "line": 0, "rule": "corpus_meta", "text": rel})
             continue
-        if not p.is_file() or rel == SELF or p.suffix.lower() not in TEXT_EXT \
-                or p.stat().st_size > 512 * 1024:
+        if not p.is_file():
+            continue                       # 删除/改名：暂存区没有新内容
+        if rel == SELF:
+            _skip(rel, "规则字面量自我豁免")
             continue
-        p = REPO / rel
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        if p.suffix.lower() not in TEXT_EXT:
+            _skip(rel, "非文本扩展名")
             continue
+        if p.stat().st_size > 512 * 1024:
+            _skip(rel, f"超过 512KB（{p.stat().st_size}）")
+            continue
+        if staged:
+            text = _staged_text(rel)
+            if text is None:
+                _skip(rel, "暂存区读不到内容")
+                continue
+        else:
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError as ex:
+                _skip(rel, f"读取失败: {ex}")
+                continue
         for lineno, line in enumerate(text.splitlines(), 1):
             if "privacy-scan: allow" in line:      # 合成测试数据可显式豁免（逐行标注，不整文件放行）
                 continue
@@ -108,11 +139,15 @@ def main(argv=None) -> int:
     except (RuntimeError, FileNotFoundError) as ex:
         print(f"[error] 无法读取 git 文件列表：{ex}", file=sys.stderr)
         return 2
-    hits = scan(files)
+    hits = scan(files, staged=args.staged, stats=(stats := {}))
+    skipped = stats.get("skipped") or []
     if args.json:
-        print(json.dumps({"scanned": len(files), "hits": hits}, ensure_ascii=False, indent=1))
+        print(json.dumps({"scanned": len(files), "hits": hits, "skipped": skipped},
+                         ensure_ascii=False, indent=1))
     else:
-        print(f"[scan] {len(files)} 个文件，命中 {len(hits)} 处")
+        print(f"[scan] {len(files)} 个文件（跳过 {len(skipped)}），命中 {len(hits)} 处")
+        for s in skipped:
+            print(f"  [skip] {s['file']}  {s['why']}")
         for h in hits:
             print(f"  {h['file']}:{h['line']}  [{h['rule']}]  {h['text']}")
         if hits:
