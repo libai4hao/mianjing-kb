@@ -3,8 +3,9 @@
 
 两类输出，互相独立、都不改库：
   ① 成对判定：`eval/cluster_pairs.yaml` 里人工标注的同题/不同题对，按生产聚类同款判据
-     （归一化 → SimHash 汉明距离 ≤ dist → 2-gram Jaccard ≥ jac）逐对判定，
+     （归一化 → 精确同文 或 2-gram Jaccard ≥ jac 且非短题拉丁实体冲突）逐对判定，
      算 Precision / Recall / F1，并按 `kind` 分组（normalize / paraphrase / hard_neg / long_noise）。
+     `--dist` 仅兼容保留（生产 2026-11-22 起 SimHash 汉明不再参与判定）。
   ② 语料指标：从 `kb.sqlite` 取题长与答案覆盖分布；从 `20-题库MD` 重算 chunk_v2 的
      coverage 与 leftovers 比例（不改数据、不落库）。
 
@@ -31,7 +32,8 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mianjing_kb.kb import config  # noqa: E402
-from mianjing_kb.question_freq import grams, hamming, jaccard, normalize, simhash  # noqa: E402
+from mianjing_kb.question_freq import (grams, hamming, jaccard, normalize,  # noqa: E402
+                                       short_latin_conflict, simhash)
 from mianjing_kb.chunker import chunk, chunk_v2  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
@@ -71,12 +73,22 @@ def pair_features(a: str, b: str) -> dict:
     return {"hamming": hamming(ha, hb),
             "jaccard": round(jaccard(grams(na), grams(nb)), 4),
             "norm_equal": na == nb,
+            "short_latin_conflict": short_latin_conflict(na, nb),
             "len_a": len(a), "len_b": len(b)}
 
 
 def predict(feat: dict, dist: int, jac: float) -> bool:
-    """生产聚类同款判据（见 question_freq.cluster）。"""
-    return feat["hamming"] <= dist and feat["jaccard"] >= jac
+    """生产聚类同款判据（question_freq.cluster，2026-11-22 起）：
+    精确同文 或 (2-gram Jaccard >= jac 且非短题拉丁实体冲突)。
+
+    #18：dist（SimHash 汉明）在生产已退役（只作兼容参数），评测不得再用它挡对；
+    F6 短题实体闸门必须参与，否则评测给生产会拆开的对记误合并。
+    """
+    if feat.get("norm_equal"):
+        return True
+    if feat.get("short_latin_conflict"):
+        return False
+    return feat["jaccard"] >= jac
 
 
 def _ratio(n: int, d: int) -> float:
@@ -254,8 +266,8 @@ def write_report(path: Path, meta: dict, base: dict, by_kind: dict, sweep_rows: 
              f"{base['n']} 对（same {base['tp'] + base['fn']} / diff {base['tn'] + base['fp']}）",
              f"- 标注状态：**{meta.get('review_state', '未知')}**"
              + ("（人工复核前只作趋势参考，不作验收阈值）" if meta.get("review_state") == "draft" else ""),
-             f"- 判据：SimHash 汉明 ≤ {base['dist']} 且 2-gram Jaccard ≥ {base['jac']}"
-             f"（与 `question_freq.cluster` 同款）",
+             f"- 判据：精确同文 或 2-gram Jaccard ≥ {base['jac']} 且非短题拉丁实体冲突"
+             f"（与 `question_freq.cluster` 同款；dist={base['dist']} 仅兼容保留，不参与判定）",
              "",
              "## 1. 总体指标", "",
              "| 指标 | 值 |", "|---|---|",
@@ -353,12 +365,18 @@ def main(argv=None) -> int:
 
     dbs = mds = None
     if not args.skip_corpus:
+        # #17：全量评测的输入缺失是错误（exit 2），不是可选降级——
+        # 只有显式 --skip-corpus 才是"只跑成对评测"的合法口径。
         db_path = Path(args.db)
-        if db_path.exists():
-            dbs = db_stats(db_path)
         md_root = Path(args.md_root)
-        if md_root.exists():
-            mds = md_stats(md_root, args.limit_md)
+        missing = [str(p) for p in (db_path, md_root) if not p.exists()]
+        if missing:
+            print(json.dumps({"error": "评测输入缺失（全量评测须库与语料都在；"
+                                         "只跑成对评测请加 --skip-corpus）",
+                              "missing": missing}, ensure_ascii=False))
+            return 2
+        dbs = db_stats(db_path)
+        mds = md_stats(md_root, args.limit_md)
 
     out_md = Path(args.out_md) if args.out_md else Path(config.BUILD_DIR) / "cluster_eval_report.md"
     write_report(out_md, meta, base, by_kind, sweep_rows, dbs, mds)
@@ -372,6 +390,14 @@ def main(argv=None) -> int:
         best = max(sweep_rows, key=lambda r: r["f1"])
         summary["best_f1_row"] = best
     print(json.dumps(summary, ensure_ascii=False, indent=1))
+    # #19：只有 review_state 明确为 reviewed 的标注集才能作验收阈值；
+    # draft/缺失/未知值只作趋势参考——--min-f1 不满足"已人工复核"前提时按未验收退出。
+    review_state = meta.get("review_state")
+    summary["review_state"] = review_state
+    if args.min_f1 > 0 and review_state != "reviewed":
+        print(f"[fail] 标注集 review_state={review_state!r} 不是 reviewed，"
+              "不得作为验收阈值（docs/30：draft 只作趋势参考）", file=sys.stderr)
+        return 1
     if base["f1"] < args.min_f1:
         print(f"[fail] F1 {base['f1']:.4f} < min-f1 {args.min_f1}", file=sys.stderr)
         return 1

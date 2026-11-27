@@ -135,6 +135,54 @@ def test_cli_missing_pairs_returns_2(tmp_path):
     assert ec.main(["--pairs", str(tmp_path / "nope.yaml"), "--skip-corpus"]) == 2
 
 
+def test_predict_matches_production_predicate():
+    """#18：评测谓词与 question_freq.cluster 一致——汉明不再挡对，F6 闸门参与。"""
+    # 高 Jaccard 但汉明超 dist：生产会并，评测也必须并
+    a, b = "什么是 Spring Boot 的自动配置原理", "什么是 Spring Boot 的自动配置的原理"
+    feat = ec.pair_features(a, b)
+    assert feat["jaccard"] >= 0.7
+    assert ec.predict(feat, dist=0, jac=0.7) is True   # 旧谓词会被 dist=0 挡下
+    # 短题拉丁实体冲突：Jaccard 达标也不并
+    f2 = ec.pair_features("什么是springmvc", "什么是spring?")
+    assert f2["jaccard"] >= 0.7 and f2["short_latin_conflict"]
+    assert ec.predict(f2, dist=24, jac=0.7) is False
+    # 与生产 cluster 逐对一致
+    from mianjing_kb.question_freq import cluster, normalize, simhash
+    for x, y, want in ((a, b, True), ("什么是springmvc", "什么是spring?", False)):
+        items = [(normalize(x), simhash(normalize(x))), (normalize(y), simhash(normalize(y)))]
+        dsu = cluster(items, max_dist=24, min_jac=0.7)
+        assert (dsu.find(0) == dsu.find(1)) is want
+        assert ec.predict(ec.pair_features(x, y), 24, 0.7) is want
+
+
+def test_full_eval_missing_inputs_returns_2(tmp_path):
+    """#17：全量评测缺库/缺语料 → exit 2，不得静默降级成成对评测。"""
+    p = _pairs(tmp_path, [
+        {"id": "N1", "kind": "normalize", "same": True, "a": "什么是Spring", "b": "什么是 Spring？"},
+    ])
+    rc = ec.main(["--pairs", str(p), "--db", str(tmp_path / "no.db"),
+                  "--md-root", str(tmp_path / "no-md"), "--out-md", str(tmp_path / "r.md")])
+    assert rc == 2
+
+
+def test_min_f1_requires_reviewed_state(tmp_path, capsys):
+    """#19：draft/未知 review_state 不得作验收阈值；reviewed 才允许 --min-f1 判定。"""
+    rows = [{"id": "N1", "kind": "normalize", "same": True,
+             "a": "什么是Spring", "b": "什么是 Spring？"}]
+    p = _pairs(tmp_path, rows)                      # _pairs 写 review_state: draft
+    assert ec.main(["--pairs", str(p), "--skip-corpus", "--min-f1", "0.5",
+                    "--out-md", str(tmp_path / "r.md")]) == 1
+    assert "reviewed" in capsys.readouterr().err
+    text = p.read_text(encoding="utf-8").replace("review_state: draft", "review_state: reviewed")
+    p.write_text(text, encoding="utf-8")
+    assert ec.main(["--pairs", str(p), "--skip-corpus", "--min-f1", "0.5",
+                    "--out-md", str(tmp_path / "r2.md")]) == 0
+    # 无 --min-f1（0）时 draft 仍可作趋势参考运行
+    p.write_text(p.read_text(encoding="utf-8").replace("reviewed", "draft"), encoding="utf-8")
+    assert ec.main(["--pairs", str(p), "--skip-corpus",
+                    "--out-md", str(tmp_path / "r3.md")]) == 0
+
+
 def test_cli_refuses_placeholder_output_dir(tmp_path, monkeypatch):
     """未配置 BUILD_DIR 且没传 --out-md：应报错退出，而不是 mkdir 占位路径。"""
     p = _pairs(tmp_path, [

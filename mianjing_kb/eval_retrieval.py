@@ -92,11 +92,22 @@ def _qid(key: str) -> str:
 
 
 def _relevance(item: dict) -> dict[str, float]:
+    """分级相关表：grade 必须是 0..3 的数值（schema 口径）；重复键拒绝。
+
+    #21：grade 0 表示"不相关"，保留在表里供 nDCG 零增益，但不得给 recall 记分。
+    """
     rel = {}
     for entry in item.get("relevance") or []:
         key = _qid(entry.get("q_key") or "")
-        if key:
-            rel[key] = float(entry.get("grade", 1))
+        if not key:
+            continue
+        grade = entry.get("grade", 1)
+        if isinstance(grade, bool) or not isinstance(grade, (int, float)) \
+                or not 0 <= grade <= 3:
+            raise ValueError(f"relevance grade 非法（须 0..3）: {key}={grade!r}")
+        if key in rel:
+            raise ValueError(f"relevance 重复键: {key}")
+        rel[key] = float(grade)
     return rel
 
 
@@ -116,12 +127,21 @@ def _one_query(con, item: dict, k: int, mode: str) -> dict:
     fn = {"kw": S.keyword_search, "vec": S.vector_search, "hybrid": S.hybrid_search}[mode]
     rows = fn(con, q, **_search_kwargs(item, k))
     keys = [str(r.get("q_key") or "") for r in rows]
-    ids = [_qid(key) for key in keys]
+    # #20：同一归一题干跨文档是同一相关项——按身份去重（保首次出现序），
+    # 否则重复身份在 DCG 里多次记分而 IDCG 只算一份，nDCG 会超过 1。
+    ids = list(dict.fromkeys(_qid(key) for key in keys))
     rel = _relevance(item)
     expected = [_qid(x) for x in (item.get("expect_q_keys") or []) if x]
     if not rel and expected:
         rel = {key: 1.0 for key in expected}
-    relevant = set(rel) | set(expected)
+    elif rel and expected:
+        # #21：分级表是权威——expect_q_keys 只在无分级表时兜底；
+        # 两表矛盾（expect 里的键分级为 0 或缺席）说明标注不一致，拒绝该条。
+        bad = [k for k in expected if rel.get(k, 0) <= 0]
+        if bad:
+            raise ValueError(f"expect_q_keys 与 relevance 矛盾（grade 0/缺席）: {bad}")
+    # recall 只认正分级（grade>0）；grade 0 的键不给召回记分
+    relevant = {k for k, g in rel.items() if g > 0}
     top5 = set(ids[:5])
     recall5 = len(relevant & top5) / len(relevant) if relevant else None
     mrr10 = 0.0

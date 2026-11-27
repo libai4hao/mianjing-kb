@@ -45,8 +45,13 @@ def measure(md_text: str) -> dict:
     }
 
 
-def resolve_text(conn, corpus_root: Path, doc_hash: str) -> str | None:
-    """doc_hash → markdown 文本；md 镜像在 `20-题库MD/` 下（老库也有直接挂语料根的老数据）。"""
+def resolve_text(conn, corpus_root: Path, doc_hash: str) -> tuple[str, str] | None:
+    """doc_hash → (markdown 文本, 内容 sha256)；md 镜像在 `20-题库MD/` 下。
+
+    #6：返回内容哈希供基线绑定——PASS 必须对应基线时那份字节，
+    同计数不同内容（换件/改写）不得冒充回归通过。
+    """
+    import hashlib
     row = conn.execute(
         "SELECT md_rel FROM document_products WHERE doc_hash=? AND md_rel IS NOT NULL",
         (doc_hash,)).fetchone()
@@ -59,7 +64,8 @@ def resolve_text(conn, corpus_root: Path, doc_hash: str) -> str | None:
             path = paths.safe_join(base, rel, must_exist=True)
         except paths.UnsafePath:
             continue
-        return path.read_text(encoding="utf-8", errors="ignore")
+        data = path.read_bytes()
+        return data.decode("utf-8", errors="ignore"), hashlib.sha256(data).hexdigest()
     return None
 
 
@@ -69,8 +75,12 @@ def run(doc_hashes: list[str], db_path: Path, corpus_root: Path) -> dict:
     per = {}
     try:
         for h in doc_hashes:
-            text = resolve_text(conn, corpus_root, h)
-            per[h] = {"missing": True} if text is None else measure(text)
+            got = resolve_text(conn, corpus_root, h)
+            if got is None:
+                per[h] = {"missing": True}
+            else:
+                text, md_hash = got
+                per[h] = {**measure(text), "md_hash": md_hash}
     finally:
         conn.close()
     total = {k: sum(v.get(k, 0) for v in per.values() if not v.get("missing")) for k in KEYS}
@@ -80,8 +90,15 @@ def run(doc_hashes: list[str], db_path: Path, corpus_root: Path) -> dict:
 
 
 def compare(cur: dict, base: dict) -> dict:
-    """按容差判 PASS/FAIL；返回可读的违规项。"""
+    """按容差判 PASS/FAIL；返回可读的违规项。
+
+    #5：基线自身必须完整——基线侧 missing 不再被静默跳过；
+    清单里的文档在基线中缺失同样 FAIL（不完整基线没有比较资格）。
+    #6：基线记录了 md_hash 时逐篇比对内容指纹，变了即 FAIL（须显式 --make 重建）。
+    """
     fails = []
+    if base.get("missing"):
+        fails.append(f"基线不完整：{base['missing']} 篇 missing（须重建完整基线）")
     b_total = base.get("total") or {}
     c_total = cur.get("total") or {}
     for key, tol in (("questions", TOTAL_TOL), ("empty_answers", EMPTY_TOL)):
@@ -92,12 +109,20 @@ def compare(cur: dict, base: dict) -> dict:
     b, c = b_total.get("weak_questions", 0), c_total.get("weak_questions", 0)
     if c - b > WEAK_ABS:
         fails.append(f"weak_questions: {b} → {c}（弱题只许减不许增）")
+    cur_per = cur.get("per_doc") or {}
+    for h in cur_per:
+        if h not in (base.get("per_doc") or {}):
+            fails.append(f"{h}: 基线缺少该文档（基线与清单不一致，须重建）")
     for h, base_doc in (base.get("per_doc") or {}).items():
         if base_doc.get("missing"):
             continue
-        cur_doc = (cur.get("per_doc") or {}).get(h) or {}
+        cur_doc = cur_per.get(h) or {}
         if cur_doc.get("missing"):
             fails.append(f"{h}: 镜像缺失（基线有、现在读不到）")
+            continue
+        if base_doc.get("md_hash") and cur_doc.get("md_hash") \
+                and base_doc["md_hash"] != cur_doc["md_hash"]:
+            fails.append(f"{h}: 镜像内容已变化（md_hash 不符，须 --make 重建基线）")
             continue
         b, c = base_doc.get("questions", 0), cur_doc.get("questions", 0)
         limit = max(1, int(round(b * DOC_TOL)))
@@ -126,11 +151,16 @@ def main(argv=None) -> int:
     result = run(hashes, Path(args.db), Path(args.corpus_root))
 
     if args.make:
+        # #5：不完整测量不得成为基线——全缺失/部分缺失的基线会让 --check 空过。
+        if result["missing"]:
+            print(f"[fatal] {result['missing']}/{result['docs']} 篇镜像读不到，"
+                  "拒绝生成不完整基线；先修复语料/台账再 --make", file=sys.stderr)
+            return 2
         Path(args.baseline).parent.mkdir(parents=True, exist_ok=True)
         Path(args.baseline).write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n",
                                        encoding="utf-8")
-        print(json.dumps({"baseline": str(args.baseline), "total": result["total"]},
-                         ensure_ascii=False))
+        print(json.dumps({"baseline": str(args.baseline), "total": result["total"],
+                          "missing": result["missing"]}, ensure_ascii=False))
         return 0
 
     base_path = Path(args.baseline)
