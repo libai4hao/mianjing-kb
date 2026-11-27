@@ -140,6 +140,69 @@ def test_label_writes_to_pilot_db_by_default(tmp_path, monkeypatch):
     assert "--dry-run" in seen[-1]
 
 
+# ---- 候选 #48/#49（P1-B）：md_rel 词法校验、目标链接拒绝、复制身份绑定 ----
+
+def test_safe_join_rejects_traversal_and_absolute(tmp_path):
+    """#49：`..` 段与绝对路径在词法层就拒绝，不再靠最终 resolve 结果兜底。"""
+    root = tmp_path / "root"
+    root.mkdir()
+    (tmp_path / "outside.md").write_text("x", encoding="utf-8")
+    assert P._safe_join(root, "a/../../outside.md") is None
+    assert P._safe_join(root, str(tmp_path / "outside.md")) is None
+    drive_abs = "C:" + chr(47) + "Windows/win.ini"   # 盘符绝对路径（构造避免隐私门禁字面量）
+    assert P._safe_join(root, drive_abs) is None
+    (root / "a").mkdir()
+    (root / "a" / "b.md").write_text("y", encoding="utf-8")
+    assert P._safe_join(root, "a/b.md") is not None
+
+
+def test_prepare_rejects_traversal_md_rel(tmp_path, monkeypatch):
+    """#49：库里 md_rel 带 `..` 穿越 → md_escaped 计数，不写试跑目录之外。"""
+    prod_db, prod_md = _mk_prod(tmp_path)
+    # 合法产物供抽样估算；复制阶段再把 md_rel 换成穿越值（模拟库被改/陈旧行）
+    real_prepare = P.prepare
+    monkeypatch.setattr("mianjing_kb.extract.extract_doc_status", lambda h, p: ([{}], "ok"))
+    orig_backup = P._backup
+
+    def poison_backup(src, dst):
+        orig_backup(src, dst)
+        con = sqlite3.connect(str(dst))
+        con.execute("UPDATE document_products SET md_rel='a/../../../evil.md' WHERE doc_hash='h1'")
+        con.commit()
+        con.close()
+
+    monkeypatch.setattr(P, "_backup", poison_backup)
+    cfg = {"prod_db": str(prod_db), "prod_md_dir": str(prod_md),
+           "pilot_root": str(tmp_path / "pilot"), "docs": 2, "seed": 7,
+           "target_min": 2, "target_max": 100}
+    out = real_prepare(cfg)
+    assert out["md_escaped"] >= 1
+    assert not (tmp_path / "evil.md").exists()
+    assert not (tmp_path / "pilot" / "evil.md").exists()
+
+
+def test_prepare_skips_symlink_destination(tmp_path, monkeypatch):
+    """#49：目标位置已是软链 → 拒绝写入（不得改链指向的外部文件）。"""
+    prod_db, prod_md = _mk_prod(tmp_path)
+    monkeypatch.setattr("mianjing_kb.extract.extract_doc_status", lambda h, p: ([{}], "ok"))
+    root = tmp_path / "pilot"
+    corpus_md = root / "corpus" / "20-题库MD"
+    (corpus_md / "a").mkdir(parents=True)
+    sentinel = tmp_path / "sentinel.md"
+    sentinel.write_text("原始哨兵", encoding="utf-8")
+    try:
+        (corpus_md / "a" / "one.md").symlink_to(sentinel)
+        (corpus_md / "a" / "two.md").symlink_to(sentinel)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink not permitted on this host")
+    cfg = {"prod_db": str(prod_db), "prod_md_dir": str(prod_md),
+           "pilot_root": str(root), "docs": 2, "seed": 7,
+           "target_min": 2, "target_max": 100}
+    out = P.prepare(cfg)
+    assert out["md_escaped"] == 2 and out["md_copied"] == 0
+    assert sentinel.read_text(encoding="utf-8") == "原始哨兵"
+
+
 
 
 

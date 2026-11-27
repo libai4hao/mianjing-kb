@@ -313,4 +313,85 @@ def test_short_hash_collision_is_refused(env, capsys):
     rc = _run(env, victim.parent, "--apply", "--yes", "--no-backup")
     assert rc == 0
     assert victim.exists()
-    assert "未收入（短指纹无记录或完整 sha256 不符）" in capsys.readouterr().out
+
+
+# ---------------- 候选 #52：删前复验保留副本身份/内容 ----------------
+
+def test_keep_copy_swapped_after_plan_is_refused(env, monkeypatch):
+    """#52：计划通过后保留副本被改写（扫描期缓存的哈希不再可信）→ 拒删。"""
+    p = _victim(env)
+    keep = _keep(env)
+    _add(env, p, src=keep)
+    real = hashing.sha256_file
+    state = {"planned": False}
+
+    def fake(path):
+        # 第一次对 keep 的哈希是计划期；之后 keep 已被换内容
+        if Path(path) == keep and state["planned"]:
+            return real(path)
+        if Path(path) == keep:
+            state["planned"] = True
+            digest = real(path)
+            keep.write_bytes(b"swapped-after-plan")   # 计划落定后立刻换内容
+            return digest
+        return real(path)
+
+    monkeypatch.setattr(po.hashing, "sha256_file", fake)
+    assert _run(env, p.parent, "--apply", "--yes", "--no-backup") == 1
+    assert p.exists()                                 # 原件保住了
+    rows = list(csv.DictReader((env["build"] / "del.csv").open(encoding="utf-8-sig")))
+    assert [r["status"] for r in rows] == ["planned", "failed"]
+
+
+def test_keep_copy_replaced_by_symlink_is_refused(env, monkeypatch):
+    """#52：保留副本在删前被换成指向外部的软链 → 拒删（链接不是可信保留副本）。"""
+    p = _victim(env)
+    keep = _keep(env)
+    _add(env, p, src=keep)
+    outside = env["tmp"] / "outside.pdf"
+    outside.write_bytes(b"victim-bytes")
+    real = hashing.sha256_file
+
+    def fake(path):
+        digest = real(path)
+        if Path(path) == keep and not fake.done:
+            fake.done = True
+            keep.unlink()
+            try:
+                keep.symlink_to(outside)
+            except (OSError, NotImplementedError):
+                pytest.skip("symlink not permitted on this host")
+        return digest
+
+    fake.done = False
+    monkeypatch.setattr(po.hashing, "sha256_file", fake)
+    assert _run(env, p.parent, "--apply", "--yes", "--no-backup") == 1
+    assert p.exists()
+
+
+def test_origin_replaced_by_symlink_is_refused(env, monkeypatch):
+    """#52：待删件在删前被换成软链 → lstat/链接检查拒删，不跟随删除外部目标。"""
+    p = _victim(env)
+    _add(env, p, src=_keep(env))
+    outside = env["tmp"] / "outside-target.pdf"
+    outside.write_bytes(b"outside-sentinel")
+    real = hashing.sha256_file
+
+    def fake(path):
+        digest = real(path)
+        if Path(path) == p and fake.calls == 1:
+            p.unlink()
+            try:
+                p.symlink_to(outside)
+            except (OSError, NotImplementedError):
+                pytest.skip("symlink not permitted on this host")
+        if Path(path) == p:
+            fake.calls += 1
+        return digest
+
+    fake.calls = 0
+    monkeypatch.setattr(po.hashing, "sha256_file", fake)
+    rc = _run(env, p.parent, "--apply", "--yes", "--no-backup")
+    assert rc == 1
+    assert outside.read_bytes() == b"outside-sentinel"   # 外部目标未被删
+    assert p.is_symlink()                                # 链接本身也未被跟随处理

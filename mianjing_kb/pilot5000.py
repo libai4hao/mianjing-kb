@@ -19,14 +19,13 @@ import csv
 import json
 import os
 import random
-import shutil
 import sqlite3
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from mianjing_kb.kb import db as kbdb
+from mianjing_kb.kb import db as kbdb, paths  # noqa: E402
 
 NOW_FMT = "%Y-%m-%dT%H:%M:%S"
 
@@ -174,15 +173,16 @@ def _sample_docs(prod: sqlite3.Connection, docs: int, seed: int,
 
 
 def _safe_join(root: Path, rel: str) -> Path | None:
-    rel = (rel or "").replace("\\", "/").lstrip("/")
-    if not rel:
-        return None
-    p = (root / rel).resolve()
+    """md_rel（库里字符串，低信任）→ 根内真实文件路径。
+
+    候选 #49：旧实现保留 `..` 段、只看最终 resolve 结果——`x/../../..` 这类
+    路径能在两个根之间穿越。统一走 kb/paths.safe_join（词法拒绝 .. / 绝对路径 /
+    ADS + resolve containment），源与目标同一套规则。
+    """
     try:
-        p.relative_to(root.resolve())
-    except ValueError:
+        return paths.safe_join(root, rel)
+    except paths.UnsafePath:
         return None
-    return p
 
 
 def prepare(cfg: dict) -> dict:
@@ -241,18 +241,34 @@ def prepare(cfg: dict) -> dict:
 
     copied = missing = escaped = 0
     for _hash, md_rel in products:
+        # md_rel 是库里的字符串（低信任）：源与目标都先做词法 + containment 校验，
+        # 否则带盘符的绝对路径或 ".." 会读到语料外 / 把正文写到试跑目录之外（#49）
         src = _safe_join(prod_md, md_rel)
-        if src is None or not src.exists() or not src.is_file():
-            missing += 1
-            continue
-        # md_rel 是库里的字符串（低信任）：目标是试跑语料，必须同样做 containment，
-        # 否则带盘符的绝对路径或 ".." 会把正文写到试跑目录之外
         dst = _safe_join(corpus_md, md_rel)
-        if dst is None:
+        if src is None or dst is None or (dst.exists() and paths.is_link(dst)):
             escaped += 1
             continue
+        if paths.is_link(src) or not src.is_file():
+            missing += 1
+            continue
+        # #48：copy2 会按路径名重开源文件——校验与复制之间被换件就读到别的字节。
+        # 改为一次读入 + 写前复核身份（size/mtime/inode），变了就按 missing 跳过。
+        try:
+            st_before = src.stat()
+            data = src.read_bytes()
+            st_after = src.stat()
+        except OSError:
+            missing += 1
+            continue
+        if (st_before.st_size, st_before.st_mtime_ns) != \
+                (st_after.st_size, st_after.st_mtime_ns) or len(data) != st_after.st_size:
+            missing += 1
+            continue
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        if dst.exists() and paths.is_link(dst):
+            escaped += 1
+            continue
+        dst.write_bytes(data)
         copied += 1
 
     with (build / "pilot_docs.csv").open("w", newline="", encoding="utf-8") as f:

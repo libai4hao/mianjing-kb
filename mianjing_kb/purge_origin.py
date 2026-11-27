@@ -29,6 +29,7 @@ import argparse
 import csv
 import json
 import os
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -314,14 +315,32 @@ def _main_locked(args) -> int:
             # 先落盘意图，再动手：日志先于 unlink，断电/崩溃时不会出现"删了但没记录"
             row("planned", p, size, digest, keep)
             try:
-                st = p.stat()
+                st = p.lstat()
+                if stat.S_ISLNK(st.st_mode) or paths.is_link(p):
+                    raise OSError("待删件已变成链接/reparse point")
                 if st.st_size != size or st.st_mtime_ns != mtime_ns:
                     raise OSError("扫描后文件已变化")
-                if not keep.is_file():
-                    raise OSError("保留副本已不存在")
+                # 删除目标必须仍解析在某个 --roots 白名单内（父目录被换成 junction 时拒绝）
+                if not any(paths.resolves_inside(r, p) for r in roots):
+                    raise OSError("待删件解析后已不在 --roots 内")
+                # #52：保留副本删前复验——存在性之外，还要 containment、非链接、
+                # 非自身、完整 sha256 一致；任何一项不满足都拒删（唯一副本保障）。
+                if not keep.is_file() or paths.is_link(keep):
+                    raise OSError("保留副本已不存在或变成链接")
+                if not _within(keep, corpus) or _in_quarantine(keep, corpus):
+                    raise OSError("保留副本已不在语料根内或落入隔离区")
+                if os.path.samefile(keep, p):
+                    raise OSError("保留副本与待删件是同一文件")
+                if hashing.sha256_file(keep) != digest:
+                    raise OSError("保留副本内容已变化（sha256 不符）")
                 # 收窗：扫描到删除之间文件可能被改写（同 size+同 mtime 也能换内容），删前重算一次
                 if not args.no_rehash and hashing.sha256_file(p) != digest:
                     raise OSError("删除前内容已变化（重算 sha256 不符）")
+                # 最后一次身份复核后立刻 unlink：把复核-删除窗口压到最小
+                st2 = p.lstat()
+                if (st2.st_size, st2.st_mtime_ns, st2.st_ino) != \
+                        (st.st_size, st.st_mtime_ns, st.st_ino):
+                    raise OSError("复核后文件身份又变化")
                 p.unlink()
             except OSError as ex:
                 failures += 1
