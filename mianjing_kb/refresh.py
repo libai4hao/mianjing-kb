@@ -279,6 +279,42 @@ def _vec_meta(p: Path) -> dict[str, str]:
         con.close()
 
 
+def _sidecar_state(p: Path) -> dict:
+    out = {}
+    for suffix in ("-wal",):
+        sp = Path(str(p) + suffix)
+        try:
+            size = sp.stat().st_size
+        except OSError:
+            continue
+        if size > 0:
+            out[suffix] = {"size_bytes": size}
+    return out
+
+
+def _gate_input_identities(build_dir: Path) -> dict:
+    """门禁的非库输入指纹（候选 #54）：skip_log / retire_log / 台账源库。
+
+    这些输入可变且直接决定 G1/G5 的豁免与留痕判定；发布凭证必须绑定它们，
+    --swap-only 复验时任一变化即拒绝复用旧 PASS。
+    """
+    inputs = {}
+    for name, p in (("skip_log", Path(config.META_DIR) / "skip_log.json"),
+                    ("retire_log", Path(build_dir) / "retire_log.csv"),
+                    ("kb_db", Path(config.DB_PATH))):
+        try:
+            st = p.stat()
+            item = {"size_bytes": st.st_size, "mtime_ns": st.st_mtime_ns}
+            if name == "kb_db":
+                sidecars = _sidecar_state(p)
+                if sidecars:
+                    item["sidecars"] = sidecars
+            inputs[name] = item
+        except OSError:
+            inputs[name] = {"missing": True}
+    return inputs
+
+
 def _write_publish_manifest(build_dir: Path, shadow: Path, gates: list[dict]) -> Path:
     """门禁通过后写发布清单；--swap-only 只认这份清单，不认"文件存在"。"""
     _checkpoint_shadow(shadow)
@@ -300,6 +336,8 @@ def _write_publish_manifest(build_dir: Path, shadow: Path, gates: list[dict]) ->
         "doc_content_count": counts.get("doc_contents"),
         "gate_verdict": "PASS",
         "gate_ids": gate_ids,
+        "gate_states": {str(g.get("id")): g.get("state") for g in gates},
+        "gate_inputs": _gate_input_identities(build_dir),
         "validated_at": datetime.now().isoformat(timespec="seconds"),
         "publish_status": "pending",
         "publishable": True,
@@ -366,6 +404,13 @@ def _verify_publish_manifest(build_dir: Path, shadow: Path) -> tuple[bool, str]:
         return False, f"发布清单缺少门禁：{sorted(missing)}"
     if m.get("shadow_name") != shadow.name:
         return False, "发布清单对应的影子库名称不一致"
+    # #54：非库输入（skip_log/retire_log/台账源库）变了，旧 PASS 的前提已不成立
+    bound_inputs = m.get("gate_inputs")
+    if bound_inputs is not None:
+        current_inputs = _gate_input_identities(build_dir)
+        for name, old in bound_inputs.items():
+            if current_inputs.get(name) != old:
+                return False, f"门禁输入 {name} 已变化，需重跑门禁后再发布"
     if m.get("db_sha256") != _db_sha256(shadow):
         return False, "影子库 sha256 与发布清单不一致（文件被替换或未跑完门禁）"
     if m.get("schema_version") != _schema_version(shadow):

@@ -208,11 +208,37 @@ def g1_coverage(kb_conn, out_conn, skip: dict[str, str],
                     if target.startswith("duplicate_of:"):
                         target = target.split(":", 1)[1].strip()
                     target = target.replace("\\", "/")
+                    bad_target = None
                     if not target or target not in known_rels:
+                        bad_target = "duplicate_of 目标必须能在台账/md 中找到"
+                    elif target == rel.replace("\\", "/"):
+                        # 候选 #59：自指豁免——自己不能证明自己是重复件
+                        bad_target = "duplicate_of 目标不能是自身"
+                    else:
+                        # 候选 #59：循环豁免——A→B→A 互相担保等于没有覆盖证据。
+                        # 沿 duplicate_of 链追到非 duplicate_of 的登记或已覆盖文档为止。
+                        chain = {rel.replace("\\", "/")}
+                        cur = target
+                        while True:
+                            if cur in chain:
+                                bad_target = "duplicate_of 目标形成循环引用"
+                                break
+                            chain.add(cur)
+                            nxt = (skip_entries or {}).get(cur)
+                            if not nxt or nxt.get("reason") != "duplicate_of":
+                                break       # 链尾不是 duplicate_of 豁免：目标本身须有覆盖
+                            t2 = (nxt.get("target") or nxt.get("note") or "").strip()
+                            if t2.startswith("duplicate_of:"):
+                                t2 = t2.split(":", 1)[1].strip()
+                            t2 = t2.replace("\\", "/")
+                            if not t2 or t2 not in known_rels:
+                                bad_target = "duplicate_of 链上的目标必须能在台账/md 中找到"
+                                break
+                            cur = t2
+                    if bad_target:
                         fails.append({"rel": rel, "file_name": r["file_name"], "ext": r["ext"],
                                       "category": r["category"], "skip_reason": why,
-                                      "target": target,
-                                      "suggest": "duplicate_of 目标必须能在台账/md 中找到"})
+                                      "target": target, "suggest": bad_target})
                         continue
                 n_skip += 1
                 continue
@@ -703,7 +729,9 @@ def g6b_golden(kb_conn) -> dict:
     混淆矩阵 matrix[gold][pred]，并标 source=staging|questions。"""
     import sqlite3
     sql = ("SELECT g.topic_gold, s.topic FROM golden_labels g "
-           "JOIN labels_staging s ON s.q_norm_hash=g.q_norm_hash")
+           "JOIN labels_staging s ON s.q_norm_hash=g.q_norm_hash "
+           "JOIN questions q ON q.qid=s.qid AND q.q_norm_hash=s.q_norm_hash "
+           "WHERE s.review_state IS NOT 'disagree' AND s.review_state IS NOT 'pending'")
     try:
         n_gold = kb_conn.execute("SELECT COUNT(*) FROM golden_labels").fetchone()[0]
     except sqlite3.OperationalError:
@@ -712,10 +740,15 @@ def g6b_golden(kb_conn) -> dict:
     if n_gold == 0:
         return _gate("G6b", "金标抽检", "硬", "SKIP", [],
                      {"golden": 0, "note": "golden_labels 无行——先 --golden-sample/--golden-load"}, sql)
+    # 候选 #60：staging 侧只计 **merge 合格** 样本——qid 在当前 questions 里、
+    # 题干 hash 一致（历史 NULL 行按 qid 放行，与 merge 孤儿口径一致）、
+    # 且 review_state 不是 disagree/pending。孤儿行/待复核行不得给准确率凑分。
     rows = kb_conn.execute(
         "SELECT g.q_norm_hash, g.topic_gold, g.qtype_gold, g.difficulty_gold, "
         "       s.topic, s.qtype, s.difficulty "
-        "FROM golden_labels g JOIN labels_staging s ON s.q_norm_hash=g.q_norm_hash").fetchall()
+        "FROM golden_labels g JOIN labels_staging s ON s.q_norm_hash=g.q_norm_hash "
+        "JOIN questions q ON q.qid=s.qid AND q.q_norm_hash=s.q_norm_hash "
+        "WHERE s.review_state IS NOT 'disagree' AND s.review_state IS NOT 'pending'").fetchall()
     source = "staging"
     sql_source = sql
     if not rows:                 # merge 后 staging 清空 → 回落到生产库（同一个 hash 键）
@@ -884,12 +917,30 @@ def _ro_uri(path: Path | str) -> str:
 
 
 def _db_identity(path: Path | str) -> dict:
+    """库指纹：主文件 + WAL/SHM 侧车（候选 #58）。
+
+    WAL-only 提交不改主文件 size/mtime；只绑主文件会把"库已变"误判成"报告仍新鲜"。
+    """
     p = Path(path)
     try:
         st = p.stat()
-        return {"path": str(p), "size_bytes": st.st_size, "mtime_ns": st.st_mtime_ns}
+        out = {"path": str(p), "size_bytes": st.st_size, "mtime_ns": st.st_mtime_ns}
     except OSError:
         return {"path": str(p), "missing": True}
+    sidecars = {}
+    for suffix in ("-wal",):
+        # 只绑 -wal 的非零 size：读连接收尾会 TRUNCATE/删除 WAL（0 字节残件与无侧车
+        # 语义等价）；已提交未 checkpoint 的变更必然使 size>0，足以判过期。
+        sp = Path(str(p) + suffix)
+        try:
+            size = sp.stat().st_size
+        except OSError:
+            continue
+        if size > 0:
+            sidecars[suffix] = {"size_bytes": size}
+    if sidecars:
+        out["sidecars"] = sidecars
+    return out
 
 
 def write_report(build_dir: Path, gates: list[dict], elapsed: float,

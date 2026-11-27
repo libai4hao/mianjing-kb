@@ -84,6 +84,7 @@ def test_full_path_swap(mini_env):
 def test_swap_writes_verify_report_bound_to_post_swap_files(mini_env):
     """F3：切换 + indexed_at 回写之后再写报告，status 才能判 PASS 而不是恒 STALE。"""
     from mianjing_kb import status as st
+    from mianjing_kb import verify_ledger as vl
 
     assert rf.main([]) == 0
     build = mini_env["build"]
@@ -91,8 +92,7 @@ def test_swap_writes_verify_report_bound_to_post_swap_files(mini_env):
     ids = rep["summary"]["db_identity"]
 
     def ident(p: Path) -> dict:
-        s = Path(p).stat()
-        return {"path": str(p), "size_bytes": s.st_size, "mtime_ns": s.st_mtime_ns}
+        return vl._db_identity(p)
 
     for key, path in (("kb", config.DB_PATH), ("out", mini_env["online"])):
         assert ids[key]["size_bytes"] == ident(path)["size_bytes"]
@@ -471,3 +471,91 @@ def test_log_traceback_writes_dated_file_and_prunes_old(tmp_path):
     cap.write_text("x", encoding="utf-8")
     rf.log_traceback(tmp_path, ValueError("x"), "ctx")
     assert cap.exists()
+
+
+# ---- 候选 #54/#58（P1-A）：发布凭证绑定非库输入；WAL-only 变更使报告过期 ----
+
+def test_swap_only_rejects_changed_gate_inputs(mini_env):
+    """#54：skip_log 在门禁通过后被改动，--swap-only 不得复用旧 PASS。"""
+    import shutil
+    shadow = mini_env["build"] / rf.SHADOW_NAME
+    shutil.copy2(mini_env["online"], shadow)
+    rf._write_publish_manifest(mini_env["build"], shadow, _all_pass(None))
+    meta = Path(config.META_DIR)
+    skip = meta / "skip_log.json"
+    before = skip.read_bytes() if skip.exists() else None
+    try:
+        skip.write_text(json.dumps({"items": [
+            {"rel": "02-Java进阶/甲.pdf", "reason": "duplicate_of", "target": "x"}]}),
+            encoding="utf-8")
+        assert rf.main(["--swap-only"]) == 2
+        assert shadow.exists()                  # 拒绝切换但影子保留
+    finally:
+        if before is None:
+            skip.unlink(missing_ok=True)
+        else:
+            skip.write_bytes(before)
+
+
+def test_manifest_records_gate_states_and_inputs(mini_env):
+    import shutil
+    shadow = mini_env["build"] / rf.SHADOW_NAME
+    shutil.copy2(mini_env["online"], shadow)
+    rf._write_publish_manifest(mini_env["build"], shadow, _all_pass(None))
+    m = json.loads((mini_env["build"] / rf.PUBLISH_MANIFEST).read_text(encoding="utf-8"))
+    assert set(m["gate_states"]) == set(rf.REQUIRED_GATES)
+    assert all(v == "PASS" for v in m["gate_states"].values())
+    assert set(m["gate_inputs"]) == {"skip_log", "retire_log", "kb_db"}
+
+
+def test_wal_only_change_marks_report_stale(tmp_path, monkeypatch):
+    """#58：WAL 里已提交的变更不改主文件 size/mtime；报告仍须判 STALE/INVALID。"""
+    from mianjing_kb import status as ks
+
+    build = tmp_path / "build"
+    build.mkdir()
+    monkeypatch.setattr(config, "BUILD_DIR", build)
+    monkeypatch.setattr(config, "DB_PATH", build / "kb.sqlite")
+    path = build / "kb.sqlite"
+    writer = sqlite3.connect(str(path))
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE t(x)")
+    writer.commit()
+    # 主文件 checkpoint 一次后固定；之后的提交只进 WAL
+    writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    kb_id = ks._identity(path)
+    out_id = ks._identity(build / "missing.db")
+    report = {"summary": {"at": "now", "verdict": "PASS", "hard_fail": 0, "gates": {},
+                          "db_identity": {"kb": kb_id, "out": out_id}}, "gates_detail": []}
+    (build / "verify_report.json").write_text(json.dumps(report), encoding="utf-8")
+    assert ks._gate_summary(build, kb_id, out_id)["state"] == "PASS"
+    writer.execute("INSERT INTO t VALUES (1)")
+    writer.commit()                             # 只写 WAL，不 checkpoint
+    cur_id = ks._identity(path)
+    assert cur_id["size_bytes"] == kb_id["size_bytes"]      # 主文件确实没变
+    assert cur_id.get("sidecars") != kb_id.get("sidecars")  # 但侧车变了
+    gates = ks._gate_summary(build, cur_id, out_id)
+    assert gates["state"] == "STALE" and gates["effective_verdict"] == "INVALID"
+    assert any("侧车" in r for r in gates["stale_reasons"])
+    writer.close()
+
+
+def test_unreadable_db_invalidates_matching_pass_report(tmp_path, monkeypatch):
+    """#56：库在盘但只读打开失败时，指纹匹配的 PASS 报告不作数。"""
+    from mianjing_kb import status as ks
+
+    build = tmp_path / "build"
+    build.mkdir()
+    path = build / "kb.sqlite"
+    path.write_bytes(b"this is not a sqlite database" * 100)
+    kb_id = ks._identity(path)
+    out_id = ks._identity(build / "missing.db")
+    report = {"summary": {"at": "now", "verdict": "PASS", "hard_fail": 0, "gates": {},
+                          "db_identity": {"kb": kb_id, "out": out_id}}, "gates_detail": []}
+    (build / "verify_report.json").write_text(json.dumps(report), encoding="utf-8")
+    health = {"kb": ks._open_probe(path), "out": ks._open_probe(build / "missing.db")}
+    assert health["kb"]["open_ok"] is False
+    gates = ks._gate_summary(build, kb_id, out_id, health=health)
+    assert gates["state"] == "STALE" and gates["effective_verdict"] == "INVALID"
+    assert any("无法只读打开" in r for r in gates["stale_reasons"])

@@ -144,6 +144,17 @@ def test_render_text_surfaces_retryable_llm_error(mini_env):
     assert "待重试 llm_error 1" in text
 
 
+def test_sql_error_renders_unknown_not_zero(tmp_path):
+    """#57：聚合 SQL 失败必须显式未知（None → "-"），不能伪装成健康的 0。"""
+    import sqlite3 as s3
+
+    from mianjing_kb import status as ks
+    con = s3.connect(":memory:")
+    assert ks._scalar(con, "SELECT COUNT(*) FROM missing_table") is None
+    assert ks._fmt(None) == "-"
+    con.close()
+
+
 def test_lock_summary_ignores_released_permanent_advisory_lock_file(mini_env):
     """wlock 文件永久保留；释放后不应继续显示为活跃锁。"""
     build = mini_env

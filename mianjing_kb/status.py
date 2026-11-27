@@ -31,7 +31,8 @@ STALE_SEC = 24 * 3600          # 门禁报告超过一天且库已变，标 STAL
 
 
 def _ro_uri(path: Path) -> str:
-    return Path(path).resolve().as_uri() + "?mode=ro"
+    from mianjing_kb.kb import db as kbdb
+    return kbdb.ro_uri(path)
 
 
 def _open_ro(path: Path) -> sqlite3.Connection | None:
@@ -43,6 +44,25 @@ def _open_ro(path: Path) -> sqlite3.Connection | None:
         return con
     except sqlite3.Error:
         return None
+
+
+def _open_probe(path: Path) -> dict:
+    """打开健康探测（候选 #56）：库在盘但打不开 ≠ 报告仍有效。
+
+    sqlite3.connect 是惰性的，必须真正执行一条查询才能发现损坏/权限问题。
+    """
+    if not path.exists():
+        return {"present": False}
+    con = _open_ro(path)
+    if con is None:
+        return {"present": True, "open_ok": False}
+    try:
+        con.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+        return {"present": True, "open_ok": True}
+    except sqlite3.Error:
+        return {"present": True, "open_ok": False}
+    finally:
+        con.close()
 
 
 def _table_exists(con, name: str) -> bool:
@@ -57,19 +77,18 @@ def _column_exists(con, table: str, column: str) -> bool:
 
 
 def _scalar(con, sql: str, default: int | None = 0) -> int | None:
+    """聚合失败返回 None（未知），不再把 SQL 错误伪装成健康的 0（候选 #57）。"""
     try:
         row = con.execute(sql).fetchone()
         return int(row[0]) if row and row[0] is not None else default
     except sqlite3.Error:
-        return default
+        return None
 
 
 def _identity(path: Path) -> dict:
-    try:
-        s = path.stat()
-        return {"path": str(path), "size_bytes": s.st_size, "mtime_ns": s.st_mtime_ns}
-    except OSError:
-        return {"path": str(path), "missing": True}
+    """与 verify_ledger._db_identity 同口径：主文件 + WAL/SHM 侧车（候选 #58）。"""
+    from mianjing_kb import verify_ledger as vl
+    return vl._db_identity(path)
 
 
 def _load_json(path: Path) -> dict | None:
@@ -205,7 +224,8 @@ def _retrieval_summary(path: Path) -> dict:
         con.close()
 
 
-def _gate_summary(build_dir: Path, kb_id: dict, out_id: dict) -> dict:
+def _gate_summary(build_dir: Path, kb_id: dict, out_id: dict,
+                  health: dict | None = None) -> dict:
     report = _load_json(build_dir / "verify_report.json")
     if not report:
         return {"present": False, "state": "MISSING",
@@ -223,6 +243,15 @@ def _gate_summary(build_dir: Path, kb_id: dict, out_id: dict) -> dict:
                 old.get("mtime_ns") != cur.get("mtime_ns"):
             stale = True
             reasons.append(f"{name}:库已变化")
+        elif (old.get("sidecars") or {}) != (cur.get("sidecars") or {}):
+            # #58：WAL-only 提交不动主文件；侧车指纹变了同样算过期
+            stale = True
+            reasons.append(f"{name}:WAL/侧车已变化")
+        if health and name in health and health[name].get("open_ok") is False:
+            # #56：库在盘但打不开（ACL/损坏/侧车权限）时，匹配的 PASS 报告不作数。
+            # 库缺失不算健康问题——缺失一致性由上面的指纹比对负责（missing==missing 合法）。
+            stale = True
+            reasons.append(f"{name}:库无法只读打开")
     age = None
     try:
         age = int(time.time() - (build_dir / "verify_report.json").stat().st_mtime)
@@ -315,7 +344,8 @@ def collect() -> dict:
         if kb_con is not None:
             kb_con.close()
     kb_id, out_id = _identity(kb_path), _identity(online)
-    gates = _gate_summary(build, kb_id, out_id)
+    health = {"kb": _open_probe(kb_path), "out": _open_probe(online)}
+    gates = _gate_summary(build, kb_id, out_id, health=health)
     attention = []
     if not kb.get("present"):
         attention.append("kb.sqlite 不存在")
