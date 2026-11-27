@@ -41,7 +41,11 @@ LEDGER = Path(config.DB_PATH)
 SEARCH_DB = BUILD / "面经库.db"
 MD_ROOT = Path(config.QUESTION_MD_DIR)
 CORPUS = Path(config.CORPUS_ROOT)
-CONVERTER = CORPUS / "21-面经数据库" / "tools" / "convert_one.py"
+# #13：转化器仓内优先（vendored 固定版）；语料侧仅作 fallback，
+# 不再默认执行语料树里的 Python 脚本。
+_REPO_CONVERTER = REPO / "mianjing_kb" / "kb" / "convert_one.py"
+_CORPUS_CONVERTER = CORPUS / "21-面经数据库" / "tools" / "convert_one.py"
+CONVERTER = _REPO_CONVERTER if _REPO_CONVERTER.is_file() else _CORPUS_CONVERTER
 
 PLAN_FILE = BUILD / "backfill_a.json"
 CONVERT_LOG = BUILD / "backfill_convert_log.json"

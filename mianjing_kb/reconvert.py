@@ -41,11 +41,20 @@ def _load_convert_one():
     except ModuleNotFoundError as ex:
         if ex.name not in ("mianjing_kb.kb.convert_one", "mianjing_kb.kb"):
             raise                    # 仓内版本自身依赖缺失，不能被误报成"没配语料根"
+    # #13：fallback 只按**精确文件路径**加载语料侧 convert_one.py——
+    # 不再把语料 tools 目录塞进 sys.path 后 `import convert_one`（那会执行
+    # 路径上任何同名模块，低信任语料可借目录抢占导入）。
     tools_dir = config.CORPUS_ROOT / "21-面经数据库" / "tools"
-    if tools_dir.is_dir() and str(tools_dir) not in sys.path:
-        sys.path.append(str(tools_dir))
-    import convert_one  # noqa: F401  语料侧存量转换器（仅 fallback）
-    return convert_one
+    target = (tools_dir / "convert_one.py").resolve()
+    if not target.is_file() or not target.is_relative_to(tools_dir.resolve()):
+        raise ModuleNotFoundError("convert_one", name="convert_one")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_corpus_convert_one", target)
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError("convert_one", name="convert_one")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _converter_source(cv) -> str:

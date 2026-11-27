@@ -123,8 +123,16 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=20261120)
     args = ap.parse_args(argv)
 
-    repo = Path(args.repo) if args.repo else Path.cwd()
-    sys.path.insert(0, str(repo))
+    # #79：import 根锚定到**本脚本所在的可信 checkout**，不再用 --repo/cwd
+    # 抢占 sys.path[0]（低信任目录可借同名包执行任意代码）。
+    # --repo 仅保留为兼容旗标：与脚本所在仓库不一致时明确拒绝。
+    trusted_repo = Path(__file__).resolve().parents[1]
+    if args.repo and Path(args.repo).resolve() != trusted_repo.resolve():
+        raise SystemExit(
+            f"--repo 必须指向本脚本所在仓库（{trusted_repo}）；"
+            "不支持从其他目录导入 mianjing_kb（代码执行信任边界）")
+    if str(trusted_repo) not in sys.path:
+        sys.path.insert(0, str(trusted_repo))
     from mianjing_kb.extract import text_of  # noqa: E402
     from mianjing_kb.llm_client import redact  # noqa: E402
 

@@ -30,6 +30,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# 审计候选 #84（2026-11-28）：本脚本已废弃且 Word COM 无进程级看门狗，
+# 异常 .doc 会卡死整个会话。直接拒绝执行，替代入口是有超时隔离的 doc_convert。
+throw '本脚本已废弃且无 COM 超时保护，拒绝执行。请改用：python -m mianjing_kb.doc_convert（逐文件子进程 + 看门狗）'
+
 if (-not $SourceRoot) {
     throw '请用 -SourceRoot 或环境变量 KB_CORPUS_ROOT 指定语料根（本脚本已废弃，优先用 tools\doc_convert.py）'
 }

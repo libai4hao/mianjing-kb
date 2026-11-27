@@ -79,7 +79,30 @@ def ensure_config(path: Path, overrides: dict | None = None) -> dict:
                 cfg[key] = value
         _write_json(path, cfg)
         print(f"[pilot] 已生成配置：{path}；请只填 llm.key 后再 run")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return _validate_config(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _validate_config(cfg: dict) -> dict:
+    """#66：配置是**代码承载物**——python/repo_root 决定子进程执行什么代码。
+
+    - python 必须是存在的可执行文件（拒绝任意命令串/参数注入）；
+    - repo_root 必须是含 mianjing_kb/cli.py 的真实仓库 checkout
+      （子进程 `-m mianjing_kb.cli` 从该目录解析模块，指向别处即执行别的代码）。
+    校验失败直接拒绝，不静默回退默认值（操作者必须知情）。
+    """
+    if not isinstance(cfg, dict):
+        raise RuntimeError("pilot 配置必须是 JSON 对象")
+    py = cfg.get("python")
+    if not isinstance(py, str) or not py or not Path(py).is_file():
+        raise RuntimeError(f"pilot 配置 python 不是存在的可执行文件: {py!r}")
+    repo = cfg.get("repo_root")
+    if not isinstance(repo, str) or not repo:
+        raise RuntimeError("pilot 配置缺少 repo_root")
+    repo_p = Path(repo)
+    if not (repo_p / "mianjing_kb" / "cli.py").is_file():
+        raise RuntimeError(
+            f"pilot 配置 repo_root 不是 mianjing-kb 仓库 checkout（缺 mianjing_kb/cli.py）: {repo}")
+    return cfg
 
 
 def _backup(src: Path, dst: Path) -> None:
