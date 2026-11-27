@@ -34,6 +34,12 @@ QTYPES = ["八股", "算法", "HR", "场景", "项目"]
 THINK_RE = re.compile(r"<think>.*?</think>", re.S)
 
 
+def _strip_think(text: str) -> str:
+    """线性剥离思考链（与 llm_client.strip_think 同口径，#45）。"""
+    from mianjing_kb.llm_client import strip_think
+    return strip_think(text)
+
+
 def chat(model: str, prompt: str, timeout: float = 300.0) -> tuple[str, float]:
     """OpenAI 兼容调用，返回 (回复文本, 延迟秒)。
 
@@ -49,7 +55,7 @@ def chat(model: str, prompt: str, timeout: float = 300.0) -> tuple[str, float]:
         data = json.loads(resp.read().decode("utf-8"))
     latency = time.perf_counter() - t0
     text = data["choices"][0]["message"]["content"]
-    return THINK_RE.sub("", text).strip(), latency
+    return _strip_think(text), latency
 
 
 def sample_questions(n: int, seed: int = 42) -> list[dict]:

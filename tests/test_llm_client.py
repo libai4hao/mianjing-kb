@@ -651,3 +651,60 @@ def test_redact_local_absolute_paths_without_touching_urls(tmp_path):
     assert "https://example.com/docs/path" in clean
     assert "https://example.com/user/alice/doc" in clean
     assert "请查收" in clean
+
+
+def test_redact_forward_slash_drive_paths():
+    """#33：正斜杠盘符路径同样遮罩（两种分隔符都算本机绝对路径）。"""
+    fwd = "C:" + "/" + "Users/demo/private.docx"
+    mixed = "D:" + "\\" + "work" + "/" + "面经.pdf"
+    raw = f"资料 {fwd} 请查收；混合 {mixed}；参考 https://example.com/docs/path"
+    clean, hit = redact(raw)
+    assert hit
+    assert "Users/demo" not in clean and "private.docx" not in clean
+    assert "面经.pdf" not in clean
+    assert "https://example.com/docs/path" in clean
+    # 引号包裹的正斜杠盘符路径
+    quoted = f'"{fwd}"'
+    clean2, hit2 = redact(quoted)
+    assert hit2 and "Users/demo" not in clean2
+
+
+def test_strip_think_linear_and_unmatched():
+    """#45：未闭合 <think> 线性截断，不再 O(n²) 回溯；正常闭合/嵌套仍剥离。"""
+    import time
+
+    from mianjing_kb.llm_client import strip_think
+    assert strip_think("答案<think>思考</think>正文") == "答案正文"
+    assert strip_think("前<think>未闭合" + "x" * 100000) == "前"
+    t0 = time.perf_counter()
+    strip_think("<think>" * 20000 + "y" * 200000)   # 大量未闭合标签
+    assert time.perf_counter() - t0 < 5
+
+
+def test_post_response_byte_cap(monkeypatch):
+    """#46：provider 响应体超上限按网络错误快速失败，不无限缓冲。"""
+    import io
+
+    from mianjing_kb import llm_client as lc
+
+    class FakeResp:
+        status = 200
+
+        def __init__(self, data):
+            self._buf = io.BytesIO(data)
+
+        def read(self, n=-1):
+            return self._buf.read(n)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    big = b"x" * (lc.MAX_RESPONSE_BYTES + 1024)
+    monkeypatch.setattr(lc._OPENER, "open", lambda *a, **k: FakeResp(big))
+    cfg = {"base": "http://localhost:11434/v1", "key": "", "timeout": 5,
+           "allow_content_upload": True}
+    st, resp = lc._post(cfg, {})
+    assert st == 0 and "error" in resp

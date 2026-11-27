@@ -683,6 +683,33 @@ def test_store_new_source_answer_replaces_old_llm_answer(tmp_env):
     assert tuple(row) == ("本次源文档答案", "ok", "", None, None)
 
 
+def test_literal_bracket_answer_is_real_content(tmp_env):
+    """#24：字面 "[]" 是合法答案/模型名，不得被当空值丢弃或覆盖。"""
+    corpus, conn = tmp_env
+    h, _ = _seed_doc(conn, corpus, "bracket.md", MD_A)
+    rows = extract.extract_doc(h, corpus / "bracket.md")
+    extract.store(conn, h, rows)
+    conn.execute(
+        "UPDATE questions SET a_text='旧模型答案', answer_source='llm', answer_model='m' "
+        "WHERE doc_hash=? AND seq=1", (h,))
+    conn.commit()
+    # 新源答案是字面 []：必须替换旧模型答案并清溯源
+    rows[0]["a_text"] = "[]"
+    extract.store(conn, h, rows)
+    row = conn.execute(
+        "SELECT a_text, answer_source, answer_model FROM questions WHERE doc_hash=? AND seq=1",
+        (h,)).fetchone()
+    assert tuple(row) == ("[]", "", None)
+    # 模型名为字面 [] 的旧行：属于硬溯源，hash 变化时默认拒绝替换
+    conn.execute("UPDATE questions SET answer_source='', answer_model='[]' "
+                 "WHERE doc_hash=? AND seq=1", (h,))
+    conn.commit()
+    changed = [dict(r) for r in rows]
+    changed[0]["q_norm_hash"] = "different-hash"
+    with pytest.raises(extract.StateLossError):
+        extract.store(conn, h, changed)
+
+
 @pytest.mark.parametrize("source", ["llm_refused", "llm_error"])
 def test_store_inherits_empty_answer_terminal_state(tmp_env, source):
     corpus, conn = tmp_env

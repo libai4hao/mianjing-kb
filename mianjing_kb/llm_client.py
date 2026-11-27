@@ -240,10 +240,12 @@ KEY_MARK = "[LLM_KEY]"
 # 这类路径既是个人信息（用户名）又是本机目录结构，外发前必须遮罩。
 # 前一个字符不能是字母/数字/下划线/斜杠/冒号——避免把 URL 里同名家目录片段当成路径；
 # 中文字符不在排除集里，所以"路径是" + 盘符开头仍能命中。带空格的路径需原文加引号。
-_RE_LOCAL_PATH_QUOTED = re.compile(r'''(["'])((?:[A-Za-z]:\\|\\\\)[^\r\n]*?)\1''')
+# #33：盘符路径也接受正斜杠（盘符 + 斜杠 + 用户目录）——Windows 绝对路径两种分隔符都遮罩。
+# 前一字符排除集不含正斜杠于盘符分支前，避免把 URL 里同形片段误判（盘符后须紧跟分隔符）。
+_RE_LOCAL_PATH_QUOTED = re.compile(r'''(["'])((?:[A-Za-z]:[\\/]|\\\\)[^\r\n]*?)\1''')
 _RE_LOCAL_PATH = re.compile(
     r"""(?<![A-Za-z0-9_/\\:])"""
-    r"""(?:[A-Za-z]:\\[^\s<>"'，,。；;、）)】]+"""
+    r"""(?:[A-Za-z]:[\\/][^\s<>"'，,。；;、）)】]+"""
     r"""|\\\\[^\s\\/]+\\[^\s\\/]+\\[^\s<>"'，,。；;、）)】]+"""
     r"""|/(?:home|Users|mnt/[a-z]/Users)/[^\s<>"'，,。；;、）)】]+)""")
 # 技术文档 URL 是题干上下文，保留 host/path；只清洗 userinfo、敏感 query 与 fragment。
@@ -415,6 +417,24 @@ class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_RefuseRedirect())
 
 
+# #46：provider 响应体字节上限——正常 chat 响应远小于此；超限按网络错误快速失败，
+# 不无限缓冲（urllib timeout 只管 socket，不管总传输量）。
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+
+def _read_capped(resp, cap: int = MAX_RESPONSE_BYTES) -> bytes:
+    """有界读取响应体；超过 cap 抛 OSError（调用方归一为网络错误）。"""
+    buf = bytearray()
+    while True:
+        chunk = resp.read(min(1 << 20, cap + 1 - len(buf)))
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > cap:
+            raise OSError(f"provider 响应体超过 {cap} 字节上限")
+    return bytes(buf)
+
+
 def _post(cfg: dict, payload: dict) -> tuple[int, dict]:
     """POST /chat/completions。返回 (status, resp)；网络层异常归一为 (0, {"error": ...})。
 
@@ -433,14 +453,14 @@ def _post(cfg: dict, payload: dict) -> tuple[int, dict]:
         method="POST")
     try:
         with _OPENER.open(req, timeout=cfg["timeout"]) as resp:
-            return resp.status, json.loads(resp.read().decode("utf-8", "replace") or "{}")
+            return resp.status, json.loads(_read_capped(resp).decode("utf-8", "replace") or "{}")
     except urllib.error.HTTPError as e:
         if 300 <= e.code < 400:
             loc = (e.headers.get("Location", "") if e.headers else "") or "未知地址"
             return e.code, {"error": scrub_secret(
                 f"HTTP {e.code} 重定向被拒绝（禁止把请求与凭据转发到 {loc}）", cfg)}
         try:
-            body = json.loads(e.read().decode("utf-8", "replace"))
+            body = json.loads(_read_capped(e).decode("utf-8", "replace"))
         except Exception:  # noqa: BLE001
             body = {"raw": scrub_secret(str(e), cfg)}
         if isinstance(body, dict) and body.get("error"):
@@ -448,6 +468,29 @@ def _post(cfg: dict, payload: dict) -> tuple[int, dict]:
         return e.code, body
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         return 0, {"error": scrub_secret(f"{type(e).__name__}: {e}", cfg)}
+
+
+def strip_think(text: str) -> str:
+    """线性剥离 <think>...</think> 思考链（#45）。
+
+    旧实现 re.sub(r"<think>.*?</think>", DOTALL) 对未闭合标签是 O(n²) 回溯：
+    每个 <think> 都要扫到串尾找闭合。这里用 find 顺序消费，未闭合的 <think>
+    直接截到串尾（思考链无闭合即丢弃其后内容），嵌套按最近闭合配对。
+    """
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        start = text.find("<think>", i)
+        if start < 0:
+            out.append(text[i:])
+            break
+        out.append(text[i:start])
+        end = text.find("</think>", start + 7)
+        if end < 0:
+            break               # 未闭合：丢弃其后全部内容
+        i = end + 8
+    return "".join(out).strip()
 
 
 def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
@@ -508,7 +551,7 @@ def chat(cfg: dict, system: str, user: str, *, json_mode: bool = False,
                 text = resp["choices"][0]["message"]["content"] or ""
             except (KeyError, IndexError, TypeError):
                 text = ""
-            text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()  # 思考链兜底剥离
+            text = strip_think(text)  # 思考链兜底剥离（线性，#45）
             u = resp.get("usage") or {}
             return {"text": text, "latency_ms": latency,
                     "prompt_tokens": int(u.get("prompt_tokens") or 0),

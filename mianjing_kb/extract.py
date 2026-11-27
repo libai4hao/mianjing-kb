@@ -348,12 +348,22 @@ def _prepare_rows_preserving_state(conn, doc_hash: str, rows: list[dict], *,
     new_rows = [dict(r) for r in rows]
 
     def present(value) -> bool:
+        """治理字段（JSON 数组类）非空判定：字面 [] 是空数组哨兵。"""
         if value is None:
             return False
         return str(value).strip() not in ("", "[]")
 
+    def present_scalar(value) -> bool:
+        """#24：标量文本（答案/模型名）非空判定——字面 "[]" 是合法内容，不是空。
+
+        答案 "[]" 或模型名 "[]" 不得被当成空值而丢弃/覆盖。
+        """
+        if value is None:
+            return False
+        return str(value).strip() != ""
+
     def has_provenance(old: dict) -> bool:
-        return any(present(old.get(c)) for c in ("answer_source", "answer_model"))
+        return any(present_scalar(old.get(c)) for c in ("answer_source", "answer_model"))
 
     def governed(old: dict) -> bool:
         if has_provenance(old):
@@ -450,7 +460,7 @@ def _prepare_rows_preserving_state(conn, doc_hash: str, rows: list[dict], *,
         old = old_by_hash_one.get(str(row.get("q_norm_hash") or ""))
         if old is None:
             continue
-        if not present(row.get("a_text")):
+        if not present_scalar(row.get("a_text")):
             row["a_text"] = old.get("a_text")
             for col in answer_cols:
                 if col != "a_text":
