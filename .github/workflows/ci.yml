@@ -57,9 +57,8 @@ jobs:
       - name: 安装依赖（含平台标记的 pywin32）
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install ruff
-          python -m pip install -e . --no-deps
+          # 走 extras：运行时依赖取自 pyproject，开发工具（pytest/ruff/openpyxl）取自 [dev]
+          python -m pip install -e ".[dev]"
 
       - name: ruff
         run: python -m ruff check mianjing_kb tests scripts

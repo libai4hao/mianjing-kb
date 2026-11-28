@@ -12,9 +12,10 @@ sqlite-vec>=0.1.6        # sqlite-vec 扩展：vec_questions 虚拟表
 # ---- Windows 专属（doc_convert / question_freq 的 .doc 抽取）----
 pywin32>=306; sys_platform == "win32"
 
-# ---- 开发与门禁 ----
+# ---- 开发与门禁（与 pyproject [dev] 严格等价，tests/test_dependency_manifest.py 校验）----
 pytest>=8
 pyflakes>=3
+ruff>=0.6
 openpyxl>=3.1           # scripts/gen_answer_baseline.py 读标注工作簿；tests/test_xlsx_budget.py 造表
 
 # 非 pip 依赖（需单独安装，代码里按路径调用）：

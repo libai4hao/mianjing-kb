@@ -11,9 +11,12 @@
 ## 安装
 
 ```powershell
-python -m pip install -r requirements.txt      # 运行时：PyYAML / pymupdf / fastembed / sqlite-vec / pywin32(仅 Windows)；开发：pytest / openpyxl
-python -m pip install -e .                    # 装出 `kb` 命令入口（等价于 python mianjing_kb/<step>.py）
+python -m pip install -e ".[dev]"             # 运行时依赖 + 开发门禁（pytest / ruff / pyflakes / openpyxl），顺带装出 `kb` 入口
+python -m pip install -r requirements.txt     # 等价的清单式安装（CI 的 linux-deps 用它验证依赖可解析）
 ```
+
+两份清单（`requirements.txt` 与 `pyproject.toml` 的依赖 + `[dev]`）必须一致，由
+`tests/test_dependency_manifest.py` 强制校验。
 
 Python ≥ 3.11。OCR 不是 pip 包：需另装 [PaddleOCR-json](https://github.com/hiroi-sora/PaddleOCR-json) v2.1.5，
 并用 `KB_OCR_ENGINE_DIR` 指向包含 `PaddleOCR-json.exe` 的安装目录。
