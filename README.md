@@ -11,7 +11,7 @@
 ## 安装
 
 ```powershell
-python -m pip install -r requirements.txt      # PyYAML / pymupdf / fastembed / sqlite-vec / pywin32(仅 Windows)
+python -m pip install -r requirements.txt      # 运行时：PyYAML / pymupdf / fastembed / sqlite-vec / pywin32(仅 Windows)；开发：pytest / openpyxl
 python -m pip install -e .                    # 装出 `kb` 命令入口（等价于 python mianjing_kb/<step>.py）
 ```
 
